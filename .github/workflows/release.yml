@@ -1,0 +1,45 @@
+name: release
+
+# Auto-tag and publish a GitHub release whenever __version__ lands on main.
+# Idempotent: if the version is unchanged, the tag already exists and this is a
+# no-op. Pairs with the version-bump gate in ci.yml, which guarantees
+# __version__ changes whenever src/cairn/ does.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve version
+        id: v
+        run: |
+          version=$(grep -Po '(?<=^__version__ = ")[^"]+' src/cairn/__init__.py)
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::__version__ '$version' is not valid X.Y.Z semver."
+            exit 1
+          fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+      - name: Create release if the tag is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.v.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag already released — nothing to do."
+            exit 0
+          fi
+          gh release create "$tag" --title "$tag" --generate-notes
