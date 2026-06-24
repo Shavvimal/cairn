@@ -1,6 +1,7 @@
 # cairn
 
 [![CI](https://github.com/Shavvimal/cairn/actions/workflows/ci.yml/badge.svg)](https://github.com/Shavvimal/cairn/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/Shavvimal/cairn)](https://github.com/Shavvimal/cairn/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 
