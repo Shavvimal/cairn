@@ -1,5 +1,7 @@
 # cairn
 
+> **cairn** *(n.)* — from Scottish Gaelic *càrn*, "a heap of stones." A pile of stones stacked one at a time to mark a trail, so the next traveler — or you on the way back — never loses the path.
+
 **Local memory for AI coding agents.** Give Claude Code, Codex, and Cursor persistent, searchable context across sessions — all on your machine. Nothing leaves your computer.
 
 ```txt
