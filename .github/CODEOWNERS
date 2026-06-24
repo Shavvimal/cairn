@@ -1,0 +1,3 @@
+# Default owner for everything in the repo.
+# Required by the "require code owner review" branch protection rule.
+* @Shavvimal
