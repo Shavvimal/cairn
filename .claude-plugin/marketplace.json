@@ -1,0 +1,12 @@
+{
+  "name": "cairn",
+  "owner": { "name": "Shav Vimalendiran" },
+  "description": "cairn — your coding agents' memory, 100% local. Run /cairn:setup once to install the engine.",
+  "plugins": [
+    {
+      "name": "cairn",
+      "source": "./",
+      "description": "Local, searchable memory for AI coding agents — Claude Code, Codex, Cursor & Granola, indexed on-device with QMD. Run /cairn:setup first to install the cairn CLI + qmd and register the hourly sync."
+    }
+  ]
+}

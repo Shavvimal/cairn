@@ -1,0 +1,18 @@
+{
+  "name": "cairn",
+  "description": "Local, searchable memory for AI coding agents - Claude Code, Codex, Cursor & Granola, indexed on-device with QMD.",
+  "author": { "name": "Shav Vimalendiran" },
+  "homepage": "https://github.com/shavvimal/cairn",
+  "repository": "https://github.com/shavvimal/cairn",
+  "license": "MIT",
+  "keywords": [
+    "sessions",
+    "context",
+    "search",
+    "qmd",
+    "claude-code",
+    "codex",
+    "cursor",
+    "granola"
+  ]
+}

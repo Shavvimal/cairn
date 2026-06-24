@@ -1,0 +1,64 @@
+{
+  "//": "Copy this file to cairn.config.json and edit for your machine. cairn.config.json is git-ignored. 'cairn config init' writes this template (with your --data-root / --enable choices) to ~/.config/cairn/config.json.",
+  "//data_root": "Directory under which each collection's exported markdown is written (one subfolder per collection). Conventionally a git-ignored .context/ so the repo stays shareable.",
+  "data_root": "~/Code/cairn/.context",
+  "//qmd_binary": "Path to the qmd executable, or just 'qmd' if it is on your PATH (use an absolute path if cron's minimal PATH can't find it).",
+  "qmd_binary": "qmd",
+  "//cron": "Optional. Schedule for 'cairn sync --cron' as a standard 5-field crontab expression. Defaults to '7 * * * *' (hourly at minute 7) when omitted.",
+  "cron": { "schedule": "7 * * * *" },
+  "//collections": "Each key is BOTH the QMD collection name AND the output subdirectory under data_root.",
+  "//sync": "Per-collection sync policy (config-as-data). 'enabled' is the integration on/off switch the engine reads - disabled sources are skipped by 'cairn sync'. 'since' is the export window (today|yesterday|Nd|Nw|YYYY-MM-DD). 'on_hook' runs the source on the fast SessionEnd hook (default: Claude only). Omitting the whole block means enabled with a 1d window.",
+  "collections": {
+    "claude-code-sessions": {
+      "store": "~/.claude/projects",
+      "sync": { "enabled": true, "since": "1d", "on_hook": true }
+    },
+    "codex-sessions": {
+      "store": "~/.codex/sessions",
+      "sync": { "enabled": true, "since": "1d" }
+    },
+    "cursor-sessions": {
+      "store": "~/Library/Application Support/Cursor/User",
+      "sync": { "enabled": true, "since": "1d" }
+    },
+    "granola-sessions": {
+      "store": "~/Library/Application Support/Granola",
+      "extra": { "api_base": "https://api.granola.ai" },
+      "sync": { "enabled": true, "since": "1d" }
+    },
+    "service-docs": {
+      "extra": {
+        "description": "Collection-level QMD context for all service docs."
+      },
+      "//service_sources": "service name -> docs directory to mirror into the collection.",
+      "service_sources": {
+        "api": {
+          "path": "~/Code/your-product/api/docs",
+          "description": "Describe this service for QMD context."
+        }
+      },
+      "sync": { "enabled": true }
+    }
+  },
+  "//path_resolution": "Optional. Used to map agent project dirs to project/repo names. home_slug_prefixes is derived from your home dir if omitted.",
+  "path_resolution": {
+    "code_prefix": "~/Code",
+    "superset_prefix": "~/.superset/worktrees"
+  },
+  "//project_groups": "Maps a directory-name prefix to its grouped project folder (e.g. worktrees -> parent repo). The optional key 'superset-worktrees' names the project that .superset worktrees belong to.",
+  "project_groups": {
+    "your-product": "your-product"
+  },
+  "//repo_catalog": "project group -> { repo name: description }. Drives repo subfolders and QMD context.",
+  "repo_catalog": {
+    "your-product": {
+      "api": "Describe the api repo.",
+      "dashboard": "Describe the dashboard repo."
+    }
+  },
+  "//project_descriptions": "Top-level project -> human description, attached to QMD as context.",
+  "project_descriptions": {
+    "your-product": "Describe your product.",
+    "notes": "Personal notes and research"
+  }
+}

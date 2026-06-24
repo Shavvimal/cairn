@@ -1,0 +1,184 @@
+# Claude Session Tags Schema
+# Agent reads this file for valid tags and auto-detection keywords
+# Location: skills/cairn/schema/tags.yaml
+
+tags:
+  # === Type of Work ===
+
+  research:
+    description: "Deep investigation of specific topics, gathering information, and exploring solutions."
+    keywords:
+      - "figure out"
+      - "research"
+      - "explore"
+      - "find information"
+      - "how to"
+      - "setup guide"
+    examples:
+      - "YouTube Studio Setup Research - extensive product research and budget breakdown"
+      - "Lab onboarding workflow design - investigating client onboarding process"
+      - "Vault analysis and frontmatter schema investigation"
+
+  implementation:
+    description: "Building, coding, or executing features and technical solutions."
+    keywords:
+      - "implement"
+      - "build"
+      - "create skill"
+      - "develop"
+      - "code"
+      - "execute"
+      - "script"
+    examples:
+      - "Sync-claude-sessions skill refactoring with core.py extraction"
+      - "Fitness-log skill design and Excalidraw diagram creation"
+      - "Lab automation pipeline design with Zoom transcript processing"
+
+  debugging:
+    description: "Troubleshooting problems, fixing broken functionality, and root cause analysis."
+    keywords:
+      - "debug"
+      - "fix"
+      - "error"
+      - "broken"
+      - "doesn't work"
+      - "not rendering"
+      - "issue"
+      - "troubleshoot"
+    examples:
+      - "Excalidraw scorecard diagram rendering - missing link property"
+      - "Fitness-log skill macro estimation and image handling"
+      - "Claude Code session sync hook development"
+
+  planning:
+    description: "Strategy design, workflow architecture, and decision-making around approaches."
+    keywords:
+      - "plan"
+      - "strategy"
+      - "workflow"
+      - "design"
+      - "approach"
+      - "roadmap"
+      - "priorities"
+      - "system"
+    examples:
+      - "Lab automation detailed planning - Zoom processing, YouTube upload"
+      - "Priority system design and command center architecture"
+      - "Sync-claude-sessions skill refactoring with workflows"
+
+  brainstorm:
+    description: "Open-ended ideation, exploring possibilities, and conceptual thinking."
+    keywords:
+      - "brainstorm"
+      - "ideas"
+      - "explore"
+      - "what if"
+      - "concept"
+      - "spinoff"
+      - "creative"
+    examples:
+      - "OpenClaw vs Claude Code video concepts with comparison scorecard"
+      - "Lab week 3 content and workshop improvements"
+      - "Vault entity analysis and frontmatter schema exploration"
+
+  admin:
+    description: "Administrative tasks, application processes, bureaucratic requirements."
+    keywords:
+      - "form"
+      - "application"
+      - "document"
+      - "onboard"
+      - "paperwork"
+      - "setup"
+      - "config"
+      - "permit"
+    examples:
+      - "PGWP application - document collection and form filling"
+      - "Lab client onboarding workflow and GitHub invite process"
+      - "Samsung T7 backup and GitHub recovery codes transfer"
+
+  quick:
+    description: "Short, focused, single-purpose tasks completed in one session."
+    keywords:
+      - "quick"
+      - "fast"
+      - "simple"
+      - "add"
+      - "update"
+      - "brief"
+      - "one thing"
+    examples:
+      - "Alfred text expansion setup request"
+      - "Hook testing and basic conversation"
+      - "Quick fix for deploy script path"
+
+  video:
+    description: "Video production, scripting, slides, and content creation for YouTube."
+    keywords:
+      - "video"
+      - "slide"
+      - "script"
+      - "youtube"
+      - "outline"
+      - "thumbnail"
+      - "recording"
+    examples:
+      - "OpenClaw vs Claude Code video slides creation"
+      - "Video outline for Claude Code features"
+      - "Lab thumbnail generation with style variations"
+
+  automation:
+    description: "Setting up automated workflows, scripts, and continuous processes."
+    keywords:
+      - "automation"
+      - "script"
+      - "hook"
+      - "workflow"
+      - "auto-sync"
+      - "background"
+      - "trigger"
+    examples:
+      - "Lab automation with Zoom transcripts, YouTube upload"
+      - "Live session sync hook for Claude Code"
+      - "Sync-claude-sessions live hook and batch export"
+
+  writing:
+    description: "Content writing, email drafting, and documentation creation."
+    keywords:
+      - "write"
+      - "email"
+      - "draft"
+      - "content"
+      - "document"
+      - "article"
+      - "description"
+    examples:
+      - "Workshop postponement email drafting"
+      - "Partnership call reflection notes"
+      - "Session documentation and braindump processing"
+
+  # === Project Tags (CUSTOMIZE THESE) ===
+  # The type tags above are universal. Project tags are yours to define - replace the
+  # examples below with your own products/repos so the log workflow can auto-detect them.
+
+  your-product:
+    description: "Example product tag - rename to your project; list its repos/keywords here."
+    keywords:
+      - "your-product"
+      - "api"
+      - "dashboard"
+      - "webhook"
+    examples:
+      - "Webhook processing refactor in your-product/api"
+      - "Dashboard feature work"
+
+  notes:
+    description: "Personal notes, research, and writing."
+    keywords:
+      - "notes"
+      - "research"
+      - "writing"
+      - "blog"
+    examples:
+      - "Notes organization"
+      - "Research into new tools and approaches"

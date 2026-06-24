@@ -1,0 +1,154 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+develop-eggs/
+eggs/
+*.egg-info/
+*.egg
+sdist/
+wheels/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Type checkers
+.mypy_cache/
+.pytype/
+.pyre/
+
+# Jupyter
+.ipynb_checkpoints
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Django
+db.sqlite3
+db.sqlite3-journal
+
+# Flask
+instance/
+
+# Scrapy
+.scrapy
+
+# Node.js / TypeScript
+node_modules/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage/
+*.lcov
+.nyc_output/
+
+# Caches
+.npm
+.eslintcache
+.stylelintcache
+.cache
+.parcel-cache
+
+# Build output
+dist/
+out/
+
+# Framework-specific
+.next
+.nuxt
+.output
+.svelte-kit/
+.vite/
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+.docusaurus
+
+# Serverless
+.serverless/
+
+# Package output
+*.tgz
+
+# Yarn
+.yarn-integrity
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# pnpm
+.pnpm-store
+
+# Ruff
+.ruff_cache/
+
+# Docker
+data/
+
+# Environment / Secrets
+.env
+.env.*
+!.env.example
+
+# Cairn machine-specific config (the example template IS committed)
+cairn.config.json
+
+# Synced collections + logs live here; personal data, never shipped with the code.
+.context/
+
+# IDE / Editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+.project
+.classpath
+.settings/
+
+# Local data (e2e workspaces, docker volumes)
+data/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
