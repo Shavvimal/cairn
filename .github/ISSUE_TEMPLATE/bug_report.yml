@@ -1,0 +1,56 @@
+name: Bug report
+description: Report something in cairn that isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill in the sections
+        below. For security vulnerabilities, do **not** use this form — see
+        [SECURITY.md](../blob/main/SECURITY.md) and report privately instead.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran (e.g. `cairn sync --hook`).
+      placeholder: |
+        1. Run `cairn ...`
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: What you expected to happen, and what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Output of `cairn --version`, plus your OS and Python version.
+      placeholder: |
+        cairn: 2.0.0
+        OS: macOS 15.5
+        Python: 3.12.4
+        qmd: 0.x
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: >
+        A relevant excerpt from `<data_root>/logs/context-sync.log`. Scrub any
+        sensitive session content first.
+      render: text
+    validations:
+      required: false

@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -21,3 +29,34 @@ jobs:
       - run: uv run ruff format --check src tests
       - run: uv run mypy
       - run: uv run python -m unittest discover -s tests
+
+  version-bump:
+    name: version-bump
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require version bump when src/ changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          file="src/cairn/__init__.py"
+          changed=$(git diff --name-only "$BASE_SHA"...HEAD -- 'src/cairn/**')
+          if [ -z "$changed" ]; then
+            echo "No src/cairn changes; version bump not required."
+            exit 0
+          fi
+          extract() { grep -Po '(?<=^__version__ = ")[^"]+'; }
+          head_v=$(extract < "$file")
+          base_v=$(git show "$BASE_SHA:$file" | extract)
+          echo "base=$base_v head=$head_v"
+          if ! [[ "$head_v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::__version__ '$head_v' is not valid X.Y.Z semver."
+            exit 1
+          fi
+          if [ "$base_v" = "$head_v" ]; then
+            echo "::error::src/cairn changed but __version__ is still $head_v — bump it."
+            exit 1
+          fi
