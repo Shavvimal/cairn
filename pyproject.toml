@@ -29,7 +29,7 @@ packages = ["src/cairn"]
 
 # Dev tooling stays OUT of the wheel (runtime dependencies remain []).
 [dependency-groups]
-dev = ["ruff>=0.6", "mypy>=1.11"]
+dev = ["ruff>=0.15.19", "mypy>=1.11"]
 
 [tool.ruff]
 target-version = "py311"
