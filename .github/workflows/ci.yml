@@ -61,7 +61,11 @@ jobs:
             echo "::error::__version__ '$head_v' is not valid X.Y.Z semver."
             exit 1
           fi
-          if [ "$base_v" = "$head_v" ]; then
-            echo "::error::a user-facing file changed but __version__ is still $head_v — bump it."
+          # Must be a strict INCREASE, not merely different. dpkg --compare-versions is
+          # Debian Policy's reference comparator (correct on 2.10.0 > 2.9.0, where a string
+          # compare is wrong); 'base lt head' holds only when the version genuinely went up,
+          # which also rejects an unchanged version and accidental downgrades.
+          if ! dpkg --compare-versions "$base_v" lt "$head_v"; then
+            echo "::error::__version__ must increase: base=$base_v head=$head_v."
             exit 1
           fi
