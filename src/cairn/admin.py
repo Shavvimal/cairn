@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -20,10 +21,12 @@ from .config import (
     Collection,
     ConfigError,
     example_template_text,
+    expand,
     get_config,
     load_config_from,
     user_config_path,
 )
+from .qmd import list_collections
 from .sync import SOURCE_COLLECTIONS
 
 _CRON_TAG = "cairn sync"  # substring used to find/replace our line idempotently
@@ -97,15 +100,19 @@ def _config_show_path() -> int:
 
 
 def _collection_view(name: str, coll: Collection) -> dict:
-    """Machine-readable summary of one collection's sync policy + store."""
-    return {
+    """Machine-readable summary of one collection's sync policy + store/sources."""
+    view = {
         "name": name,
         "enabled": coll.sync.enabled,
         "since": coll.sync.since,
         "on_hook": coll.sync.on_hook,
         "store": str(coll.store) if coll.store else None,
-        "type": "service-docs" if coll.service_sources else "sessions",
+        # service-docs is the store-less collection; sessions all have a store.
+        "type": "service-docs" if coll.store is None else "sessions",
     }
+    if coll.service_sources:
+        view["service_sources"] = {s.name: str(s.path) for s in coll.service_sources}
+    return view
 
 
 def _config_show(as_json: bool) -> int:
@@ -143,6 +150,8 @@ def _config_show(as_json: bool) -> int:
         hook = "" if c["on_hook"] is None else f" on_hook={c['on_hook']}"
         store = f" store={c['store']}" if c["store"] else ""
         print(f"  {c['name']:22} [{state}] since={c['since']}{hook}{store}")
+        for src_name, src_path in (c.get("service_sources") or {}).items():
+            print(f"      docs[{src_name}] = {src_path}")
     return 0
 
 
@@ -194,8 +203,14 @@ def _set_dotted(data: dict, key: str, value: str) -> None:
     )
 
 
-def _config_set(key: str, value: str) -> int:
-    """Write one config value to the in-effect config file, failing loud if it invalidates it."""
+def _edit_config(apply) -> int:
+    """Read the in-effect config, apply ``apply(data)``, write it back, validate, restore.
+
+    ``apply`` mutates the parsed JSON in place and returns the success message to print;
+    it may raise ``ValueError`` to reject the edit with a message. If the written file
+    fails to load we put the original back (§8: never leave a half-valid config behind -
+    fail loud and undo). Shared by ``set`` / ``add-service-doc`` / ``remove-service-doc``.
+    """
     try:
         target = get_config().config_path
     except ConfigError:
@@ -212,23 +227,91 @@ def _config_set(key: str, value: str) -> int:
         return 1
 
     try:
-        _set_dotted(data, key, value)
+        message = apply(data)
     except ValueError as e:
-        print(f"Cannot set {key!r}: {e}", file=sys.stderr)
+        print(str(e), file=sys.stderr)
         return 1
 
     target.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    # Validate the file we just wrote; restore it if the change broke the config (§8: never
-    # leave a half-valid config behind - fail loud and undo).
     try:
         load_config_from(target)
     except ConfigError as e:
         target.write_text(original, encoding="utf-8")
-        print(f"Rejected: {key}={value} made the config invalid ({e}). Restored.", file=sys.stderr)
+        print(f"Rejected: that change made the config invalid ({e}). Restored.", file=sys.stderr)
         return 1
     get_config.cache_clear()  # so later reads in this process see the change
-    print(f"Set {key} = {value}")
+    print(message)
     return 0
+
+
+def _config_set(key: str, value: str) -> int:
+    """Write one config value to the in-effect config file, failing loud if it invalidates it."""
+
+    def apply(data: dict) -> str:
+        try:
+            _set_dotted(data, key, value)
+        except ValueError as e:
+            raise ValueError(f"Cannot set {key!r}: {e}") from e
+        return f"Set {key} = {value}"
+
+    return _edit_config(apply)
+
+
+def _template_service_sources() -> dict:
+    """The bundled template's placeholder ``service_sources`` (used to detect 'untouched')."""
+    data = json.loads(example_template_text())
+    return data.get("collections", {}).get("service-docs", {}).get("service_sources", {})
+
+
+def _config_add_service_doc(name: str, path: str, description: str | None) -> int:
+    """Add (or update) one ``service-docs`` source folder. Validates the path exists.
+
+    Service docs are configured by *folder*, not by a single store, so they need their
+    own command (``cairn config set`` only handles scalar collection fields). The first
+    real add clears the bundled placeholder so a fresh config doesn't keep mirroring a
+    non-existent ``~/Code/your-product/...`` path.
+    """
+    expanded = expand(path)
+    if not expanded.is_dir():
+        print(f"Path not found or not a directory: {expanded}", file=sys.stderr)
+        return 1
+    desc = description or f"{name} service docs"
+
+    def apply(data: dict) -> str:
+        spec = data.get("collections", {}).get("service-docs")
+        if not isinstance(spec, dict):
+            raise ValueError("no 'service-docs' collection in config")
+        sources = spec.get("service_sources")
+        if not isinstance(sources, dict) or sources == _template_service_sources():
+            sources = {}  # drop the untouched placeholder on first real add
+        sources[name] = {"path": path, "description": desc}
+        spec["service_sources"] = sources
+        return f"Added service doc source {name!r} -> {path}"
+
+    rc = _edit_config(apply)
+    if rc == 0:
+        coll = get_config().collections.get("service-docs")
+        if coll is not None and not coll.sync.enabled:
+            print("note: service-docs is disabled; enable it with")
+            print("  cairn config set service-docs.enabled true")
+    return rc
+
+
+def _config_remove_service_doc(name: str) -> int:
+    """Remove one ``service-docs`` source folder by name."""
+
+    def apply(data: dict) -> str:
+        spec = data.get("collections", {}).get("service-docs")
+        if not isinstance(spec, dict):
+            raise ValueError("no 'service-docs' collection in config")
+        sources = spec.get("service_sources")
+        if not isinstance(sources, dict) or name not in sources:
+            known = ", ".join(sorted(sources)) if isinstance(sources, dict) else "(none)"
+            raise ValueError(f"unknown service doc {name!r}; known: {known}")
+        del sources[name]
+        return f"Removed service doc source {name!r}"
+
+    return _edit_config(apply)
 
 
 def config_main(argv: list[str] | None = None) -> int:
@@ -258,6 +341,18 @@ def config_main(argv: list[str] | None = None) -> int:
         help="data_root | qmd_binary | cron.schedule | <collection>.store|enabled|since|on_hook",
     )
     p_set.add_argument("value", metavar="VALUE")
+    p_add = sub.add_parser(
+        "add-service-doc", help="add a docs folder to the service-docs collection"
+    )
+    p_add.add_argument("name", metavar="NAME", help="service name (becomes the subfolder)")
+    p_add.add_argument("path", metavar="PATH", help="path to the docs folder to mirror")
+    p_add.add_argument(
+        "-d", "--description", metavar="TEXT", help="QMD context description for this service"
+    )
+    p_rm = sub.add_parser(
+        "remove-service-doc", help="remove a docs folder from the service-docs collection"
+    )
+    p_rm.add_argument("name", metavar="NAME", help="service name to remove")
     args = parser.parse_args(argv)
 
     if args.action == "init":
@@ -267,6 +362,10 @@ def config_main(argv: list[str] | None = None) -> int:
         return _config_show(args.json)
     if args.action == "set":
         return _config_set(args.key, args.value)
+    if args.action == "add-service-doc":
+        return _config_add_service_doc(args.name, args.path, args.description)
+    if args.action == "remove-service-doc":
+        return _config_remove_service_doc(args.name)
     return _config_show_path()
 
 
@@ -356,6 +455,22 @@ def _fail(label: str, detail: str = "") -> None:
     print(f"  FAIL {label}" + (f" - {detail}" if detail else ""))
 
 
+def _qmd_vector_count(qmd_binary: str) -> int | None:
+    """The global embedded-vector count from ``qmd status`` (``None`` if unreadable).
+
+    ``qmd status`` reports a single global ``Vectors: N embedded`` line (there is no
+    per-collection vector count), so this is necessarily an index-wide health check.
+    """
+    try:
+        result = subprocess.run([qmd_binary, "status"], capture_output=True, text=True)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    m = re.search(r"Vectors:\s*([\d,]+)", result.stdout)
+    return int(m.group(1).replace(",", "")) if m else None
+
+
 def doctor_main(argv: list[str] | None = None) -> int:
     argparse.ArgumentParser(prog="cairn doctor", description="Check the cairn install").parse_args(
         argv
@@ -410,6 +525,41 @@ def doctor_main(argv: list[str] | None = None) -> int:
                 _ok(f"source [{name}]", f"enabled - store {coll.store}")
             else:
                 _warn(f"source [{name}]", f"enabled but store {coll.store} not found")
+
+    # qmd collections registered (an unregistered dir is invisible to search).
+    # warn, never fail: a fresh install legitimately has nothing registered until
+    # the first 'cairn sync' runs - which now registers them automatically.
+    if config is not None:
+        try:
+            registered = list_collections(config.qmd_binary)
+        except (RuntimeError, OSError) as e:
+            registered = None
+            _warn("qmd collections", f"could not list: {e}")
+        if registered is not None:
+            for name, coll in sorted(config.collections.items()):
+                if not coll.sync.enabled:
+                    continue
+                out = config.output_dir(name)
+                if not out.is_dir() or next(out.rglob("*.md"), None) is None:
+                    continue  # nothing exported yet -> nothing to register
+                if name in registered:
+                    _ok(f"collection [{name}]", "registered in qmd")
+                else:
+                    _warn(
+                        f"collection [{name}]",
+                        "has markdown but is not a qmd collection; run 'cairn sync'",
+                    )
+
+    # embeddings present (an index with 0 vectors returns no search results).
+    # warn, never fail: zero is the expected state before the first embed.
+    if config is not None:
+        vectors = _qmd_vector_count(config.qmd_binary)
+        if vectors is None:
+            _warn("embeddings", "could not read 'qmd status'")
+        elif vectors > 0:
+            _ok("embeddings", f"{vectors} vectors embedded")
+        else:
+            _warn("embeddings", "0 vectors - run 'cairn sync --cron' to embed")
 
     # cron
     if any(_CRON_TAG in ln for ln in _current_crontab()):

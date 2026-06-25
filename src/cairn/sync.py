@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import CairnConfig, get_config
+from .qmd import ensure_collection, list_collections
 
 
 def _log_file() -> Path:
@@ -143,6 +144,60 @@ def run_step(name, command, timeout=120):
         return False
 
 
+def run_inproc(name, fn):
+    """Run an in-process step, logging status the same way ``run_step`` does.
+
+    Collection registration is a Python call (it loops the config and shells out to
+    ``qmd`` per collection), not a single subprocess, but it should appear in the
+    sync log with the same ``[name] ok/FAILED (Ns)`` shape as every other step.
+    Returns success; never raises - a registration failure must not abort the sync.
+    """
+    start = time.time()
+    try:
+        summary = fn()
+        log(f"  [{name}] ok ({time.time() - start:.1f}s)")
+        if summary:
+            _log_output(summary)
+        return True
+    except Exception as e:
+        log(f"  [{name}] FAILED ({time.time() - start:.1f}s)")
+        _log_output(str(e))
+        return False
+
+
+def _ensure_collections(config: CairnConfig) -> str:
+    """Register every enabled collection that has markdown on disk (idempotent).
+
+    This is the step that makes a fresh index non-empty without any manual
+    ``qmd collection add``. It is self-healing: a source whose dir does not exist
+    yet (no data) is skipped and picked up automatically on a later sync once it
+    produces markdown. One ``collection list`` call is shared across all checks.
+    """
+    known = list_collections(config.qmd_binary)
+    added: list[str] = []
+    exists = skipped = 0
+    failures: list[str] = []
+    for name, coll in sorted(config.collections.items()):
+        if not coll.sync.enabled:
+            continue
+        status = ensure_collection(name, config.output_dir(name), config.qmd_binary, known)
+        if status == "added":
+            added.append(name)
+        elif status == "exists":
+            exists += 1
+        elif status == "FAILED":
+            failures.append(name)
+        else:  # skipped
+            skipped += 1
+    if failures:
+        raise RuntimeError(f"qmd collection add failed for: {', '.join(failures)}")
+    if added:
+        return (
+            f"registered {len(added)} new: {', '.join(added)} (exists={exists}, skipped={skipped})"
+        )
+    return f"all up to date (exists={exists}, skipped={skipped})"
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
         prog="cairn sync",
@@ -171,12 +226,20 @@ def main(argv: list[str] | None = None):
         for name, command in steps:
             run_step(name, command)
 
+        # Register any enabled collection that now has markdown on disk, BEFORE
+        # the index refresh so qmd update picks up freshly-registered collections
+        # in the same run. Idempotent + self-healing, so it runs in every mode
+        # (it's one cheap 'qmd collection list' check when nothing is new).
+        run_inproc("qmd-collections", lambda: _ensure_collections(config))
+
         # Always update index
         run_step("qmd-update", [qmd, "update"])
 
-        # Embed only in cron/all modes (slow, not needed for hook)
+        # Embed only in cron/all modes (slow, not needed for hook). The FIRST embed
+        # downloads ~2GB of models and can take many minutes, so allow up to an hour
+        # rather than 600s - an unattended first cron run must be able to finish.
         if mode in ("cron", "all"):
-            run_step("qmd-embed", [qmd, "embed"], timeout=600)
+            run_step("qmd-embed", [qmd, "embed"], timeout=3600)
     except Exception:
         import traceback
 

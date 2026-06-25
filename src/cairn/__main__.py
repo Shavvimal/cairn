@@ -63,6 +63,7 @@ orchestration / admin:
   cairn config init | path                   create / locate the per-user config
   cairn config show [--json]                 print the resolved config + integrations
   cairn config set KEY VALUE                 set one config value (e.g. claude.store …)
+  cairn config add-service-doc NAME PATH     mirror a docs folder into service-docs
   cairn cron install | uninstall             manage the hourly sync crontab entry
 
 other:
