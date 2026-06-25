@@ -38,14 +38,19 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Require version bump when src/ changes
+      - name: Require version bump when a user-facing file changes
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           file="src/cairn/__init__.py"
-          changed=$(git diff --name-only "$BASE_SHA"...HEAD -- 'src/cairn/**')
+          # Any file that ships to users - the engine OR the plugin (skills, hook,
+          # manifest, commands, agents) - must move the single version, so the plugin
+          # cache actually refreshes and stays locked to the engine. Docs/tests/CI are
+          # not user-facing and never require a bump.
+          changed=$(git diff --name-only "$BASE_SHA"...HEAD -- \
+            'src/cairn/**' 'skills/**' 'hooks/**' '.claude-plugin/**' 'commands/**' 'agents/**')
           if [ -z "$changed" ]; then
-            echo "No src/cairn changes; version bump not required."
+            echo "No user-facing changes; version bump not required."
             exit 0
           fi
           extract() { grep -Po '(?<=^__version__ = ")[^"]+'; }
@@ -56,7 +61,11 @@ jobs:
             echo "::error::__version__ '$head_v' is not valid X.Y.Z semver."
             exit 1
           fi
-          if [ "$base_v" = "$head_v" ]; then
-            echo "::error::src/cairn changed but __version__ is still $head_v — bump it."
+          # Must be a strict INCREASE, not merely different. dpkg --compare-versions is
+          # Debian Policy's reference comparator (correct on 2.10.0 > 2.9.0, where a string
+          # compare is wrong); 'base lt head' holds only when the version genuinely went up,
+          # which also rejects an unchanged version and accidental downgrades.
+          if ! dpkg --compare-versions "$base_v" lt "$head_v"; then
+            echo "::error::__version__ must increase: base=$base_v head=$head_v."
             exit 1
           fi

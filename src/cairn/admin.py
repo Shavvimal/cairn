@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -471,10 +472,65 @@ def _qmd_vector_count(qmd_binary: str) -> int | None:
     return int(m.group(1).replace(",", "")) if m else None
 
 
+def _parse_semver(value: str) -> tuple[int, int, int] | None:
+    """Parse ``X.Y.Z`` into a comparable tuple, or ``None`` if it isn't plain semver."""
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", value.strip())
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def _plugin_manifest_path(explicit: str | None) -> Path | None:
+    """Locate the installed plugin's ``plugin.json``: ``--plugin-manifest`` else the
+    plugin-context env var (``CLAUDE_PLUGIN_ROOT``); ``None`` when neither is available."""
+    if explicit:
+        p = Path(explicit).expanduser()
+        return p if p.is_file() else None
+    root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if root:
+        p = Path(root).expanduser() / ".claude-plugin" / "plugin.json"
+        if p.is_file():
+            return p
+    return None
+
+
+def _check_plugin_drift(manifest_path: Path) -> None:
+    """Warn when the installed engine version differs from the plugin version.
+
+    The plugin (skills + hook) auto-updates; the ``cairn`` engine is upgraded by hand,
+    so the two can drift. We read the plugin's declared version and compare it to this
+    engine's ``__version__``. Warn-only - never a critical failure.
+    """
+    try:
+        plugin_v = json.loads(manifest_path.read_text(encoding="utf-8")).get("version")
+    except (OSError, json.JSONDecodeError):
+        return
+    if not plugin_v:
+        return  # version-less manifest (commit-SHA mode) - nothing to compare
+    pv, ev = _parse_semver(str(plugin_v)), _parse_semver(__version__)
+    if pv is None or ev is None:
+        return
+    if pv == ev:
+        _ok("plugin/engine", f"in sync ({__version__})")
+    elif pv > ev:
+        _warn(
+            "plugin/engine drift",
+            f"plugin v{plugin_v} is newer than engine v{__version__} - run 'uv tool upgrade cairn'",
+        )
+    else:
+        _warn(
+            "plugin/engine drift",
+            f"engine v{__version__} is newer than plugin v{plugin_v} - "
+            "run '/plugin update' then /reload-plugins",
+        )
+
+
 def doctor_main(argv: list[str] | None = None) -> int:
-    argparse.ArgumentParser(prog="cairn doctor", description="Check the cairn install").parse_args(
-        argv
+    parser = argparse.ArgumentParser(prog="cairn doctor", description="Check the cairn install")
+    parser.add_argument(
+        "--plugin-manifest",
+        metavar="PATH",
+        help="path to the plugin's plugin.json (else $CLAUDE_PLUGIN_ROOT) for a drift check",
     )
+    args = parser.parse_args(argv)
     print(f"cairn {__version__} - health check\n")
     critical_failures = 0
 
@@ -483,6 +539,11 @@ def doctor_main(argv: list[str] | None = None) -> int:
         _ok("cairn on PATH", cairn_bin)
     else:
         _warn("cairn on PATH", f"not found; falling back to {sys.executable} -m cairn")
+
+    # plugin/engine version drift (only when we can see the plugin manifest)
+    manifest = _plugin_manifest_path(args.plugin_manifest)
+    if manifest is not None:
+        _check_plugin_drift(manifest)
 
     # config
     config = None

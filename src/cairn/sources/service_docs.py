@@ -16,10 +16,9 @@ import shutil
 import sys
 from pathlib import Path
 
+from .. import __version__
 from ..config import get_config
 from ..qmd import register_descriptions
-
-__version__ = "1.0.0"
 
 # Configuration comes from cairn.config (data, not code).
 COLLECTION = "service-docs"

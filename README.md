@@ -82,6 +82,23 @@ Collection registration is automatic and self-healing: every `cairn sync` idempo
 > expansion) and takes a few minutes — `/cairn:setup` waits for it. Every run
 > after that is incremental — only new or changed chunks are embedded.
 
+### Updating cairn
+
+cairn has **two pieces that share one version**: the plugin (skills + hook) and the `cairn` CLI engine. The plugin version in `.claude-plugin/plugin.json` is locked to the engine's `__version__` (CI fails if they drift), so a given release is one number across both.
+
+They update through different channels, so update both:
+
+```bash
+uv tool upgrade cairn     # the engine (the CLI installed by /cairn:setup)
+```
+
+```text
+/plugin update            # the plugin (skills + hook); also auto-updates at startup
+/reload-plugins           # apply it to the running session
+```
+
+`cairn doctor` warns when the plugin and engine versions have drifted (e.g. the plugin auto-updated but the engine didn't) and tells you which one to update. If you installed before a release and a new skill calls a CLI subcommand your engine lacks, run `uv tool upgrade cairn`.
+
 ### Developing cairn
 
 Clone the repo and `uv pip install -e .`. The editable install finds `cairn.config.json` at the repo root via the dev fallback, so live edits are picked up — no global install.

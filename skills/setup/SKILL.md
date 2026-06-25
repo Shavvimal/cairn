@@ -18,6 +18,11 @@ Drive the steps in order, pausing where noted. **Stop and report if any step fai
 silently continue.** A green `cairn doctor` is **not** the finish line - step 7 is: a real
 query returning hits.
 
+> **Already installed and just need the latest?** This is a fresh setup. To *update* an
+> existing install, upgrade the engine and the plugin together (they're version-locked):
+> `uv tool upgrade cairn`, then `/plugin update` and `/reload-plugins`. `cairn doctor` warns
+> when the two have drifted. See "Updating cairn" in the README.
+
 ## 1. Preflight - check ALL prerequisites at once
 
 cairn needs `qmd` (the search index) and an **engine installer** (`uv` *or* `pipx`); if
