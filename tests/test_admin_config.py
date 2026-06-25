@@ -14,6 +14,14 @@ from unittest import mock
 from cairn import admin, config
 
 
+def _capture(fn, *args) -> tuple[int, str]:
+    """Run an admin command, returning (exit_code, stdout)."""
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = fn(*args)
+    return rc, buf.getvalue()
+
+
 class _ConfigFixture(unittest.TestCase):
     """Fresh XDG_CONFIG_HOME with an initialised config (claude+codex enabled)."""
 
@@ -85,6 +93,60 @@ class TestConfigSet(_ConfigFixture):
         with mock.patch.object(admin, "load_config_from", side_effect=config.ConfigError("boom")):
             self.assertEqual(admin._config_set("qmd_binary", "/opt/qmd"), 1)
         self.assertEqual(self.cfg_path.read_text(encoding="utf-8"), before)
+
+
+class TestServiceDocs(_ConfigFixture):
+    """`cairn config add-service-doc / remove-service-doc` - manage service_sources."""
+
+    def _service_sources(self) -> dict:
+        config.get_config.cache_clear()
+        coll = config.get_config().collections["service-docs"]
+        return {s.name: str(s.path) for s in coll.service_sources}
+
+    def test_add_validates_path_exists(self):
+        rc, _ = _capture(admin._config_add_service_doc, "api", "/no/such/dir", None)
+        self.assertEqual(rc, 1)
+
+    def test_add_clears_placeholder_and_registers_real_path(self):
+        with TemporaryDirectory() as docs:
+            rc, _ = _capture(admin._config_add_service_doc, "api", docs, "API docs")
+            self.assertEqual(rc, 0)
+            sources = self._service_sources()
+            # the bundled placeholder (~/Code/your-product/api/docs) is gone, replaced
+            # by exactly the real path we added.
+            self.assertEqual(set(sources), {"api"})
+            self.assertEqual(sources["api"], str(Path(docs)))
+
+    def test_add_second_source_keeps_first(self):
+        with TemporaryDirectory() as d1, TemporaryDirectory() as d2:
+            self.assertEqual(admin._config_add_service_doc("api", d1, None), 0)
+            self.assertEqual(admin._config_add_service_doc("web", d2, None), 0)
+            self.assertEqual(set(self._service_sources()), {"api", "web"})
+
+    def test_add_hints_when_disabled(self):
+        # service-docs is disabled in this fixture (only claude+codex enabled).
+        with TemporaryDirectory() as docs:
+            rc, out = _capture(admin._config_add_service_doc, "api", docs, None)
+        self.assertEqual(rc, 0)
+        self.assertIn("service-docs is disabled", out)
+
+    def test_remove_unknown_is_rejected(self):
+        self.assertEqual(admin._config_remove_service_doc("nope"), 1)
+
+    def test_add_then_remove_round_trips(self):
+        with TemporaryDirectory() as docs:
+            self.assertEqual(admin._config_add_service_doc("api", docs, None), 0)
+            self.assertEqual(admin._config_remove_service_doc("api"), 0)
+        self.assertEqual(self._service_sources(), {})
+
+    def test_show_lists_service_sources(self):
+        with TemporaryDirectory() as docs:
+            self.assertEqual(admin._config_add_service_doc("api", docs, None), 0)
+            config.get_config.cache_clear()
+            data = self._show_json()
+        sd = next(c for c in data["collections"] if c["name"] == "service-docs")
+        self.assertEqual(sd["type"], "service-docs")
+        self.assertEqual(set(sd["service_sources"]), {"api"})
 
 
 if __name__ == "__main__":

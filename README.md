@@ -70,20 +70,14 @@ cairn ships as a Claude Code plugin (skills + a SessionEnd hook) plus a globally
 /cairn:setup                              # install the CLI, write config, register cron
 ```
 
-`/cairn:setup` installs the engine globally (`uv tool install git+https://github.com/shavvimal/cairn`), writes a per-user config, and registers an hourly sync. After it, the skills work out of the box.
+`/cairn:setup` installs the engine globally (`uv tool install git+https://github.com/shavvimal/cairn`), writes a per-user config, exports your sessions, **registers the QMD collections, runs the first embed**, and registers an hourly sync — then verifies a real query returns results. After it, the skills work out of the box; there are no manual `qmd` steps.
 
-Then register your QMD collections (one-time):
-
-```bash
-qmd collection add .context/claude-code-sessions --name claude-code-sessions
-# ...repeat for each collection, then:
-qmd embed   # embeds everything
-```
+Collection registration is automatic and self-healing: every `cairn sync` idempotently runs `qmd collection add` for each enabled collection that has markdown on disk, so sources that produce data later (Cursor/Codex/Granola) register themselves on a subsequent sync — no manual step ever.
 
 > [!NOTE]
-> The first `qmd embed` downloads ~2GB of models (embeddings + reranker + query
-> expansion) and takes a few minutes. Every run after that is incremental — only
-> new or changed chunks are embedded.
+> The first embed downloads ~2GB of models (embeddings + reranker + query
+> expansion) and takes a few minutes — `/cairn:setup` waits for it. Every run
+> after that is incremental — only new or changed chunks are embedded.
 
 ### Developing cairn
 
@@ -128,6 +122,15 @@ Service docs is a verbatim mirror with no `--since`/`--all`:
 Config is data, not code. `cairn config init` writes `~/.config/cairn/config.json` (XDG) —
 the single source of truth for every path and the project catalog. cairn resolves config in
 order: `$CAIRN_CONFIG` → `$XDG_CONFIG_HOME/cairn/config.json` → repo root (dev fallback).
+
+**Service docs** are the one collection configured by folder rather than an app store. Point
+it at any docs directories you want mirrored and searched:
+
+```bash
+cairn config set service-docs.enabled true
+cairn config add-service-doc api "~/Code/myapp/api/docs" -d "Backend API docs"
+cairn config remove-service-doc api    # drop one later
+```
 
 Each collection carries a `sync` block — its on/off switch and policy:
 
