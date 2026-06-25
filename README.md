@@ -67,6 +67,7 @@ cairn ships as a Claude Code plugin (skills + a SessionEnd hook) plus a globally
 ```text
 /plugin marketplace add shavvimal/cairn   # add the marketplace
 /plugin install cairn@cairn               # install skills + hook
+/reload-plugins                           # load the freshly installed skills
 /cairn:setup                              # install the CLI, write config, register cron
 ```
 
