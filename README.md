@@ -33,6 +33,8 @@
 
 cairn exports your AI coding sessions, meetings, and docs to markdown, indexes them with [QMD](https://github.com/tobi/qmd) (local BM25 + vector + LLM-rerank search), and exposes them to Claude Code through a `/recall` skill. Set it up once; every session afterward becomes searchable automatically.
 
+> 📖 **[Read the blog post](https://shav.dev/blog/i-open-sourced-my-coding-agents-memory)** — *I Open-Sourced My Coding Agents' Memory*: why cairn exists, and the three months of tools breaking that shaped it.
+
 ## How it works
 
 ```
@@ -67,6 +69,7 @@ cairn ships as a Claude Code plugin (skills + a SessionEnd hook) plus a globally
 ```text
 /plugin marketplace add shavvimal/cairn   # add the marketplace
 /plugin install cairn@cairn               # install skills + hook
+/reload-plugins                           # load the freshly installed skills
 /cairn:setup                              # install the CLI, write config, register cron
 ```
 
