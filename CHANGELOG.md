@@ -13,6 +13,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: a `version-bump` gate that requires `__version__` to change when
   `src/cairn/` is modified.
 
+## [2.2.0]
+
+### Added
+- The plugin manifest version is now locked to the Python package version:
+  `.claude-plugin/plugin.json` declares `version` equal to `cairn.__version__`,
+  enforced by a test (and `release.yml`) so the plugin and engine can never drift
+  apart in the repo. One release is one version across both artifacts.
+- `cairn doctor` detects plugin/engine drift: given the plugin manifest
+  (`--plugin-manifest`, or `$CLAUDE_PLUGIN_ROOT` when run from the plugin) it compares
+  the installed engine version to the plugin version and tells you to
+  `uv tool upgrade cairn` (or `/plugin update`) when they differ.
+
+### Changed
+- The CI `version-bump` gate now fires for any user-facing change - the engine
+  (`src/cairn/`) **or** the plugin (`skills/`, `hooks/`, `.claude-plugin/`,
+  `commands/`, `agents/`) - so plugin-only changes also bump the shared version (and
+  the plugin cache actually refreshes for users).
+- `service-docs --version` now reports the cairn package version instead of a stale
+  hardcoded `1.0.0`.
+
 ## [2.1.0]
 
 ### Added

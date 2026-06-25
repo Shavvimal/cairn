@@ -38,14 +38,19 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Require version bump when src/ changes
+      - name: Require version bump when a user-facing file changes
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           file="src/cairn/__init__.py"
-          changed=$(git diff --name-only "$BASE_SHA"...HEAD -- 'src/cairn/**')
+          # Any file that ships to users - the engine OR the plugin (skills, hook,
+          # manifest, commands, agents) - must move the single version, so the plugin
+          # cache actually refreshes and stays locked to the engine. Docs/tests/CI are
+          # not user-facing and never require a bump.
+          changed=$(git diff --name-only "$BASE_SHA"...HEAD -- \
+            'src/cairn/**' 'skills/**' 'hooks/**' '.claude-plugin/**' 'commands/**' 'agents/**')
           if [ -z "$changed" ]; then
-            echo "No src/cairn changes; version bump not required."
+            echo "No user-facing changes; version bump not required."
             exit 0
           fi
           extract() { grep -Po '(?<=^__version__ = ")[^"]+'; }
@@ -57,6 +62,6 @@ jobs:
             exit 1
           fi
           if [ "$base_v" = "$head_v" ]; then
-            echo "::error::src/cairn changed but __version__ is still $head_v — bump it."
+            echo "::error::a user-facing file changed but __version__ is still $head_v — bump it."
             exit 1
           fi

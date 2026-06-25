@@ -32,6 +32,13 @@ jobs:
             echo "::error::__version__ '$version' is not valid X.Y.Z semver."
             exit 1
           fi
+          # The plugin manifest version is locked to __version__ (also asserted by the
+          # test suite). Guard the publish path too, in case of a direct push to main.
+          plugin_v=$(python3 -c "import json;print(json.load(open('.claude-plugin/plugin.json')).get('version',''))")
+          if [ "$plugin_v" != "$version" ]; then
+            echo "::error::plugin.json version ('$plugin_v') != __version__ ('$version')."
+            exit 1
+          fi
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
       - name: Create release if the tag is new
         env:
