@@ -35,6 +35,7 @@ echo "uv:   $(command -v uv   || echo MISSING)"
 echo "pipx: $(command -v pipx || echo MISSING)"
 echo "npm:  $(command -v npm  || echo MISSING)"
 echo "brew: $(command -v brew || echo MISSING)"
+echo "rg:   $(command -v rg   || echo 'MISSING (optional)')"
 ```
 
 Decide what's missing and how to close it, then use **AskUserQuestion** to let the user pick,
@@ -50,6 +51,9 @@ only what's actually installable on this machine:
   installable then)
 - **`qmd` missing AND `npm` missing** → not auto-installable. Stop and ask the user to install
   Node/npm (`brew install node`, or nvm) and re-run `/cairn:setup`.
+- **`rg` (ripgrep) missing** → optional: it powers exact-match and regex search in `/search`
+  and `/recall`. Offer `brew install ripgrep` (or the system package manager). A missing
+  `rg` never blocks setup - the skills fall back to BM25.
 - **prefer `pipx` and it's missing** → `brew install pipx` (or
   `python3 -m pip install --user pipx && python3 -m pipx ensurepath`). Only needed if they
   decline `uv`.
@@ -285,7 +289,7 @@ in layers; declare success only when a **real query returns hits**.
 and embeddings-present:
 
 ```bash
-cairn doctor           # install, config, qmd, data_root, stores, collections, embeddings, cron
+cairn doctor           # install, config, qmd, rg, data_root, stores, collections, embeddings, cron
 crontab -l             # the hourly 'cairn sync --cron' line is present
 ```
 

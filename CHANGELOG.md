@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: a `version-bump` gate that requires `__version__` to change when
   `src/cairn/` is modified.
 
+## [2.3.0]
+
+### Added
+- First-class ripgrep search in the skills. `/search` gets an rg engine (`--exact`,
+  or chosen automatically for identifiers, error strings, paths, session IDs and
+  regex), and `/recall` topic mode runs an exact-match rg pass next to the BM25
+  searches. rg reads the markdown directly, so it also finds files that QMD has not
+  indexed yet.
+- The skills resolve each collection's directory from `qmd collection show`, so rg
+  also covers collections outside `data_root`. No path is hardcoded.
+- Output guardrails for rg in both skills: list files first (`-l`, newest first via
+  `--sortr modified`, capped with `head`), then print lines for chosen files only with
+  `-M 300 -m 5`. A session transcript can hold a single line of several megabytes.
+- `cairn doctor` checks for `rg` on PATH. A missing rg is a warning, never a failure.
+- `/cairn:setup` preflight reports `rg` and offers to install it (optional).
+
 ## [2.2.0]
 
 ### Added
