@@ -523,6 +523,22 @@ def _check_plugin_drift(manifest_path: Path) -> None:
         )
 
 
+def _check_rg() -> None:
+    """ripgrep on PATH - the exact-match engine for the /search and /recall skills.
+
+    Warn-only: the CLI and qmd search work without it; the skills fall back to BM25.
+    """
+    rg_path = shutil.which("rg")
+    if rg_path:
+        _ok("rg", rg_path)
+    else:
+        _warn(
+            "rg",
+            "not found - exact-match search in /search and /recall is off "
+            "(install ripgrep, e.g. brew install ripgrep)",
+        )
+
+
 def doctor_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cairn doctor", description="Check the cairn install")
     parser.add_argument(
@@ -563,6 +579,9 @@ def doctor_main(argv: list[str] | None = None) -> int:
         else:
             _fail("qmd", f"{qmd!r} not found - install it (e.g. npm install -g @tobilu/qmd)")
             critical_failures += 1
+
+    # rg (optional exact-match engine for the skills)
+    _check_rg()
 
     # data_root writable
     if config is not None:

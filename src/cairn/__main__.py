@@ -59,7 +59,7 @@ recall (temporal view over native Claude sessions; topic search is qmd's job):
 
 orchestration / admin:
   cairn sync [--hook | --cron | --all]       sync every source, then refresh QMD
-  cairn doctor                               check install, config, qmd, cron, PATH
+  cairn doctor                               check install, config, qmd, rg, cron, PATH
   cairn config init | path                   create / locate the per-user config
   cairn config show [--json]                 print the resolved config + integrations
   cairn config set KEY VALUE                 set one config value (e.g. claude.store …)

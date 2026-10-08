@@ -60,6 +60,7 @@ Six collections and one search index:
 
 - [QMD](https://github.com/tobi/qmd): `npm install -g @tobilu/qmd`
 - [uv](https://docs.astral.sh/uv/) (for the `cairn` CLI)
+- Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`brew install ripgrep`) for exact-match and regex search in `/search` and `/recall`
 - Claude Code (for the plugin + skills)
 
 ## Installation
@@ -119,7 +120,10 @@ Clone the repo and `uv pip install -e .`. The editable install finds `cairn.conf
 /search webhook processing            # search all collections
 /search analysis pipeline -n 3        # limit results
 /search onboarding -c granola-sessions   # specific collection
+/search ECONNRESET --exact            # exact string or regex, via ripgrep
 ```
+
+`/search` uses QMD BM25 for topics and ripgrep for literal strings (identifiers, error text, paths, session IDs) and regex. ripgrep reads the markdown directly, so it also finds sessions exported after the last index update. The skill resolves each collection's directory from `qmd collection show`, so collections outside cairn's data root (such as your own notes folder) are searched too.
 
 ### `/cairn` — drive the CLI (export, list, annotate, resume)
 

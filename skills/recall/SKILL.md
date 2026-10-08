@@ -1,8 +1,8 @@
 ---
 name: recall
-description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the native timeline via the cairn CLI; topic queries search across QMD collections. Every recall ends with "One Thing" - the single highest-leverage next action synthesized from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context", "yesterday", "what was I doing", "last week", or "session history". Requires the cairn CLI and qmd (install via /cairn:setup).
+description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the native timeline via the cairn CLI; topic queries search across QMD collections (BM25) plus an exact-match ripgrep pass. Every recall ends with "One Thing" - the single highest-leverage next action synthesized from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context", "yesterday", "what was I doing", "last week", or "session history". Requires the cairn CLI and qmd (install via /cairn:setup); rg is optional.
 argument-hint: [yesterday|today|last week|this week|YYYY-MM-DD|TOPIC]
-allowed-tools: Bash(cairn:*), Bash(qmd:*)
+allowed-tools: Bash(cairn:*), Bash(qmd:*), Bash(rg:*), Bash(head:*)
 ---
 
 # Recall Skill
@@ -43,7 +43,7 @@ cairn recall expand SESSION_ID         # condensed transcript (user msgs, assist
 
 → Go to Step 4 (One Thing).
 
-## Step 3: Topic recall (QMD search)
+## Step 3: Topic recall (QMD search + rg)
 
 1. **Enumerate the collections to search** - do not hardcode or guess names:
 
@@ -70,9 +70,34 @@ cairn recall expand SESSION_ID         # condensed transcript (user msgs, assist
    `granola-sessions` / `service-docs` as relevant. Use `qmd search` (BM25), **not**
    `qmd query` (hybrid) - speed matters here.
 
-4. **Deduplicate** by document path (keep the highest score); present the top ~5 unique hits.
+4. **Exact-match pass (rg).** If the topic contains literal terms - an identifier, error
+   string, file path, product or person name - run one rg pass for them in parallel with
+   the BM25 searches. BM25 tokenises such terms badly, and rg also sees files that QMD has
+   not indexed yet. Skip this step if rg is not installed.
 
-5. **Fetch full context** for the top 2–3:
+   Resolve each collection's directory from its `Path:` line (never hardcode paths -
+   collections can live outside cairn's `data_root`):
+
+   ```bash
+   qmd collection show COLLECTION
+   ```
+
+   Then list matching files, newest first, capped:
+
+   ```bash
+   rg -l -i -F "TERM" --type md --sortr modified "PATH1" "PATH2" ... | head -n 10
+   ```
+
+   Never print matched lines from a whole collection. If you need lines, run rg again on
+   the chosen files only, with `-M 300 -m 5` (a session transcript can hold a single line
+   of several megabytes). See the `/search` skill for the full rg rules.
+
+5. **Deduplicate** by document path (keep the highest score); present the top ~5 unique
+   hits. An rg hit at `<collection Path>/<rel>` is the same document as
+   `qmd://COLLECTION/<rel>`. Rank rg-only hits after BM25 hits unless the literal term is
+   the point of the query.
+
+6. **Fetch full context** for the top 2–3:
 
    ```bash
    qmd get "qmd://collection/path/to/file.md" -l 50
@@ -112,4 +137,6 @@ No results for "QUERY". Try: different terms, a broader date range, or --min-msg
 - Temporal recall reads the native session timeline via `cairn recall` (no QMD needed) -
   it sees today's activity even before it's exported/indexed.
 - Topic recall uses BM25 (`qmd search`), not hybrid (`qmd query`) - much faster inline.
+- The rg pass wins on exact terms (identifiers, error strings, names) and on files that
+  were exported after the last `qmd update`.
 - Always enumerate collections with `qmd collection list` rather than assuming a fixed set.
