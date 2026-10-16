@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -408,8 +409,34 @@ def _without_cairn_lines(lines: list[str]) -> list[str]:
 
 
 def _cron_install() -> int:
-    schedule = get_config().cron_schedule  # data-driven (config 'cron.schedule')
-    line = f"{schedule} {' '.join(_cairn_invocation())} sync --cron >> {_log_file()} 2>&1"
+    config = get_config()
+    environment = {
+        "CAIRN_CONFIG": str(config.config_path.resolve()),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+    }
+    for name in (
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "QMD_CONFIG_DIR",
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+    ):
+        if name in os.environ:
+            environment[name] = os.environ[name]
+    argv = [
+        "/usr/bin/env",
+        *[f"{k}={v}" for k, v in environment.items()],
+        *_cairn_invocation(),
+        "sync",
+        "--cron",
+    ]
+    logfile = _log_file()
+    logfile.parent.mkdir(parents=True, exist_ok=True)
+    command = f"{shlex.join(argv)} >> {shlex.quote(str(logfile))} 2>&1"
+    # Cron interprets percent signs even inside shell quotes. A stable comment
+    # identifies our entry even when the executable itself needs shell quoting.
+    command = command.replace("%", r"\%")
+    line = f"{config.cron_schedule} {command} # cairn sync"
     lines = _without_cairn_lines(_current_crontab())
     lines.append(line)
     _write_crontab(lines)

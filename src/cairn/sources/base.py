@@ -211,10 +211,20 @@ class ConversationSource(ABC):
         """Resolve the session to act on: explicit id, then env var, then the single
         active session. Refuses to guess when more than one session is active so a
         mutation can never silently land on the wrong one."""
-        from ..harnesses import get_harness
+        from ..harnesses import detect_harness, get_harness
 
         source = next((s.source for s in SOURCES if s.collection == self.collection), None)
         try:
+            if not explicit and source in ("claude", "codex"):
+                active_host = detect_harness()
+                hints = any(
+                    os.environ.get(name)
+                    for name in ("CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID")
+                )
+                if active_host != source and (active_host or hints):
+                    raise ValueError(
+                        f"cannot infer the current {source} session from mixed or other-host hints; pass --session-id"
+                    )
             sid = explicit or (
                 get_harness(source).current_id()
                 if source in ("claude", "codex")

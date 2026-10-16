@@ -173,6 +173,32 @@ class TestHooks(StoreFixture):
         self.run_cli("hook", "worker")
         self.assertEqual(hooks.status(config.get_config())["counts"]["completed"], 1)
 
+    def test_cron_command_retains_config_and_index_environment(self):
+        from cairn import admin
+
+        self.fake_qmd()
+        self.native("codex", "cron-recovery")
+        self.native("claude", "cron-claude")
+        with (
+            patch("cairn.admin._current_crontab", return_value=["# unrelated"]),
+            patch("cairn.admin._cairn_invocation", return_value=[sys.executable, "-m", "cairn"]),
+            patch("cairn.admin._write_crontab") as write,
+        ):
+            self.assertEqual(admin._cron_install(), 0)
+        lines = write.call_args.args[0]
+        self.assertEqual(lines[0], "# unrelated")
+        command = lines[1].split(" ", 5)[5]
+        result = subprocess.run(
+            ["/bin/sh", "-c", command],
+            cwd=self.root,
+            env={"PATH": "/usr/bin:/bin", "PYTHONPATH": os.path.abspath("src")},
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual({r.source for r in self.records()}, {"claude", "codex"})
+
 
 class TestCodexRegistration(StoreFixture):
     def setUp(self):
