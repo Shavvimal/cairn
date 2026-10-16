@@ -27,9 +27,12 @@ from pathlib import Path
 
 from .. import frontmatter as fm_mod
 from .. import listing, mutations, qmd
-from ..paths import find_session_file, get_output_path
+from ..paths import get_output_path
+from ..registry import SOURCES
 from ..rendering import render_conversation, strip_lone_surrogates
 from ..schema import Message, SessionData
+from ..storage import atomic_write, document_lock, locked
+from ..store import metadata_lines, read_record, resolve
 
 
 class ConversationSource(ABC):
@@ -43,7 +46,7 @@ class ConversationSource(ABC):
     # `list` default: "active" -> status == "active"; "not-done" -> status != "done"
     list_default: str = "active"
     # env var consulted to resolve the "current" session for mutations
-    session_env_var: str = "CLAUDE_SESSION_ID"
+    session_env_var: str = ""
     # frontmatter key holding the id (claude/codex: session_id; cursor: composer_id)
     id_field: str = "session_id"
     # default status written when no existing file (cursor overrides per-composer)
@@ -111,7 +114,23 @@ class ConversationSource(ABC):
     # ====================================================================
 
     def find_file(self, session_id: str) -> Path | None:
-        return find_session_file(self.output_dir, self.short_id(session_id))
+        source = next((s for s in SOURCES if s.collection == self.collection), None)
+        if source is None:
+            return None
+        records = []
+        for path in self.output_dir.rglob("*.md"):
+            try:
+                record = read_record(path, source.source, self.id_field, self.session_type)
+                if record:
+                    records.append(record)
+            except (ValueError, OSError, UnicodeError):
+                continue
+        try:
+            return resolve(session_id, records).path
+        except ValueError as exc:
+            if str(exc).startswith("no session"):
+                return None
+            raise FileExistsError(str(exc)) from exc
 
     def output_path(
         self,
@@ -160,12 +179,26 @@ class ConversationSource(ABC):
         output_file = existing_file or self.output_path(
             source_id, data["date"], data.get("project"), data.get("repo_subdir")
         )
-        existing_fm, my_notes, ok = self.load_existing(output_file)
-        if not ok:
-            return None
-        markdown = strip_lone_surrogates(self.render_document(data, existing_fm, my_notes))
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_file.write_text(markdown, encoding="utf-8")
+        # Collection lock protects filename allocation; document lock coordinates
+        # read/merge/write with annotations. Readers see the old or new whole file.
+        with locked(self.output_dir / ".export.lock"):
+            if output_file.exists():
+                existing = fm_mod.parse_frontmatter(output_file.read_text(encoding="utf-8"))
+                if existing.get(self.id_field) != source_id:
+                    import hashlib
+
+                    output_file = output_file.with_stem(
+                        output_file.stem + "-" + hashlib.sha256(source_id.encode()).hexdigest()[:16]
+                    )
+            with locked(document_lock(output_file)):
+                existing_fm, my_notes, ok = self.load_existing(output_file)
+                if not ok:
+                    return None
+                markdown = strip_lone_surrogates(self.render_document(data, existing_fm, my_notes))
+                source = next(s.source for s in SOURCES if s.collection == self.collection)
+                metadata = "\n".join(metadata_lines(source, source_id, data))
+                markdown = markdown.replace("\nstatus:", "\n" + metadata + "\nstatus:", 1)
+                atomic_write(output_file, markdown)
         return output_file
 
     def all_sessions(self) -> list[tuple[Path, dict]]:
@@ -178,7 +211,18 @@ class ConversationSource(ABC):
         """Resolve the session to act on: explicit id, then env var, then the single
         active session. Refuses to guess when more than one session is active so a
         mutation can never silently land on the wrong one."""
-        sid = explicit or os.environ.get(self.session_env_var)
+        from ..harnesses import get_harness
+
+        source = next((s.source for s in SOURCES if s.collection == self.collection), None)
+        try:
+            sid = explicit or (
+                get_harness(source).current_id()
+                if source in ("claude", "codex")
+                else os.environ.get(self.session_env_var)
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return None
         if sid:
             return sid
 
@@ -187,8 +231,7 @@ class ConversationSource(ABC):
             return None
         if len(active) > 1:
             print(
-                f"Error: {len(active)} active sessions found; pass --session-id or set "
-                f"{self.session_env_var} to choose one.",
+                f"Error: {len(active)} active sessions found; pass --session-id to choose one.",
                 file=sys.stderr,
             )
             return None
@@ -203,7 +246,8 @@ class ConversationSource(ABC):
         sid = self.current_session_id(explicit)
         if not sid:
             print(
-                f"Error: No session_id. Use --session-id or set {self.session_env_var}",
+                "Error: No session_id. Use --session-id"
+                + (f" or set {self.session_env_var}" if self.session_env_var else ""),
                 file=sys.stderr,
             )
         return sid

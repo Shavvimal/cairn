@@ -145,13 +145,29 @@ def parse_frontmatter(content: str) -> dict:
 
 def extract_my_notes_section(content: str) -> str | None:
     """Extract the '## My Notes' section from existing content."""
-    if PRESERVED_SECTION not in content:
-        return None
-    pattern = rf"({re.escape(PRESERVED_SECTION)}.*?)(?=\n## |\Z)"
-    match = re.search(pattern, content, re.DOTALL)
-    if match:
-        return match.group(1).rstrip()
-    return None
+    lines = content.splitlines()
+    start = None
+    fence = None
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        match = re.match(r"(`{3,}|~{3,})", stripped)
+        if match:
+            token = match[1]
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        if start is None:
+            if line == "## Conversation":
+                return None
+            if line == PRESERVED_SECTION:
+                start = index
+        elif line.startswith("## "):
+            return "\n".join(lines[start:index]).rstrip()
+    return "\n".join(lines[start:]).rstrip() if start is not None else None
 
 
 def resolve_title(

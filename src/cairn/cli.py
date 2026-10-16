@@ -128,6 +128,12 @@ def run(source: ConversationSource, argv: list[str] | None = None) -> None:
     """
     parser = build_parser(source)
     args = parser.parse_args(argv)
+    if args.command in ("export", "sync"):
+        from .storage import locked
+
+        with locked(source.output_dir / ".operation.lock"):
+            result = args.func(args)
+        sys.exit(result)
     sys.exit(args.func(args))
 
 

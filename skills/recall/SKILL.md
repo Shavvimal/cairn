@@ -1,9 +1,13 @@
 ---
 name: recall
-description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the native timeline via the cairn CLI; topic queries search across QMD collections (BM25) plus an exact-match ripgrep pass. Every recall ends with "One Thing" - the single highest-leverage next action synthesized from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context", "yesterday", "what was I doing", "last week", or "session history". Requires the cairn CLI and qmd (install via /cairn:setup); rg is optional.
+description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the shared exported store via the cairn CLI; topic queries search across QMD collections (BM25) plus an exact-match ripgrep pass. Every recall ends with "One Thing" - the single highest-leverage next action synthesized from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context from past sessions", "what was I doing", or "session history". Requires the cairn CLI and qmd (install via /cairn:setup); rg is optional.
 argument-hint: [yesterday|today|last week|this week|YYYY-MM-DD|TOPIC]
 allowed-tools: Bash(cairn:*), Bash(qmd:*), Bash(rg:*), Bash(head:*)
 ---
+
+Read [the harness contract](../../references/harnesses/contract.md) and its relevant
+Claude or Codex reference from this installed package before host-specific operations.
+
 
 # Recall Skill
 
@@ -33,12 +37,15 @@ cairn recall list "DATE_EXPR" --json   # machine-readable (session_id, time, msg
 Date expressions: `today`, `yesterday`, `YYYY-MM-DD`, `N days ago`, `last N days`,
 `this week`, `last week`, `last <weekday>`. Useful flags (see `cairn recall list --help`):
 `--all-projects` (scan every project, not just the current dir), `--min-msgs N` (default 3;
-use `--min-msgs 1` to include short sessions), `--project PATH`.
+use `--min-msgs 1` to include short sessions), `--project PATH`, repeatable `--source claude|codex|cursor|granola`, and `--refresh`.
+Use `--refresh` for recent/live history: it exports without requiring QMD. Stop on refresh
+failure and report the store as potentially stale. Date windows are UTC; reduced-precision
+legacy records are labeled. Keep source-qualified `reference` values for expansion.
 
 Present the session table. To expand one the user picks:
 
 ```bash
-cairn recall expand SESSION_ID         # condensed transcript (user msgs, assistant lines, tools)
+cairn recall expand SOURCE:SESSION_ID         # condensed transcript (user msgs, assistant lines, tools)
 ```
 
 → Go to Step 4 (One Thing).
@@ -134,8 +141,8 @@ No results for "QUERY". Try: different terms, a broader date range, or --min-msg
 
 ## Notes
 
-- Temporal recall reads the native session timeline via `cairn recall` (no QMD needed) -
-  it sees today's activity even before it's exported/indexed.
+- Temporal recall reads exported sessions from all configured sources (no QMD needed).
+  Use `--refresh` when exports may be stale. The active harness never limits source visibility.
 - Topic recall uses BM25 (`qmd search`), not hybrid (`qmd query`) - much faster inline.
 - The rg pass wins on exact terms (identifiers, error strings, names) and on files that
   were exported after the last `qmd update`.

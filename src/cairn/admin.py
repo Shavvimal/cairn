@@ -478,27 +478,35 @@ def _parse_semver(value: str) -> tuple[int, int, int] | None:
     return (int(m[1]), int(m[2]), int(m[3])) if m else None
 
 
-def _plugin_manifest_path(explicit: str | None) -> Path | None:
+def _plugin_manifest_path(explicit: str | None, harness: str | None = None) -> Path | None:
     """Locate the installed plugin's ``plugin.json``: ``--plugin-manifest`` else the
     plugin-context env var (``CLAUDE_PLUGIN_ROOT``); ``None`` when neither is available."""
     if explicit:
         p = Path(explicit).expanduser()
         return p if p.is_file() else None
-    root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    from .harnesses import detect_harness, get_harness
+
+    harness = harness or detect_harness()
+    if harness is None:
+        return None
+    root = os.environ.get("PLUGIN_ROOT") or os.environ.get("CLAUDE_PLUGIN_ROOT")
     if root:
-        p = Path(root).expanduser() / ".claude-plugin" / "plugin.json"
-        if p.is_file():
-            return p
+        for relative in get_harness(harness).manifest_paths:
+            path = Path(root).expanduser() / relative
+            if path.is_file():
+                return path
     return None
 
 
-def _check_plugin_drift(manifest_path: Path) -> None:
+def _check_plugin_drift(manifest_path: Path, harness: str = "claude") -> None:
     """Warn when the installed engine version differs from the plugin version.
 
     The plugin (skills + hook) auto-updates; the ``cairn`` engine is upgraded by hand,
     so the two can drift. We read the plugin's declared version and compare it to this
     engine's ``__version__``. Warn-only - never a critical failure.
     """
+    from .harnesses import get_harness
+
     try:
         plugin_v = json.loads(manifest_path.read_text(encoding="utf-8")).get("version")
     except (OSError, json.JSONDecodeError):
@@ -519,7 +527,7 @@ def _check_plugin_drift(manifest_path: Path) -> None:
         _warn(
             "plugin/engine drift",
             f"engine v{__version__} is newer than plugin v{plugin_v} - "
-            "run '/plugin update' then /reload-plugins",
+            f"run {get_harness(harness).update_command}",
         )
 
 
@@ -546,6 +554,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="path to the plugin's plugin.json (else $CLAUDE_PLUGIN_ROOT) for a drift check",
     )
+    parser.add_argument("--harness", choices=("claude", "codex"))
     args = parser.parse_args(argv)
     print(f"cairn {__version__} - health check\n")
     critical_failures = 0
@@ -557,9 +566,10 @@ def doctor_main(argv: list[str] | None = None) -> int:
         _warn("cairn on PATH", f"not found; falling back to {sys.executable} -m cairn")
 
     # plugin/engine version drift (only when we can see the plugin manifest)
-    manifest = _plugin_manifest_path(args.plugin_manifest)
+    manifest = _plugin_manifest_path(args.plugin_manifest, args.harness)
     if manifest is not None:
-        _check_plugin_drift(manifest)
+        inferred = "codex" if manifest.parent.name != ".claude-plugin" else "claude"
+        _check_plugin_drift(manifest, args.harness or inferred)
 
     # config
     config = None
@@ -640,6 +650,60 @@ def doctor_main(argv: list[str] | None = None) -> int:
             _ok("embeddings", f"{vectors} vectors embedded")
         else:
             _warn("embeddings", "0 vectors - run 'cairn sync --cron' to embed")
+
+    if config is not None:
+        from .hooks import launcher_path, status
+        from .store import SessionStore
+
+        report = status(config, args.harness)
+        _ok("exported sessions", str(len(SessionStore(config).records())))
+        if launcher_path().is_file():
+            _ok("hook launcher", str(launcher_path()))
+        else:
+            _warn("hook launcher", "not configured; run cairn hook install")
+        if args.harness == "codex":
+            from .harnesses.codex import Codex
+
+            try:
+                loaded = Codex().inspect_hooks(os.getcwd())
+                cairn_hooks = [
+                    h
+                    for h in loaded
+                    if h.get("pluginId") == "cairn@cairn"
+                    or "cairn hook handle" in h.get("command", "")
+                    or "-m cairn hook" in h.get("command", "")
+                ]
+                if cairn_hooks:
+                    for hook in cairn_hooks:
+                        _ok(
+                            "Codex hook registration",
+                            f"{hook.get('source')}: enabled={hook.get('enabled')}, trust={hook.get('trustStatus')}",
+                        )
+                else:
+                    _warn(
+                        "Codex hook registration",
+                        "none discovered; run cairn hook install --harness codex",
+                    )
+            except (OSError, ValueError, RuntimeError) as exc:
+                _warn("hook inspection", str(exc))
+        else:
+            _warn("hook trust", report["trust"])
+        _ok("observed sync states", json.dumps(report["counts"]))
+        for request in report["requests"]:
+            if request.get("state") in ("failed", "invalid"):
+                _warn("hook failure", request.get("error", "run cairn hook worker"))
+        observed = [r for r in report["requests"] if r.get("queued_at")]
+        if observed:
+            latest = max(observed, key=lambda r: r["queued_at"])
+            _ok(
+                "last hook event",
+                f"{latest['event']['harness']} {latest['event']['session_id']}: {latest['state']} at {latest['queued_at']}",
+            )
+        else:
+            _warn(
+                "hook execution",
+                "not observed; end a real host session and check cairn hook status",
+            )
 
     # cron
     if any(_CRON_TAG in ln for ln in _current_crontab()):

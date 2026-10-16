@@ -29,6 +29,7 @@ from ..frontmatter import (
 from ..jsonl import iter_jsonl
 from ..projects import project_from_folder_path, repo_label
 from ..schema import SessionData
+from ..store import needs_upgrade
 from ..timeutil import today_str
 from .base import ConversationSource
 
@@ -90,6 +91,21 @@ def parse_rollout(file_path: Path) -> dict | None:
     }
 
     pending_calls = {}  # call_id -> index of the assistant message carrying it
+    turn_id = ""
+    user_occurrences: dict[tuple[str, str], dict[str, int]] = {}
+
+    def user_message(text: str, timestamp: str | None, origin: str) -> None:
+        # Older clients mirror a prompt in event_msg and response_item. Keep the
+        # larger occurrence count, not both copies; repeated prompts still count.
+        counts = user_occurrences.setdefault((turn_id, text), {"event": 0, "response": 0})
+        counts[origin] += 1
+        other = "response" if origin == "event" else "event"
+        if counts[origin] <= counts[other]:
+            return
+        data["user_messages"].append(text)
+        data["messages"].append(
+            {"role": "user", "timestamp": timestamp, "text": text, "tool_calls": []}
+        )
 
     for _, record in iter_jsonl(file_path):
         rtype = record.get("type")
@@ -119,32 +135,44 @@ def parse_rollout(file_path: Path) -> dict | None:
             continue
 
         if rtype == "turn_context":
+            turn_id = payload.get("turn_id") or turn_id
             if payload.get("model"):
                 data["model"] = payload["model"]
             continue
 
         if rtype == "event_msg":
             ptype = payload.get("type")
+            if ptype == "task_started":
+                turn_id = payload.get("turn_id") or turn_id
             if ptype in ("token_count", "rate_limits", "task_started", "task_complete"):
                 continue
             if ptype == "user_message":
                 message = payload.get("message", "")
                 if isinstance(message, str) and message.strip():
-                    text = message.strip()
-                    data["user_messages"].append(text)
-                    data["messages"].append(
-                        {
-                            "role": "user",
-                            "timestamp": ts,
-                            "text": text,
-                            "tool_calls": [],
-                        }
-                    )
+                    user_message(message.strip(), ts, "event")
             continue
 
         if rtype == "response_item":
             ptype = payload.get("type")
             if ptype == "message":
+                if payload.get("role") == "user":
+                    metadata = payload.get("internal_chat_message_metadata_passthrough") or {}
+                    kinds = metadata.get("content_item_kinds")
+                    content = payload.get("content")
+                    if kinds is not None:
+                        # New clients serialize harness context as user messages
+                        # too, but label actual user input explicitly.
+                        if not isinstance(content, list) or len(content) != len(kinds):
+                            continue
+                        content = [
+                            c for c, k in zip(content, kinds, strict=True) if k == "user.text"
+                        ]
+                    text = _content_text(content)
+                    if text and not text.startswith(
+                        ("<environment_context>", "# AGENTS.md instructions for ", "<skill>")
+                    ):
+                        turn_id = metadata.get("turn_id") or turn_id
+                        user_message(text, ts, "response")
                 if payload.get("role") == "assistant":
                     text = _content_text(payload.get("content"))
                     if text:
@@ -282,6 +310,7 @@ class CodexSource(ConversationSource):
     collection = "codex-sessions"
     list_default = "not-done"
     id_field = "session_id"
+    session_env_var = "CODEX_THREAD_ID"
     preserved_note = "exports"
 
     def short_id(self, session_id: str) -> str:
@@ -315,8 +344,14 @@ class CodexSource(ConversationSource):
         return self.assemble(head, [], title, existing_fm, my_notes, data["messages"])
 
     # ---- export driver ----
-    def export_rollouts(self, date_filter: float | None = None, quiet: bool = False) -> int:
-        rollouts = _get_all_rollout_files()
+    def export_rollouts(
+        self,
+        date_filter: float | None = None,
+        quiet: bool = False,
+        rollouts: list[Path] | None = None,
+        session_id: str | None = None,
+    ) -> int:
+        rollouts = _get_all_rollout_files() if rollouts is None else rollouts
         exported = 0
 
         # Codex resume/fork writes a *new* rollout per resume but keeps the same
@@ -325,7 +360,7 @@ class CodexSource(ConversationSource):
         best: dict[str, tuple] = {}  # session_id -> (score, source_mtime, data)
         for rollout in rollouts:
             data = parse_rollout(rollout)
-            if not data:
+            if not data or (session_id is not None and data["session_id"] != session_id):
                 continue
             source_mtime = rollout.stat().st_mtime
             score = (
@@ -347,7 +382,7 @@ class CodexSource(ConversationSource):
                 session_id, data["date"], data.get("project"), data.get("repo_subdir")
             )
 
-            if output_file.exists() and output_file.stat().st_mtime >= source_mtime:
+            if not needs_upgrade(output_file) and output_file.stat().st_mtime >= source_mtime:
                 continue
 
             if self.export_one(session_id, data, existing_file) is None:
@@ -361,6 +396,32 @@ class CodexSource(ConversationSource):
             print("  All sessions up to date, nothing to export")
 
         return exported
+
+    def export_target(self, session_id: str, transcript_path: str | None) -> Path:
+        path = Path(transcript_path) if transcript_path else None
+        candidates = [p for p in SESSIONS_DIR.rglob("*.jsonl") if session_id in p.name]
+        if path:
+            if not path.is_file():
+                raise ValueError(f"Codex transcript unavailable: {path}")
+            data = parse_rollout(path)
+            if not data or data["session_id"] != session_id:
+                raise ValueError("transcript session ID does not match requested session")
+            if path not in candidates:
+                candidates.append(path)
+        if not candidates:
+            raise ValueError(f"Codex transcript unavailable for {session_id}")
+        self.export_rollouts(quiet=True, rollouts=candidates, session_id=session_id)
+        result = self.find_file(session_id)
+        if result is None:
+            raise ValueError(f"Codex export failed for {session_id}")
+        return result
+
+    def add_extra_parsers(
+        self, subparsers: argparse._SubParsersAction, common: argparse.ArgumentParser
+    ) -> None:
+        from ..resume import add_source_parser
+
+        add_source_parser(subparsers, common, "codex")
 
     def run_export(self, args: argparse.Namespace) -> int:
         if not SESSIONS_DIR.is_dir():

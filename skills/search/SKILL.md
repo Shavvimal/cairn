@@ -1,9 +1,13 @@
 ---
 name: search
-description: Quick inline search across all collections. Lightweight mid-conversation lookup - QMD BM25 for topics and concepts, ripgrep (rg) for exact strings, identifiers, error text, paths, session IDs, or regex. Use when the user says "search for", "find", "look up", "grep", "where was", "what was that", or just /search QUERY. Requires qmd (install via /cairn:setup); rg is optional.
+description: Search previously exported Cairn sessions, notes, meetings and indexed docs using QMD BM25 or exact ripgrep. Use for explicit Cairn search or locating material in personal session history. Do not activate for ordinary web searches, repository code searches, or unrelated uses of find/look up. Requires qmd; rg is optional.
 argument-hint: QUERY [-n NUM] [-c COLLECTION] [--full] [--exact]
 allowed-tools: Bash(qmd:*), Bash(rg:*), Bash(head:*)
 ---
+
+Read [the harness contract](../../references/harnesses/contract.md) and its relevant
+Claude or Codex reference from this installed package before host-specific operations.
+
 
 # Search Skill
 

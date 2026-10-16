@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"${PLUGIN_ROOT}/hooks/launch.py\" --harness codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

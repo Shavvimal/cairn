@@ -78,6 +78,51 @@ class _AdapterFixture(unittest.TestCase):
 class TestCodexExport(_AdapterFixture):
     module_name = "cairn.sources.codex"
 
+    def test_current_response_users_exclude_context_and_deduplicate_legacy_events(self):
+        store = self.root / "codex-store"
+        store.mkdir()
+        mod = self._activate({"codex-sessions": str(store)})
+        records = [{"type": "session_meta", "payload": {"id": "current", "cwd": "/tmp"}}]
+        for turn in ("first", "second"):
+            records.append(
+                {"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn}}
+            )
+            for text, kind in (
+                ("Injected environment", "environments.environment_context"),
+                ("Investigate the widget bug", "user.text"),
+            ):
+                records.append(
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-10-16T12:00:00Z",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": text}],
+                            "internal_chat_message_metadata_passthrough": {
+                                "turn_id": turn,
+                                "content_item_kinds": [kind],
+                            },
+                        },
+                    }
+                )
+            if turn == "first":
+                records.append(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "Investigate the widget bug",
+                        },
+                    }
+                )
+        path = store / "rollout-current.jsonl"
+        path.write_text("\n".join(map(json.dumps, records)))
+        data = mod.parse_rollout(path)
+        self.assertEqual(data["user_messages"], ["Investigate the widget bug"] * 2)
+        self.assertEqual(data["message_count"], 2)
+        self.assertEqual(len(data["messages"]), 2)
+
     def test_rollout_parses_and_renders(self):
         store = self.root / "codex-store"
         store.mkdir()

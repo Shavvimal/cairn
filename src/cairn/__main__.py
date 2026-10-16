@@ -16,16 +16,14 @@ import importlib
 import sys
 
 # name -> "module:function". Values are strings so nothing imports until dispatch.
-_SOURCES: dict[str, str] = {
-    "claude": "cairn.sources.claude:main",
-    "codex": "cairn.sources.codex:main",
-    "cursor": "cairn.sources.cursor:main",
-    "granola": "cairn.sources.granola:main",
-    "service-docs": "cairn.sources.service_docs:main",
-}
+from .registry import SOURCES
+
+_SOURCES = {source.source: source.entrypoint for source in SOURCES}
 
 # Top-level orchestration / admin commands.
 _ADMIN: dict[str, str] = {
+    "hook": "cairn.hooks:main",
+    "resume": "cairn.resume:main",
     "sync": "cairn.sync:main",
     "recall": "cairn.recall:main",
     "doctor": "cairn.admin:doctor_main",
@@ -52,13 +50,15 @@ shared per-source commands: export, list, context, note, close, log
   cairn codex note "got it working"
   cairn cursor log --status done --tags "x,y" --rating 8
 
-recall (temporal view over native Claude sessions; topic search is qmd's job):
+recall (temporal view over shared exported sessions; topic search is qmd's job):
   cairn recall list yesterday                sessions from a date window
   cairn recall list "last week" --json       machine-readable session list
-  cairn recall expand <session-id>           condensed transcript for one session
+  cairn recall expand <source:session-id>           condensed transcript for one session
 
 orchestration / admin:
   cairn sync [--hook | --cron | --all]       sync every source, then refresh QMD
+  cairn hook install | status | worker       configure hooks / inspect / retry sync
+  cairn resume <source:session-id>            print the correct native resume command
   cairn doctor                               check install, config, qmd, rg, cron, PATH
   cairn config init | path                   create / locate the per-user config
   cairn config show [--json]                 print the resolved config + integrations

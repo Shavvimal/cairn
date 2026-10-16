@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.4.0
+
+- Add shared Claude/Codex harness adapters, portable packaging, explicit Codex onboarding,
+  and discovery-based lifecycle registration with trust diagnostics.
+- Queue durable session exports in a detached worker; retain/retry failures and serialize
+  index updates without embedding in the callback.
+- Recall exported conversations across sources with source-qualified IDs, UTC activity
+  filtering, schema migration, bounded expansion, and safe concurrent annotations.
+- Add native resume command selection, host-aware diagnostics, and shared skill references.
+- Record live verification and outstanding desktop/skill-evaluation acceptance in
+  `docs/codex-acceptance.md`.
+
 ## [Unreleased]
 
 ### Added

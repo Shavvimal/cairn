@@ -44,6 +44,7 @@ from ..frontmatter import (
     title_line,
 )
 from ..schema import SessionData
+from ..store import needs_upgrade
 from ..timeutil import parse_iso, today_str
 from .base import ConversationSource
 
@@ -596,7 +597,7 @@ def extract_meeting_data(doc: dict, doc_id: str) -> dict | None:
         "creator": creator,
         "notes_markdown": notes_markdown.strip(),
         "last_activity": last_activity,
-        "created_at": created_at,
+        "created_at": start_dt.isoformat() if start_dt else created_at,
     }
 
 
@@ -727,7 +728,7 @@ class GranolaSource(ConversationSource):
                     output_mtime = datetime.fromtimestamp(
                         existing_file.stat().st_mtime, tz=updated_dt.tzinfo
                     )
-                    if output_mtime >= updated_dt:
+                    if output_mtime >= updated_dt and not needs_upgrade(existing_file):
                         skipped += 1
                         continue
             meetings_to_export[doc_id] = (doc, data, existing_file)

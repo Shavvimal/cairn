@@ -36,6 +36,7 @@ from ..projects import (
 )
 from ..rendering import render_artifacts
 from ..schema import SessionData
+from ..store import needs_upgrade
 from ..timeutil import today_str
 from .base import ConversationSource
 
@@ -208,6 +209,7 @@ def extract_composer_data(composer_json: dict, workspace_map: dict) -> dict | No
 
     return {
         "composer_id": composer_id,
+        "cwd": folder_path,
         "date": date,
         "title": title,
         "mode": unified_mode or None,
@@ -431,6 +433,7 @@ class CursorSource(ConversationSource):
             if (
                 existing_file
                 and existing_file.exists()
+                and not needs_upgrade(existing_file)
                 and existing_file.stat().st_mtime * 1000 >= updated_ms
             ):
                 skipped += 1

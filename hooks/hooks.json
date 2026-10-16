@@ -5,9 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cairn sync --hook",
-            "timeout": 30,
-            "async": true
+            "command": "/usr/bin/python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/launch.py\" --harness claude",
+            "timeout": 3
           }
         ]
       }

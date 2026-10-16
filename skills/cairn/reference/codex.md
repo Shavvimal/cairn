@@ -55,3 +55,10 @@ projects: []
 Content sections: Tool Calls, My Notes, Conversation.
 Preserved on export: `## My Notes` plus frontmatter `comments`, `projects`, `status`,
 `tags`, `rating`, `title`.
+
+## Resume and automatic sync
+
+`cairn resume codex:ID` (or `cairn codex resume ID`) prints `codex resume ID`. Run it in
+the user's terminal, not a nested agent shell. Notes/status accept `--session-id ID`.
+The Codex SessionEnd hook exports the event's native ID through the shared durable worker;
+`cairn hook status --harness codex` distinguishes queued from completed indexing.

@@ -84,6 +84,7 @@ class SessionData(TypedDict, total=False):
     files_created: list[str]
     files_modified: list[str]
     # timestamps (raw ISO strings as found in the source store)
+    created_at: str | None
     first_timestamp: str | None
     last_timestamp: str | None
     last_activity: str | None
