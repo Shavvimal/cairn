@@ -228,6 +228,7 @@ class TestSharedStore(StoreFixture):
         self.run_cli("codex", "export", "--all")
         processes = []
         for n in range(8):
+            self.native("codex", "race", text=f"native revision {n}")
             args = ["codex", "note", f"comment-{n}", "--session-id", "race"]
             processes.append(
                 subprocess.Popen(
@@ -244,6 +245,28 @@ class TestSharedStore(StoreFixture):
         comments = self.records()[0].metadata["comments"]
         for n in range(8):
             self.assertIn(f"comment-{n}", comments)
+        self.assertIn("native revision 7", self.records()[0].path.read_text())
+
+    def test_annotation_mtime_never_hides_new_native_messages(self):
+        for source in ("claude", "codex"):
+            with self.subTest(source=source):
+                self.native(source, "native-checkpoint", text="old body")
+                self.run_cli(source, "export", "--all")
+                self.native(source, "native-checkpoint", text="new body after native update")
+                self.run_cli(
+                    source,
+                    "note",
+                    "annotation after native write",
+                    "--session-id",
+                    "native-checkpoint",
+                )
+                self.run_cli(source, "export", "--all")
+                record = SessionStore(config.get_config()).resolve(f"{source}:native-checkpoint")
+                self.assertIn("new body after native update", record.path.read_text())
+                self.assertIn("annotation after native write", record.path.read_text())
+                modified = record.path.stat().st_mtime_ns
+                self.run_cli(source, "export", "--all")
+                self.assertEqual(record.path.stat().st_mtime_ns, modified)
 
     def test_refresh_is_export_only_and_failure_is_not_empty_success(self):
         self.native("codex", "fresh")

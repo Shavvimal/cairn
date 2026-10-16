@@ -98,14 +98,14 @@ cairn --version
 ```
 
 `--hook` is the legacy fast sync (on_hook sources only); `--cron` is the hourly
-full sync; `--all` syncs every enabled source regardless of window. Temporal recall has
+full sync; `--all` also updates and embeds every enabled source using its configured window. Temporal recall has
 its own skill (`/cairn:recall`); `cairn recall --help` shows its args.
 
 ## Preserved on export (shared)
 
 Re-exporting never clobbers your annotations. Across all sources, exports preserve the
 `## My Notes` section and these frontmatter fields: `comments`, `status`, `tags`,
-`rating`, `title`, `projects` (claude uses `related` instead of `projects`).
+`rating`, `title`, `projects`.
 
 ## Per-source reference
 

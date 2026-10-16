@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ def metadata_lines(source: str, native_id: str, data: SessionData) -> list[str]:
         "cairn_schema": SCHEMA_VERSION,
         "source": source,
         "native_id": native_id,
+        "source_revision": data.get("source_revision"),
         "cwd": data.get("cwd") or data.get("folder"),
         "project": data.get("project"),
         "started_at": first or (times[0] if times else None),
@@ -62,6 +64,26 @@ def needs_upgrade(path: Path | None) -> bool:
         )
     except (OSError, UnicodeError, FrontmatterParseError):
         return True
+
+
+def file_revision(path: Path) -> str:
+    stat = path.stat()
+    return hashlib.sha256(
+        f"{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode()
+    ).hexdigest()
+
+
+def is_current(path: Path | None, revision: str) -> bool:
+    """Annotation writes must never advance the native source checkpoint."""
+    if needs_upgrade(path):
+        return False
+    assert path is not None
+    try:
+        return (
+            parse_frontmatter(path.read_text(encoding="utf-8")).get("source_revision") == revision
+        )
+    except (OSError, UnicodeError, FrontmatterParseError):
+        return False
 
 
 def _number(value: object) -> int | None:

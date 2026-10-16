@@ -29,7 +29,7 @@ from ..frontmatter import (
 from ..jsonl import iter_jsonl
 from ..projects import project_from_folder_path, repo_label
 from ..schema import SessionData
-from ..store import needs_upgrade
+from ..store import file_revision, is_current
 from ..timeutil import today_str
 from .base import ConversationSource
 
@@ -359,10 +359,12 @@ class CodexSource(ConversationSource):
         # most complete fragment (most user messages, then latest activity / mtime).
         best: dict[str, tuple] = {}  # session_id -> (score, source_mtime, data)
         for rollout in rollouts:
+            revision = file_revision(rollout)
             data = parse_rollout(rollout)
             if not data or (session_id is not None and data["session_id"] != session_id):
                 continue
             source_mtime = rollout.stat().st_mtime
+            data["source_revision"] = revision
             score = (
                 len(data["user_messages"]),
                 len(data.get("messages", [])),
@@ -382,7 +384,7 @@ class CodexSource(ConversationSource):
                 session_id, data["date"], data.get("project"), data.get("repo_subdir")
             )
 
-            if not needs_upgrade(output_file) and output_file.stat().st_mtime >= source_mtime:
+            if is_current(output_file, data["source_revision"]):
                 continue
 
             if self.export_one(session_id, data, existing_file) is None:
@@ -410,6 +412,11 @@ class CodexSource(ConversationSource):
                 candidates.append(path)
         if not candidates:
             raise ValueError(f"Codex transcript unavailable for {session_id}")
+        if not any(
+            (data := parse_rollout(candidate)) and data["session_id"] == session_id
+            for candidate in candidates
+        ):
+            raise ValueError(f"No readable Codex transcript for {session_id}")
         self.export_rollouts(quiet=True, rollouts=candidates, session_id=session_id)
         result = self.find_file(session_id)
         if result is None:

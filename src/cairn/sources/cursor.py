@@ -36,7 +36,7 @@ from ..projects import (
 )
 from ..rendering import render_artifacts
 from ..schema import SessionData
-from ..store import needs_upgrade
+from ..store import is_current
 from ..timeutil import today_str
 from .base import ConversationSource
 
@@ -430,12 +430,7 @@ class CursorSource(ConversationSource):
                 continue
 
             existing_file = self.find_file(composer_id)
-            if (
-                existing_file
-                and existing_file.exists()
-                and not needs_upgrade(existing_file)
-                and existing_file.stat().st_mtime * 1000 >= updated_ms
-            ):
+            if is_current(existing_file, str(updated_ms)):
                 skipped += 1
                 continue
 
@@ -458,6 +453,8 @@ class CursorSource(ConversationSource):
             if not data:
                 skipped += 1
                 continue
+
+            data["source_revision"] = str(composer_json.get("lastUpdatedAt", 0))
 
             data["messages_ordered"] = fetch_bubbles(
                 conn, composer_id, data["bubble_order"], data.get("legacy_turns")

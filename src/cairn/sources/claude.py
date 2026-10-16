@@ -42,7 +42,7 @@ from ..projects import (
 )
 from ..rendering import render_artifacts
 from ..schema import SessionData
-from ..store import needs_upgrade
+from ..store import file_revision, is_current
 from ..timeutil import today_str
 from .base import ConversationSource
 
@@ -346,12 +346,8 @@ class ClaudeSource(ConversationSource):
 
         # Skip if output is already up to date.
         existing_file = self.find_file(session_id)
-        if (
-            existing_file
-            and existing_file.exists()
-            and not needs_upgrade(existing_file)
-            and existing_file.stat().st_mtime >= jsonl_path.stat().st_mtime
-        ):
+        revision = file_revision(jsonl_path)
+        if is_current(existing_file, revision):
             return existing_file
 
         repo = None
@@ -370,6 +366,7 @@ class ClaudeSource(ConversationSource):
         if data.get("session_id") and data["session_id"] != session_id:
             raise ValueError("transcript session ID does not match requested session")
         data["session_id"] = session_id
+        data["source_revision"] = revision
         data["repo"] = repo
         data["project"] = project
         data["repo_subdir"] = repo_subdir
@@ -393,6 +390,9 @@ class ClaudeSource(ConversationSource):
         parser.add_argument("file", nargs="?", help="export one specific session file")
 
     def run_export(self, args: argparse.Namespace) -> int:
+        if not args.file and not PROJECTS_BASE.is_dir():
+            print(f"Error: Sessions dir not found: {PROJECTS_BASE}", file=sys.stderr)
+            return 1
         if args.file:
             sessions = [Path(args.file)]
         elif args.all:

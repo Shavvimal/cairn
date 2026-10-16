@@ -64,6 +64,7 @@ class SessionData(TypedDict, total=False):
     repo_subdir: str | None
     cwd: str | None
     folder: str | None
+    source_revision: str  # native snapshot identity, independent of annotation mtime
     # vcs / model / tool metadata
     git_branch: str | None
     branch: str | None
