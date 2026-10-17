@@ -3,8 +3,9 @@
 Two halves of every exported session file are source-agnostic:
 
 1. The **preserved tail** of the frontmatter - ``status``, ``tags``, ``rating``,
-   ``comments``, ``projects`` - which is round-tripped identically across syncs
-   so user edits survive. Every adapter emits these the same way.
+   ``comments``, ``projects`` and (only when non-empty) ``links`` - which is
+   round-tripped identically across syncs so user edits survive. Every adapter
+   emits these the same way.
 2. The **My Notes** block and the trailing ``## Conversation`` body.
 
 Each adapter owns only its frontmatter *head* (the per-source fields like
@@ -24,11 +25,11 @@ from typing import Any
 # Fields preserved across re-syncs so manual edits survive: the tail fields are
 # re-emitted by preserved_tail(); ``title`` is preserved separately via
 # resolve_title() in each adapter's head. (Informational - not used as control flow.)
-PRESERVED_FIELDS = {"comments", "projects", "status", "tags", "rating", "title"}
+PRESERVED_FIELDS = {"comments", "projects", "status", "tags", "rating", "title", "links"}
 PRESERVED_SECTION = "## My Notes"
 
 _DOCUMENT_RE = re.compile(r"\A(---\n)(.*?)(\n---\n)(.*)\Z", re.DOTALL)
-_TAIL_KEYS = ("status:", "tags:", "rating:", "comments:", "projects:")
+_TAIL_KEYS = ("status:", "tags:", "rating:", "comments:", "projects:", "links:")
 
 
 class FrontmatterParseError(ValueError):
@@ -268,7 +269,9 @@ def head_close(last_activity: str | None, message_count: int | None = None) -> l
 def preserved_tail(existing_fm: dict | None, default_status: str = "active") -> list[str]:
     """The identical frontmatter tail every source emits.
 
-    Order: status, tags, rating, comments, projects. Values come from the
+    Order: status, tags, rating, comments, projects, then ``links`` (a block list
+    of ``"<role> <source>:<id>"`` entries) only when non-empty, so a document
+    without links stays byte-identical to a pre-links export. Values come from the
     existing file's frontmatter (round-tripped) so manual edits survive a sync.
     """
     lines = []
@@ -305,6 +308,12 @@ def preserved_tail(existing_fm: dict | None, default_status: str = "active") -> 
             lines.append(f"  - {proj}")
     else:
         lines.append("projects: []")
+
+    links = existing_fm.get("links") if existing_fm else None
+    if isinstance(links, list) and links:
+        lines.append("links:")
+        for link in links:
+            lines.append(f"  - {link}")
 
     return lines
 

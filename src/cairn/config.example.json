@@ -6,6 +6,11 @@
   "qmd_binary": "qmd",
   "//cron": "Optional. Schedule for 'cairn sync --cron' as a standard 5-field crontab expression. Defaults to '7 * * * *' (hourly at minute 7) when omitted.",
   "cron": { "schedule": "7 * * * *" },
+  "//invoke": "Optional. Defaults for 'cairn invoke <peer>' (peer agents run headlessly from either host). model/effort null = let the peer CLI choose. profile: review (read-only) | edit (workspace writes) | full (no sandbox). Timeouts in seconds: timeout_s is the wall clock, idle_timeout_s kills a run with no activity, quiet_after_s/stall_after_s drive the activity labels in 'cairn invoke status'.",
+  "invoke": {
+    "codex": { "model": "gpt-6-astra", "effort": "high", "profile": "review", "timeout_s": 1800, "idle_timeout_s": 900, "quiet_after_s": 120, "stall_after_s": 600 },
+    "claude": { "model": null, "effort": null, "profile": "review", "timeout_s": 1800, "idle_timeout_s": 900, "quiet_after_s": 120, "stall_after_s": 600 }
+  },
   "//collections": "Each key is BOTH the QMD collection name AND the output subdirectory under data_root.",
   "//sync": "Per-collection sync policy (config-as-data). 'enabled' is the integration on/off switch the engine reads - disabled sources are skipped by 'cairn sync'. 'since' is the export window (today|yesterday|Nd|Nw|YYYY-MM-DD). 'on_hook': false opts out of the originating host's SessionEnd sync (otherwise enabled). Legacy 'sync --hook' still defaults to Claude. Omitting the whole block means enabled with a 1d window.",
   "collections": {

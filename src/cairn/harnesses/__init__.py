@@ -1,11 +1,36 @@
-"""Small host adapters: lifecycle input, identity, manifests and resume argv."""
+"""Small host adapters: lifecycle input, identity, manifests, resume and invoke argv.
+
+Each adapter also knows how to run its CLI headlessly as a peer agent for
+``cairn invoke``: the exact native argv for a request, the native flags behind a
+shared permission profile, how to read one line of its JSON event stream, where
+its native transcript lands, and how to check a model/effort choice up front.
+"""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
+
+# Substrings in a peer's stderr or error text that mark a request the service
+# rejected (bad model, bad auth). Retrying the same request cannot succeed.
+CLIENT_ERROR_MARKERS: tuple[str, ...] = (
+    '"status":400',
+    '"status":401',
+    '"status":403',
+    '"status":422',
+    "invalid_request_error",
+    "model is not support",
+    "authentication",
+)
+
+
+def is_client_error(text: str) -> bool:
+    """Whether ``text`` carries one of :data:`CLIENT_ERROR_MARKERS` (case-insensitive)."""
+    low = text.lower()
+    return any(marker.lower() in low for marker in CLIENT_ERROR_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -18,14 +43,68 @@ class SessionEvent:
     event: str
 
 
+@dataclass(frozen=True)
+class InvokeRequest:
+    """One headless peer run, fully resolved (no config lookups left to do).
+
+    ``native_policy`` holds explicit native permission flags (for example
+    ``("-s", "read-only")`` or ``("--permission-mode", "plan")``); empty means
+    derive them from ``profile``. ``resume`` is the thread id to continue, or
+    ``None`` for a fresh run. ``session_id`` is the id chosen up front (Claude
+    only). With ``prompt_via_stdin`` the prompt is not put on the command line.
+    """
+
+    peer: str
+    prompt: str
+    cwd: Path
+    profile: str
+    native_policy: tuple[str, ...]
+    model: str | None
+    effort: str | None
+    fast: bool
+    timeout_s: int
+    resume: str | None
+    session_id: str | None
+    output_schema: Path | None
+    last_message_path: Path | None
+    prompt_via_stdin: bool
+    extra: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Event:
+    """One normalised event from a peer's JSON stream.
+
+    ``kind`` is ``thread_started`` | ``message`` | ``progress`` | ``notice`` |
+    ``done``. ``status`` (``succeeded`` | ``failed``) is set on ``done`` only.
+    ``raw_type`` keeps the native event type for logs and status lines.
+    """
+
+    kind: str
+    text: str | None = None
+    thread_id: str | None = None
+    status: str | None = None
+    error: str | None = None
+    usage: dict | None = None
+    raw_type: str = ""
+
+
 class Harness(Protocol):
     name: str
     manifest_paths: tuple[str, ...]
     update_command: str
+    executable: str
 
     def decode(self, payload: object) -> SessionEvent: ...
     def current_id(self) -> str | None: ...
     def resume(self, session_id: str, fork: bool = False) -> list[str]: ...
+    def exec_argv(self, request: InvokeRequest) -> list[str]: ...
+    def policy_argv(self, profile: str, native: tuple[str, ...] = ()) -> tuple[str, ...]: ...
+    def parse_event(self, line: str) -> list[Event]: ...
+    def transcript_path(
+        self, store: Path, thread_id: str, started: datetime | None
+    ) -> Path | None: ...
+    def self_check(self, model: str | None, effort: str | None, fast: bool) -> list[str]: ...
 
 
 def decode_event(name: str, payload: object) -> SessionEvent:

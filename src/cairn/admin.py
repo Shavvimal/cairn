@@ -16,12 +16,16 @@ import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import asdict, fields
 from pathlib import Path
 
 from . import __version__
 from .config import (
+    INVOKE_PEERS,
+    CairnConfig,
     Collection,
     ConfigError,
+    PeerPolicy,
     example_template_text,
     expand,
     get_config,
@@ -117,6 +121,20 @@ def _collection_view(name: str, coll: Collection) -> dict:
     return view
 
 
+def _invoke_view(cfg: CairnConfig) -> dict:
+    """Machine-readable ``invoke`` block: one policy dict per peer."""
+    return {peer: asdict(cfg.invoke.for_peer(peer)) for peer in INVOKE_PEERS}
+
+
+def _peer_summary(policy: PeerPolicy) -> str:
+    """One-line human summary of a peer's invoke defaults."""
+    return (
+        f"model={policy.model or '(peer default)'} effort={policy.effort or '(peer default)'} "
+        f"profile={policy.profile} timeout={policy.timeout_s}s idle={policy.idle_timeout_s}s "
+        f"quiet={policy.quiet_after_s}s stall={policy.stall_after_s}s"
+    )
+
+
 def _config_show(as_json: bool) -> int:
     """Print the resolved config - the read surface skills/setup query."""
     try:
@@ -136,6 +154,7 @@ def _config_show(as_json: bool) -> int:
                     "qmd_binary": cfg.qmd_binary,
                     "cron_schedule": cfg.cron_schedule,
                     "collections": collections,
+                    "invoke": _invoke_view(cfg),
                 },
                 indent=2,
             )
@@ -154,6 +173,9 @@ def _config_show(as_json: bool) -> int:
         print(f"  {c['name']:22} [{state}] since={c['since']}{hook}{store}")
         for src_name, src_path in (c.get("service_sources") or {}).items():
             print(f"      docs[{src_name}] = {src_path}")
+    print("invoke      :")
+    for peer in INVOKE_PEERS:
+        print(f"  {peer:22} {_peer_summary(cfg.invoke.for_peer(peer))}")
     return 0
 
 
@@ -162,6 +184,23 @@ def _config_show(as_json: bool) -> int:
 _TOP_LEVEL_KEYS = {"data_root", "qmd_binary"}
 _COLLECTION_SYNC_FIELDS = {"enabled", "since", "on_hook"}
 _BOOL_FIELDS = {"enabled", "on_hook"}
+_INVOKE_FIELDS = {f.name for f in fields(PeerPolicy)}
+_INVOKE_INT_FIELDS = {"timeout_s", "idle_timeout_s", "quiet_after_s", "stall_after_s"}
+_INVOKE_NULLABLE = {"model", "effort"}
+
+
+def _coerce_invoke(field: str, value: str) -> object:
+    """Coerce a CLI string for ``invoke.<peer>.<field>``: ints for clocks, null for defaults."""
+    if field in _INVOKE_INT_FIELDS:
+        try:
+            return int(value)
+        except ValueError:
+            raise ValueError(
+                f"{field} expects an integer number of seconds, got {value!r}"
+            ) from None
+    if field in _INVOKE_NULLABLE and value.strip().lower() in ("null", "none"):
+        return None
+    return value
 
 
 def _coerce(field: str, value: str) -> object:
@@ -184,6 +223,16 @@ def _set_dotted(data: dict, key: str, value: str) -> None:
         return
 
     parts = key.split(".")
+    if len(parts) == 3 and parts[0] == "invoke":
+        _, peer, field = parts
+        if peer not in INVOKE_PEERS:
+            raise ValueError(f"unknown invoke peer {peer!r}; known: {', '.join(INVOKE_PEERS)}")
+        if field not in _INVOKE_FIELDS:
+            known = ", ".join(sorted(_INVOKE_FIELDS))
+            raise ValueError(f"unknown invoke field {field!r}; known: {known}")
+        invoke = data.setdefault("invoke", {})
+        invoke.setdefault(peer, {})[field] = _coerce_invoke(field, value)
+        return
     if len(parts) == 2:
         prefix, field = parts
         collection = SOURCE_COLLECTIONS.get(prefix, prefix)
@@ -200,8 +249,9 @@ def _set_dotted(data: dict, key: str, value: str) -> None:
             return
 
     raise ValueError(
-        f"unsupported key {key!r}. Use data_root, qmd_binary, cron.schedule, or "
-        "<collection>.store|enabled|since|on_hook"
+        f"unsupported key {key!r}. Use data_root, qmd_binary, cron.schedule, "
+        "<collection>.store|enabled|since|on_hook, or invoke.<codex|claude>."
+        "model|effort|profile|timeout_s|idle_timeout_s|quiet_after_s|stall_after_s"
     )
 
 
@@ -340,7 +390,10 @@ def config_main(argv: list[str] | None = None) -> int:
     p_set.add_argument(
         "key",
         metavar="KEY",
-        help="data_root | qmd_binary | cron.schedule | <collection>.store|enabled|since|on_hook",
+        help=(
+            "data_root | qmd_binary | cron.schedule | <collection>.store|enabled|since|on_hook"
+            " | invoke.<codex|claude>.<field>"
+        ),
     )
     p_set.add_argument("value", metavar="VALUE")
     p_add = sub.add_parser(
@@ -564,6 +617,26 @@ def _check_rg() -> None:
         )
 
 
+def _check_invoke(config: CairnConfig) -> None:
+    """Report the ``cairn invoke`` defaults and whether Codex's live model catalogue exists.
+
+    Warn-only: invoke is optional. Without ``$CODEX_HOME/models_cache.json`` the
+    Codex self-check refuses to run (no static model list to fall back on).
+    """
+    from .harnesses.codex_models import models_cache_path
+
+    summary = "; ".join(
+        f"{peer}: {_peer_summary(config.invoke.for_peer(peer))}" for peer in INVOKE_PEERS
+    )
+    _ok("invoke defaults", summary)
+    if shutil.which("codex") and not models_cache_path().is_file():
+        _warn(
+            "codex model cache",
+            f"{models_cache_path()} not found - run 'codex' once so 'cairn invoke codex' "
+            "can check models (or pass --skip-self-check)",
+        )
+
+
 def doctor_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cairn doctor", description="Check the cairn install")
     parser.add_argument(
@@ -656,6 +729,9 @@ def doctor_main(argv: list[str] | None = None) -> int:
                         f"collection [{name}]",
                         "has markdown but is not a qmd collection; run 'cairn sync'",
                     )
+
+    if config is not None:
+        _check_invoke(config)
 
     # embeddings present (an index with 0 vectors returns no search results).
     # warn, never fail: zero is the expected state before the first embed.

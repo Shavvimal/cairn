@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import importlib
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -122,8 +123,30 @@ def handle(config: CairnConfig, harness: str, payload: object) -> dict:
     return {"state": "queued", "request": str(path), "worker_pid": pid}
 
 
-def _process(config: CairnConfig, event: SessionEvent) -> None:
-    source = BY_NAME[event.source]
+# How long a hook export may run, and how often a busy QMD index lock is retried.
+EXPORT_TIMEOUT_S = 120
+LOCK_RETRY_INTERVAL_S = 1.0
+
+
+def export_and_index(
+    config: CairnConfig,
+    source: str,
+    session_id: str,
+    transcript: str | None,
+    *,
+    update_index: bool = True,
+    lock_timeout_s: float = 120,
+) -> Path:
+    """Export one session through ``cairn hook export``, then optionally refresh QMD.
+
+    The export runs in a child interpreter (so a crash or a hang cannot take the
+    caller down) and returns the document path it printed. With ``update_index``,
+    the QMD index lock is taken non-blocking and retried every second for up to
+    ``lock_timeout_s``: ``cairn sync`` holds it across a long ``qmd embed``, and
+    a caller must never hang behind that. A lock that stays busy raises
+    ``RuntimeError("index busy ...")``; the document is on disk regardless.
+    """
+    collection = BY_NAME[source].collection
     argv = [
         sys.executable,
         "-m",
@@ -131,33 +154,68 @@ def _process(config: CairnConfig, event: SessionEvent) -> None:
         "hook",
         "export",
         "--source",
-        event.source,
+        source,
         "--session-id",
-        event.session_id,
+        session_id,
     ]
-    if event.transcript_path:
-        argv.extend(["--transcript", event.transcript_path])
+    if transcript:
+        argv.extend(["--transcript", transcript])
     result = subprocess.run(
         argv,
         env=dict(os.environ, CAIRN_CONFIG=str(config.config_path.resolve())),
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=EXPORT_TIMEOUT_S,
     )
     if result.returncode:
         raise RuntimeError(f"target export failed: {(result.stderr or result.stdout)[-2000:]}")
-    with locked_index():
-        known = list_collections(config.qmd_binary)
-        status = ensure_collection(
-            source.collection, config.output_dir(source.collection), config.qmd_binary, known
-        )
-        if status not in ("added", "exists"):
-            raise RuntimeError(f"collection registration {status}: {source.collection}")
-        result = subprocess.run(
-            [config.qmd_binary, "update"], capture_output=True, text=True, timeout=120
-        )
-        if result.returncode:
-            raise RuntimeError(f"qmd update failed: {(result.stderr or result.stdout)[-2000:]}")
+    printed = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not printed:
+        raise RuntimeError(f"target export printed no document path for {source}:{session_id}")
+    document = Path(printed[-1])
+    if update_index:
+        _update_index(config, collection, lock_timeout_s)
+    return document
+
+
+def _update_index(config: CairnConfig, collection: str, lock_timeout_s: float) -> None:
+    """Register ``collection`` and run ``qmd update`` under the index lock, bounded in time."""
+    deadline = time.monotonic() + lock_timeout_s
+    while True:
+        try:
+            with locked_index(blocking=False):
+                known = list_collections(config.qmd_binary)
+                status = ensure_collection(
+                    collection, config.output_dir(collection), config.qmd_binary, known
+                )
+                if status not in ("added", "exists"):
+                    raise RuntimeError(f"collection registration {status}: {collection}")
+                result = subprocess.run(
+                    [config.qmd_binary, "update"],
+                    capture_output=True,
+                    text=True,
+                    timeout=EXPORT_TIMEOUT_S,
+                )
+                if result.returncode:
+                    raise RuntimeError(
+                        f"qmd update failed: {(result.stderr or result.stdout)[-2000:]}"
+                    )
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"index busy for {lock_timeout_s:g}s (another cairn sync holds the QMD "
+                    "lock); the document is exported, run 'cairn sync' later to index it"
+                ) from None
+            time.sleep(LOCK_RETRY_INTERVAL_S)
+
+
+def _process(config: CairnConfig, event: SessionEvent) -> None:
+    # The durable worker waits for the index as it always has (no deadline): a
+    # bounded wait here would exhaust hook retries behind one long ``qmd embed``.
+    export_and_index(
+        config, event.source, event.session_id, event.transcript_path, lock_timeout_s=math.inf
+    )
 
 
 def worker(config: CairnConfig) -> int:
