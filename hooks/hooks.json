@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/launch.py\" --harness claude",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/launch.sh\" --harness claude",
             "timeout": 3
           }
         ]

@@ -679,7 +679,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
             _warn("embeddings", "0 vectors - run 'cairn sync --cron' to embed")
 
     if config is not None:
-        from .hooks import launcher_path, status
+        from .hooks import iso, launcher_path, status
         from .store import SessionStore
 
         report = status(config, args.harness)
@@ -716,15 +716,17 @@ def doctor_main(argv: list[str] | None = None) -> int:
         else:
             _warn("hook trust", report["trust"])
         _ok("observed sync states", json.dumps(report["counts"]))
-        for request in report["requests"]:
-            if request.get("state") in ("failed", "invalid"):
-                _warn("hook failure", request.get("error", "run cairn hook worker"))
+        problems = [r for r in report["requests"] if r.get("state") in ("failed", "invalid")]
+        for request in problems[:5]:
+            _warn("hook failure", request.get("error", "run cairn hook worker"))
+        if len(problems) > 5:
+            _warn("hook failure", f"+{len(problems) - 5} more; see cairn hook status")
         observed = [r for r in report["requests"] if r.get("queued_at")]
         if observed:
             latest = max(observed, key=lambda r: r["queued_at"])
             _ok(
                 "last hook event",
-                f"{latest['event']['harness']} {latest['event']['session_id']}: {latest['state']} at {latest['queued_at']}",
+                f"{latest['event']['harness']} {latest['event']['session_id']}: {latest['state']} at {iso(latest['queued_at'])}",
             )
         else:
             _warn(

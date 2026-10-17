@@ -13,11 +13,13 @@ import hashlib
 import importlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
 import uuid
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import CairnConfig, ConfigError, get_config, user_config_path
@@ -25,6 +27,10 @@ from .harnesses import SessionEvent, get_harness
 from .qmd import ensure_collection, list_collections
 from .registry import BY_NAME
 from .storage import atomic_write, locked
+
+# Terminal requests (completed/disabled) are evidence, not work; keep a week of them.
+RETENTION_SECONDS = 7 * 24 * 3600
+RECENT_COMPLETED = 10  # completed requests shown by `hook status` without --all
 
 
 def job_dir(config: CairnConfig) -> Path:
@@ -148,7 +154,7 @@ def worker(config: CairnConfig) -> int:
                         continue
                     event = SessionEvent(**request["event"])
                     if not allowed(config, event):
-                        request["state"] = "disabled"
+                        request.update(state="disabled", disabled_at=time.time())
                         atomic_write(path, json.dumps(request))
                         continue
                     request.update(
@@ -171,7 +177,32 @@ def worker(config: CairnConfig) -> int:
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 failures += 1
                 print(f"Invalid sync request {path}: {exc}", file=sys.stderr)
+        prune(config)
     return int(failures > 0)
+
+
+def prune(config: CairnConfig, now: float | None = None) -> int:
+    """Delete terminal requests older than the retention window; never failed/running.
+
+    Age is measured from the terminal timestamp (``completed_at``/``disabled_at``),
+    so a long-queued request that completed today still survives a full week.
+    """
+    now = time.time() if now is None else now
+    removed = 0
+    with locked(job_dir(config) / ".queue.lock"):
+        for path in job_dir(config).glob("*.json"):
+            try:
+                request = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            finished = {
+                "completed": request.get("completed_at"),
+                "disabled": request.get("disabled_at"),
+            }.get(request.get("state"))
+            if isinstance(finished, int | float) and now - finished > RETENTION_SECONDS:
+                path.unlink(missing_ok=True)
+                removed += 1
+    return removed
 
 
 def status(config: CairnConfig, harness: str | None = None) -> dict:
@@ -195,22 +226,44 @@ def status(config: CairnConfig, harness: str | None = None) -> dict:
 
 
 def launcher_path() -> Path:
-    return user_config_path().parent / "hook-launcher.json"
+    return user_config_path().parent / "hook-launcher.env"
 
 
 def install_launcher(config: CairnConfig) -> Path:
+    """Record the engine's interpreter, config and PATH for ``hooks/launch.sh``.
+
+    The file is POSIX ``sh`` assignments (values quoted with :func:`shlex.quote`), so
+    the bundled launcher can source it without needing any Python to bootstrap.
+    """
     path = launcher_path()
-    atomic_write(
-        path,
-        json.dumps(
-            {
-                "python": sys.executable,
-                "config": str(config.config_path.resolve()),
-                "path": os.environ.get("PATH", ""),
-            }
-        ),
-    )
+    values = {
+        "CAIRN_PYTHON": sys.executable,
+        "CAIRN_CONFIG": str(config.config_path.resolve()),
+        "CAIRN_PATH": os.environ.get("PATH", ""),
+    }
+    atomic_write(path, "".join(f"{k}={shlex.quote(v)}\n" for k, v in values.items()))
     return path
+
+
+def compact_status(report: dict, show_all: bool) -> dict:
+    """Keep every actionable request; show only the most recent completed ones."""
+    if show_all:
+        return report
+    requests = report["requests"]
+    completed = sorted(
+        (r for r in requests if r.get("state") == "completed"),
+        key=lambda r: r.get("completed_at") or 0,
+        reverse=True,
+    )
+    kept = [r for r in requests if r.get("state") != "completed"] + completed[:RECENT_COMPLETED]
+    hidden = len(completed) - min(len(completed), RECENT_COMPLETED)
+    return {**report, "requests": kept, "hidden_completed": hidden}
+
+
+def iso(timestamp: object) -> str:
+    if isinstance(timestamp, int | float):
+        return datetime.fromtimestamp(timestamp, tz=UTC).isoformat(timespec="seconds")
+    return str(timestamp)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -222,6 +275,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("worker", help="drain/retry durable work, without embedding")
     inspect = sub.add_parser("status", help="show observed execution and queue state")
     inspect.add_argument("--harness", choices=("claude", "codex"))
+    inspect.add_argument(
+        "--all",
+        action="store_true",
+        help=f"list every completed request, not the last {RECENT_COMPLETED}",
+    )
     install = sub.add_parser("install", help="record launcher; inspect/register a host hook")
     install.add_argument("--harness", choices=("claude", "codex"))
     uninstall = sub.add_parser("uninstall", help="remove owned registration; preserve shared data")
@@ -271,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "worker":
             return worker(config)
         elif args.command == "status":
-            report = status(config, args.harness)
+            report = compact_status(status(config, args.harness), args.all)
             if args.harness == "codex":
                 from .harnesses.codex import Codex
 
@@ -284,7 +342,10 @@ def main(argv: list[str] | None = None) -> int:
             module = importlib.import_module(f"cairn.sources.{args.source}")
             source = getattr(module, f"{args.source.title()}Source")()
             with locked(source.output_dir / ".operation.lock"):
-                print(source.export_target(args.session_id, args.transcript))
+                try:
+                    print(source.export_target(args.session_id, args.transcript))
+                finally:
+                    source.flush_catalog()
         return 0
     except (OSError, ValueError, RuntimeError, ConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 from cairn import config, hooks
@@ -160,9 +161,9 @@ class TestHooks(StoreFixture):
         self.run_cli("hook", "install")
         from pathlib import Path
 
-        launch = Path(__file__).resolve().parents[1] / "hooks/launch.py"
+        launch = Path(__file__).resolve().parents[1] / "hooks/launch.sh"
         result = subprocess.run(
-            [sys.executable, str(launch), "--harness", "codex"],
+            ["/bin/sh", str(launch), "--harness", "codex"],
             input=json.dumps(self.event()),
             env={**self.env, "PATH": "/usr/bin:/bin"},
             capture_output=True,
@@ -275,3 +276,147 @@ class TestCodexRegistration(StoreFixture):
         settings.write_text('[plugins."cairn@cairn"]\nenabled = true\n')
         (cache / "plugin.json").unlink()
         self.assertFalse(Codex().plugin_enabled(self.cwd))
+
+
+class TestLauncher(StoreFixture):
+    """hooks/launch.sh must find an engine in every supported install state."""
+
+    launch = str(Path(__file__).resolve().parents[1] / "hooks/launch.sh")
+
+    def event(self):
+        return {
+            "hook_event_name": "SessionEnd",
+            "session_id": "launcher-session",
+            "cwd": self.cwd,
+            "transcript_path": None,
+            "reason": "other",
+        }
+
+    def fake_cairn(self, script: str) -> str:
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        path = bin_dir / "cairn"
+        path.write_text("#!/bin/sh\n" + script)
+        path.chmod(0o755)
+        return str(bin_dir)
+
+    def run_launcher(self, bin_dir: str | None):
+        env = {**self.env, "PATH": (bin_dir + ":" if bin_dir else "") + "/usr/bin:/bin"}
+        env.pop("CAIRN_PYTHON", None)
+        return subprocess.run(
+            ["/bin/sh", self.launch, "--harness", "codex"],
+            input=json.dumps(self.event()),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_falls_back_to_cairn_on_path_without_launcher_file(self):
+        log = self.root / "fake.log"
+        bin_dir = self.fake_cairn(f'printf "%s\\n" "$@" > {log}\ncat > /dev/null\nexit 0\n')
+        result = self.run_launcher(bin_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(log.read_text().split(), ["hook", "handle", "--harness", "codex"])
+
+    def test_degrades_to_legacy_sync_for_an_older_engine(self):
+        marker = self.root / "legacy-sync-ran"
+        bin_dir = self.fake_cairn(
+            'if [ "$1" = hook ]; then\n'
+            "  echo \"cairn: unknown command 'hook'.\" >&2\n"
+            "  exit 2\n"
+            "fi\n"
+            f'[ "$1" = sync ] && [ "$2" = --hook ] && touch {marker}\n'
+            "exit 0\n"
+        )
+        result = self.run_launcher(bin_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("older than the plugin", result.stderr)
+        self.assertIn("uv tool upgrade cairn", result.stderr)
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(marker.exists(), "legacy `cairn sync --hook` was not started")
+
+    def test_passes_other_engine_failures_through(self):
+        bin_dir = self.fake_cairn('echo "Error: bad payload" >&2\nexit 1\n')
+        result = self.run_launcher(bin_dir)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("bad payload", result.stderr)
+
+    def test_reports_missing_engine(self):
+        result = self.run_launcher(None)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no cairn engine found", result.stderr)
+        self.assertIn("cairn hook install", result.stderr)
+
+    def test_recorded_launcher_is_posix_sh_and_exports_environment(self):
+        self.run_cli("hook", "install")
+        text = hooks.launcher_path().read_text()
+        for key in ("CAIRN_PYTHON=", "CAIRN_CONFIG=", "CAIRN_PATH="):
+            self.assertIn(key, text)
+        probe = subprocess.run(
+            ["/bin/sh", "-c", f'. "{hooks.launcher_path()}"; echo "$CAIRN_CONFIG"'],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(probe.stdout.strip(), str(self.config.resolve()))
+
+
+class TestRetentionAndStatus(StoreFixture):
+    def write_request(self, name: str, **fields) -> Path:
+        cfg = config.get_config()
+        hooks.job_dir(cfg).mkdir(parents=True, exist_ok=True)
+        path = hooks.job_dir(cfg) / f"{name}.json"
+        request = {
+            "event": {
+                "harness": "codex",
+                "source": "codex",
+                "session_id": name,
+                "transcript_path": None,
+                "cwd": self.cwd,
+                "event": "SessionEnd",
+            },
+            "generation": name,
+            "attempts": 1,
+            **fields,
+        }
+        path.write_text(json.dumps(request))
+        return path
+
+    def test_prune_uses_terminal_timestamps_only(self):
+        now = time.time()
+        week = 7 * 24 * 3600
+        old_done = self.write_request(
+            "old-done", state="completed", queued_at=now - 9 * 86400, completed_at=now - 8 * 86400
+        )
+        fresh_done = self.write_request(
+            "fresh-done", state="completed", queued_at=now - 30 * 86400, completed_at=now
+        )
+        old_failed = self.write_request("old-failed", state="failed", queued_at=now - 3 * week)
+        old_disabled = self.write_request(
+            "old-disabled", state="disabled", queued_at=now - 3 * week, disabled_at=now - 2 * week
+        )
+        self.assertEqual(hooks.prune(config.get_config(), now=now), 2)
+        self.assertFalse(old_done.exists())
+        self.assertFalse(old_disabled.exists())
+        self.assertTrue(fresh_done.exists())  # completed today, however old its queue entry
+        self.assertTrue(old_failed.exists())  # failures are never pruned
+
+    def test_status_shows_problems_and_recent_completed_only(self):
+        now = time.time()
+        for n in range(12):
+            self.write_request(
+                f"done-{n:02}", state="completed", queued_at=now, completed_at=now + n
+            )
+        self.write_request("broken", state="failed", queued_at=now, error="boom")
+        report = hooks.compact_status(hooks.status(config.get_config()), show_all=False)
+        states = [r["state"] for r in report["requests"]]
+        self.assertEqual(states.count("failed"), 1)
+        self.assertEqual(states.count("completed"), hooks.RECENT_COMPLETED)
+        self.assertEqual(report["hidden_completed"], 2)
+        newest = [r["event"]["session_id"] for r in report["requests"] if r["state"] == "completed"]
+        self.assertEqual(newest[0], "done-11")
+        everything = hooks.compact_status(hooks.status(config.get_config()), show_all=True)
+        self.assertEqual(len(everything["requests"]), 13)
+        self.assertEqual(hooks.iso(0), "1970-01-01T00:00:00+00:00")
