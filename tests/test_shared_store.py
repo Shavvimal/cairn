@@ -17,7 +17,7 @@ from unittest.mock import patch
 from cairn import config, recall
 from cairn.frontmatter import extract_my_notes_section, parse_frontmatter
 from cairn.harnesses import get_harness
-from cairn.store import SessionStore, bounded_content
+from cairn.store import SCHEMA_VERSION, SessionStore, bounded_content
 
 
 class StoreFixture(unittest.TestCase):
@@ -180,7 +180,7 @@ class TestSharedStore(StoreFixture):
             self.run_cli(source, "export", "--all")
             content = path.read_text()
             fm = parse_frontmatter(content)
-            self.assertEqual(fm["cairn_schema"], "1")
+            self.assertEqual(fm["cairn_schema"], str(SCHEMA_VERSION))
             self.assertEqual(fm["status"], "done")
             self.assertEqual(fm["title"], "My chosen title")
             self.assertEqual(fm["tags"], ["important"])
@@ -242,7 +242,7 @@ class TestSharedStore(StoreFixture):
         self.run_cli("codex", "note", "Keep this note", "--session-id", "migrate")
         old = (
             record.path.read_text()
-            .replace('cairn_schema: "1"', 'cairn_schema: "0"')
+            .replace('cairn_schema: "2"', 'cairn_schema: "0"')
             .replace(
                 "<!-- Add your notes here. This section is preserved across exports. -->",
                 "My handwritten note",
@@ -251,7 +251,7 @@ class TestSharedStore(StoreFixture):
         record.path.write_text(old)
         self.run_cli("codex", "export", "--all")
         content = record.path.read_text()
-        self.assertIn('cairn_schema: "1"', content)
+        self.assertIn('cairn_schema: "2"', content)
         self.assertIn("Keep this note", content)
         self.assertIn("My handwritten note", content)
 

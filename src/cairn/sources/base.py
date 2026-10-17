@@ -42,6 +42,7 @@ class ConversationSource(ABC):
     version: str = "2.0.0"
     output_dir: Path = Path(".")  # collection output directory
     session_type: str = "session"  # frontmatter `type` value
+    subagent_type: str = ""  # frontmatter `type` of child (subagent) documents, if any
     collection: str = "sessions"  # QMD collection name
 
     # `list` default: "active" -> status == "active"; "not-done" -> status != "done"
@@ -122,6 +123,15 @@ class ConversationSource(ABC):
         return next(s.source for s in SOURCES if s.collection == self.collection)
 
     @property
+    def session_types(self) -> tuple[str, ...]:
+        """Every document ``type`` this source owns: the session and its children.
+
+        Other documents in the same folder (peer exchanges) are excluded by type;
+        that filter is the only thing keeping them out of the session index.
+        """
+        return tuple(t for t in (self.session_type, self.subagent_type) if t)
+
+    @property
     def catalog(self) -> Catalog:
         """The collection's stat-validated catalog, refreshed once per process.
 
@@ -148,7 +158,7 @@ class ConversationSource(ABC):
             index: dict[str, list[str]] = {}
             for rel, entry in catalog.entries.items():
                 fm = entry.frontmatter
-                if fm.get("type") != self.session_type:
+                if fm.get("type") not in self.session_types:
                     continue
                 native_id = native_id_of(fm, self.id_field)
                 if native_id is not None:
@@ -167,10 +177,23 @@ class ConversationSource(ABC):
                 entry.frontmatter,
                 self.source_name,
                 self.id_field,
-                self.session_type,
+                self.session_types,
             )
         except ValueError:
             return None
+
+    def record_at(self, path: Path) -> SessionRecord | None:
+        """The record for a document at a known path (catalog hit plus one ``stat``).
+
+        Child exporters know each child's planned path, so they check currency here
+        instead of through :meth:`find_record`, which would rebuild the id index after
+        every write.
+        """
+        try:
+            rel = path.resolve().relative_to(self.output_dir.resolve()).as_posix()
+        except ValueError:
+            return None
+        return self._record_at(rel)
 
     def find_record(self, session_id: str) -> SessionRecord | None:
         """Locate a session by full id, unique prefix, or ``source:id`` reference.

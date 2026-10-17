@@ -16,7 +16,7 @@ from .registry import SOURCES
 from .schema import Message, SessionData
 from .timeutil import parse_iso
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def messages_of(data: SessionData) -> list[Message]:
@@ -113,10 +113,17 @@ class SessionRecord:
     total_messages: int | None
     user_messages: int | None
     metadata: dict
+    session_type: str = ""
+    parent_id: str | None = None
 
     @property
     def reference(self) -> str:
         return f"{self.source}:{self.session_id}"
+
+    @property
+    def is_subagent(self) -> bool:
+        """A child document (subagent transcript) rather than a session of its own."""
+        return self.parent_id is not None
 
     def in_window(self, start: datetime, end: datetime) -> bool:
         return any(start <= stamp < end for stamp in self.activity)
@@ -156,11 +163,24 @@ def _activity_days(fm: dict) -> tuple[datetime, ...]:
     return ()
 
 
+SessionTypes = str | tuple[str, ...]
+
+
+def _session_types(session_types: SessionTypes) -> tuple[str, ...]:
+    return (session_types,) if isinstance(session_types, str) else session_types
+
+
 def record_from_frontmatter(
-    path: Path, fm: dict, source: str, id_field: str, session_type: str
+    path: Path, fm: dict, source: str, id_field: str, session_types: SessionTypes
 ) -> SessionRecord | None:
-    """Build a record from already-parsed frontmatter (``None`` if not a session)."""
-    if fm.get("type") != session_type:
+    """Build a record from already-parsed frontmatter (``None`` if not a session).
+
+    ``session_types`` is the source's session type or its ``(session, subagent)``
+    tuple; documents of any other ``type`` sharing the folder (peer exchanges) are
+    not sessions and yield ``None``.
+    """
+    doc_type = fm.get("type")
+    if doc_type not in _session_types(session_types):
         return None
     native_id = native_id_of(fm, id_field)
     if native_id is None:
@@ -194,17 +214,21 @@ def record_from_frontmatter(
         _number(fm.get("total_messages")),
         _number(fm.get("user_message_count")),
         fm,
+        str(doc_type),
+        (fm.get("parent_session_id") or None) if isinstance(doc_type, str) else None,
     )
 
 
-def read_record(path: Path, source: str, id_field: str, session_type: str) -> SessionRecord | None:
+def read_record(
+    path: Path, source: str, id_field: str, session_types: SessionTypes
+) -> SessionRecord | None:
     """Parse one file in full and build its record (the catalog-free path)."""
     fm = parse_frontmatter(path.read_text(encoding="utf-8"))
-    return record_from_frontmatter(path, fm, source, id_field, session_type)
+    return record_from_frontmatter(path, fm, source, id_field, session_types)
 
 
 def collection_records(
-    catalog: Catalog, source: str, id_field: str, session_type: str
+    catalog: Catalog, source: str, id_field: str, session_types: SessionTypes
 ) -> list[SessionRecord]:
     """Every session record in a refreshed catalog; unreadable files are reported."""
     result = []
@@ -212,7 +236,7 @@ def collection_records(
         print(f"Warning: skipping {catalog.path_of(rel)}: {message}", file=sys.stderr)
     for path, fm in catalog.items():
         try:
-            record = record_from_frontmatter(path, fm, source, id_field, session_type)
+            record = record_from_frontmatter(path, fm, source, id_field, session_types)
         except ValueError as exc:
             print(f"Warning: skipping {path}: {exc}", file=sys.stderr)
             continue
@@ -234,7 +258,7 @@ class SessionStore:
                 continue
             catalog = load_catalog(self.config.output_dir(source.collection))
             result.extend(
-                collection_records(catalog, source.source, source.id_field, source.session_type)
+                collection_records(catalog, source.source, source.id_field, source.session_types)
             )
             catalog.save()
         return result

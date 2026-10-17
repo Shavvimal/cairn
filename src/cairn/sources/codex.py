@@ -307,6 +307,7 @@ class CodexSource(ConversationSource):
     version = "2.0.0"
     output_dir = OUTPUT_DIR
     session_type = "codex-session"
+    subagent_type = "codex-subagent"
     collection = "codex-sessions"
     list_default = "not-done"
     id_field = "session_id"

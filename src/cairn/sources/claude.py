@@ -278,6 +278,7 @@ class ClaudeSource(ConversationSource):
     version = "2.0.0"
     output_dir = OUTPUT_DIR
     session_type = "claude-session"
+    subagent_type = "claude-subagent"
     collection = "claude-code-sessions"
     list_default = "active"
     session_env_var = "CLAUDE_SESSION_ID"
