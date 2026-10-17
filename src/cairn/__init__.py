@@ -9,7 +9,7 @@ a shared CLI. Each source under :mod:`cairn.sources` subclasses
 
 from __future__ import annotations
 
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 
 from . import (
     cli,

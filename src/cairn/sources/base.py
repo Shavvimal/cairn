@@ -345,7 +345,12 @@ class ConversationSource(ABC):
                 active_host = detect_harness()
                 hints = any(
                     os.environ.get(name)
-                    for name in ("CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID")
+                    for name in (
+                        "CLAUDE_CODE_SESSION_ID",
+                        "CLAUDE_SESSION_ID",
+                        "CODEX_THREAD_ID",
+                        "CODEX_SESSION_ID",
+                    )
                 )
                 if active_host != source and (active_host or hints):
                     raise ValueError(

@@ -15,7 +15,13 @@ from tests.test_shared_store import StoreFixture
 
 PARENT = "p0000000-aaaa-4bbb-8ccc-000000000001"
 PEER = "019a0000-0000-7000-8000-00000000peer"
-HINTS = ("CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CAIRN_HARNESS")
+HINTS = (
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
+    "CAIRN_HARNESS",
+)
 
 
 def _iso(epoch: float) -> str:
