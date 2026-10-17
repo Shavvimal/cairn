@@ -246,7 +246,10 @@ Codex SessionEnd occurs on normal shutdown, archive/delete of an open conversati
 its idle-session timeout; switching tabs does not immediately end the session. Check
 `cairn hook status --harness codex` for actual registration/trust and separate queue
 completion. A completed request plus a query returning the session verifies indexing.
-Failures stay on disk for `cairn hook worker` or cron to retry. A failed spawn returns an
+Failed requests get at most three attempts across hook workers and cron. After that,
+`cairn hook status` reports `exhausted` with the error, retained for seven days.
+After fixing the cause, run `cairn hook retry SOURCE:FULL_SESSION_ID` to start a fresh
+attempt budget. A new SessionEnd event also creates a fresh request. A failed spawn returns an
 error even though the request was saved. This POSIX worker uses flock and detached sessions;
 no new Windows support is claimed.
 
@@ -279,6 +282,11 @@ size and inode still match, changed files are re-parsed, and a missing or corrup
 is rebuilt from the files. On a store of 8,000 Claude sessions a lookup drops from about
 a second to under 100 ms. The catalog never lives inside the corpus, so a git-tracked
 data root does not see it.
+
+Locks live under `~/.local/state/cairn/locks/`, outside the corpus and QMD directories.
+Their identities use canonical resource paths, so different config/cache environments
+still coordinate on shared files. Lock files remain in place to keep waiting writers
+on the same inode.
 
 ## Repository layout
 

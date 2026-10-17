@@ -54,6 +54,8 @@ class _AdapterFixture(unittest.TestCase):
     def setUp(self):
         self._tmp = TemporaryDirectory()
         self.root = Path(self._tmp.name)
+        self._home_patch = patch.dict(os.environ, {"HOME": str(self.root / "home")})
+        self._home_patch.start()
         self._prev = os.environ.get("CAIRN_CONFIG")
 
     def _activate(self, stores: dict[str, str]):
@@ -64,6 +66,7 @@ class _AdapterFixture(unittest.TestCase):
         return importlib.reload(module)
 
     def tearDown(self):
+        self._home_patch.stop()
         if self._prev is None:
             os.environ.pop("CAIRN_CONFIG", None)
         else:

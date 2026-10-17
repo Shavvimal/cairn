@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .config import get_config
 from .runtime import qmd_resources
-from .storage import locked
+from .storage import lock_path, locked
 
 COLLECTION_TIMEOUT = 30  # discovery/registration must not hold sync locks indefinitely
 
@@ -26,11 +26,11 @@ COLLECTION_TIMEOUT = 30  # discovery/registration must not hold sync locks indef
 def locked_index(*, blocking: bool = True) -> Iterator[None]:
     """Serialize writers sharing either QMD's config or its database.
 
-    Lock beside each canonical resource so aliases, differing cache homes, and
+    Lock each canonical resource so aliases, differing cache homes, and
     explicit/default environment settings all coordinate. Acquire in path order
     to avoid deadlocks when only one resource is shared by two configurations.
     """
-    paths = sorted({path.with_name(f".{path.name}.cairn.lock") for path in qmd_resources()})
+    paths = sorted({lock_path(path, "qmd") for path in qmd_resources()})
     with ExitStack() as stack:
         for path in paths:
             stack.enter_context(locked(path, blocking=blocking))

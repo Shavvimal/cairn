@@ -117,6 +117,72 @@ class TestHooks(StoreFixture):
             process.assert_called_once()
         self.assertEqual(json.loads(path.read_text())["state"], "completed")
 
+    def test_failed_requests_stop_retrying_and_can_be_explicitly_retried(self):
+        cfg = config.get_config()
+        event = get_harness("codex").decode(self.event())
+        path = hooks.enqueue(cfg, event)
+        assert path is not None
+        with patch(
+            "cairn.hooks._process", side_effect=RuntimeError("persistent failure")
+        ) as process:
+            for _ in range(hooks.MAX_ATTEMPTS):
+                self.assertEqual(hooks.worker(cfg), 1)
+            exhausted = json.loads(path.read_text())
+            self.assertEqual(exhausted["state"], "exhausted")
+            self.assertEqual(exhausted["attempts"], hooks.MAX_ATTEMPTS)
+            self.assertEqual(exhausted["error"], "persistent failure")
+            for _ in range(3):
+                self.assertEqual(hooks.worker(cfg), 0)
+            self.assertEqual(process.call_count, hooks.MAX_ATTEMPTS)
+            self.assertEqual(json.loads(path.read_text()), exhausted)
+        self.assertEqual(hooks.status(cfg)["counts"]["exhausted"], 1)
+        self.fake_qmd()
+        self.run_cli("hook", "retry", f"codex:{event.session_id}")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            retried = json.loads(path.read_text())
+            if retried["state"] == "completed":
+                break
+            time.sleep(0.05)
+        self.assertEqual(retried["state"], "completed")
+        self.assertEqual(retried["attempts"], 1)
+        self.assertNotEqual(retried["generation"], exhausted["generation"])
+
+    def test_last_attempt_crash_and_old_failed_requests_are_capped(self):
+        cfg = config.get_config()
+        for state, attempts in (("running", hooks.MAX_ATTEMPTS), ("failed", 100)):
+            with self.subTest(state=state):
+                event = get_harness("codex").decode(self.event(sid=state))
+                path = hooks.enqueue(cfg, event)
+                assert path is not None
+                request = json.loads(path.read_text())
+                request.update(state=state, attempts=attempts)
+                path.write_text(json.dumps(request))
+                with patch("cairn.hooks._process") as process:
+                    self.assertEqual(hooks.worker(cfg), 1)
+                    process.assert_not_called()
+                self.assertEqual(json.loads(path.read_text())["state"], "exhausted")
+
+    def test_final_failure_cannot_overwrite_new_generation(self):
+        cfg = config.get_config()
+        event = get_harness("codex").decode(self.event())
+        path = hooks.enqueue(cfg, event)
+        assert path is not None
+        request = json.loads(path.read_text())
+        request["attempts"] = hooks.MAX_ATTEMPTS - 1
+        path.write_text(json.dumps(request))
+
+        def newer_request(*_):
+            hooks.enqueue(cfg, event)
+            raise RuntimeError("older generation failed")
+
+        with patch("cairn.hooks._process", side_effect=newer_request):
+            self.assertEqual(hooks.worker(cfg), 1)
+        newest = json.loads(path.read_text())
+        self.assertEqual(newest["state"], "queued")
+        self.assertEqual(newest["attempts"], 0)
+        self.assertNotEqual(newest["generation"], request["generation"])
+
     def test_detached_workers_survive_parent_exit_and_coalesce(self):
         self.fake_qmd()
         payload = self.event()
@@ -405,11 +471,27 @@ class TestRetentionAndStatus(StoreFixture):
         old_disabled = self.write_request(
             "old-disabled", state="disabled", queued_at=now - 3 * week, disabled_at=now - 2 * week
         )
-        self.assertEqual(hooks.prune(config.get_config(), now=now), 2)
+        old_exhausted = self.write_request(
+            "old-exhausted",
+            state="exhausted",
+            queued_at=now - 3 * week,
+            exhausted_at=now - 2 * week,
+            error="failed three times",
+        )
+        fresh_exhausted = self.write_request(
+            "fresh-exhausted",
+            state="exhausted",
+            queued_at=now - 3 * week,
+            exhausted_at=now,
+            error="just exhausted",
+        )
+        self.assertEqual(hooks.prune(config.get_config(), now=now), 3)
         self.assertFalse(old_done.exists())
         self.assertFalse(old_disabled.exists())
         self.assertTrue(fresh_done.exists())  # completed today, however old its queue entry
-        self.assertTrue(old_failed.exists())  # failures are never pruned
+        self.assertTrue(old_failed.exists())  # attempts remain
+        self.assertFalse(old_exhausted.exists())
+        self.assertTrue(fresh_exhausted.exists())
 
     def test_status_shows_problems_and_recent_completed_only(self):
         now = time.time()

@@ -11,6 +11,11 @@ Read `cairn --version` and `cairn config show --json`. Identify the engine's ins
 the installation method and extras; do not replace an editable developer checkout or
 silently change a deliberately pinned release.
 
+When upgrading an earlier 2.4.0 prerelease, let existing sync/worker processes finish
+before upgrading: this revision moves locks out of the corpus. Avoid running old and
+new engine processes concurrently. Old `.lock` sidecars can be removed after all old
+writers have stopped; do not delete lock files while writers may still be using them.
+
 Inspect the installed plugin manifest for the active host, using the paths in the
 [harness contract](../../../references/harnesses/contract.md). Read the current Cairn
 cron entry with `crontab -l` and identify which hosts already have Cairn installed.
@@ -96,6 +101,11 @@ it passed based on registration, old completed requests, or manual sync.
 
 Report the engine/plugin versions, preserved store/index paths, refreshed hooks and
 existing schedule, search evidence, and any pending restart/trust/lifecycle checks.
+
+Hook requests stop retrying after three attempts. If status shows `exhausted`, fix the
+reported error and use `cairn hook retry SOURCE:FULL_SESSION_ID` to retry that retained
+request. Exhausted requests remain visible for seven days; after that, export the
+source manually and run incremental sync if recovery is still needed.
 
 ## Store compatibility when upgrading to 2.4.0
 

@@ -39,9 +39,11 @@ Reinstall hooks and the existing cron entry to record the complete QMD environme
 
 - Shared Claude/Codex harness adapters, portable packaging, explicit Codex onboarding,
   and discovery-based lifecycle registration with trust diagnostics.
-- Durable session exports queued to a detached worker; failures are retained and retried,
+- Durable session exports queued to a detached worker; failures get at most three attempts,
   index updates are serialised, and embedding stays out of the callback. Completed and
-  disabled requests are pruned seven days after they finished; `cairn hook status`
+  disabled requests and exhausted failures are pruned seven days after becoming terminal.
+  `cairn hook retry SOURCE:FULL_SESSION_ID` explicitly resets a failed request's attempt
+  budget; `cairn hook status`
   shows every actionable request plus the ten most recent completed ones (`--all`).
 - Recall of exported conversations across sources with source-qualified IDs, UTC activity
   filtering, schema migration, bounded expansion, and safe concurrent annotations.
@@ -52,6 +54,8 @@ Reinstall hooks and the existing cron entry to record the complete QMD environme
   mtime/ctime/size/inode match, and a missing or corrupt catalog is rebuilt.
 - A POSIX `sh` hook launcher (`hooks/launch.sh`) that never depends on the macOS
   `/usr/bin/python3` stub.
+- Resource locks under `~/.local/state/cairn/locks/` keep lock files out of Markdown
+  and QMD directories while coordinating shared canonical paths across profiles.
 - Community health files: `CODE_OF_CONDUCT.md`, `SECURITY.md`, issue and pull
   request templates, and Dependabot configuration.
 - CI: a `version-bump` gate that requires `__version__` to change when

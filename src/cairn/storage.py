@@ -7,11 +7,22 @@ inode). The kernel releases flock after a crash, so stale files are harmless.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+
+def lock_path(resource: Path, purpose: str) -> Path:
+    """Locate a permanent per-user lock outside the resource's directory.
+
+    Resolve aliases before hashing. Deliberately independent of XDG config/cache
+    homes: writers using different profiles must still lock the same resource.
+    """
+    key = hashlib.sha256(f"{purpose}:{resource.resolve()}".encode()).hexdigest()
+    return Path.home() / ".local/state/cairn/locks" / f"{key}.lock"
 
 
 @contextmanager
@@ -26,7 +37,7 @@ def locked(path: Path, *, blocking: bool = True) -> Iterator[None]:
 
 
 def document_lock(path: Path) -> Path:
-    return path.with_suffix(path.suffix + ".lock")
+    return lock_path(path, "document")
 
 
 def atomic_write(path: Path, text: str) -> None:

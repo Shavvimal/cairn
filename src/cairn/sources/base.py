@@ -32,7 +32,7 @@ from ..paths import get_output_path
 from ..registry import SOURCES
 from ..rendering import render_conversation, strip_lone_surrogates
 from ..schema import Message, SessionData
-from ..storage import atomic_write, document_lock, locked
+from ..storage import atomic_write, document_lock, lock_path, locked
 from ..store import SessionRecord, metadata_lines, native_id_of, record_from_frontmatter
 
 
@@ -258,7 +258,7 @@ class ConversationSource(ABC):
         )
         # Collection lock protects filename allocation; document lock coordinates
         # read/merge/write with annotations. Readers see the old or new whole file.
-        with locked(self.output_dir / ".export.lock"):
+        with locked(lock_path(self.output_dir, "export")):
             if output_file.exists():
                 existing = fm_mod.parse_frontmatter(output_file.read_text(encoding="utf-8"))
                 if existing.get(self.id_field) != source_id:

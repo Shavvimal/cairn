@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ..config import CairnConfig, user_config_path
 from ..runtime import background_environment
-from ..storage import atomic_write, locked
+from ..storage import atomic_write, lock_path, locked
 from .codex import Codex
 
 
@@ -54,7 +54,7 @@ def configure(config: CairnConfig | None, *, remove: bool = False) -> str:
                 "--require-plugin",
             ]
         )
-    with locked(hooks_path.with_suffix(".cairn.lock")):
+    with locked(lock_path(hooks_path, "registration")):
         data = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
         previous = json.loads(ownership_path.read_text()) if ownership_path.exists() else {}
         if previous and previous.get("path") != str(hooks_path):

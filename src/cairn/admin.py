@@ -706,7 +706,9 @@ def doctor_main(argv: list[str] | None = None) -> int:
         else:
             _warn("hook trust", report["trust"])
         _ok("observed sync states", json.dumps(report["counts"]))
-        problems = [r for r in report["requests"] if r.get("state") in ("failed", "invalid")]
+        problems = [
+            r for r in report["requests"] if r.get("state") in ("failed", "exhausted", "invalid")
+        ]
         for request in problems[:5]:
             _warn("hook failure", request.get("error", "run cairn hook worker"))
         if len(problems) > 5:

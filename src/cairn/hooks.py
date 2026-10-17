@@ -3,7 +3,7 @@
 Every enqueue launches a waiter. Workers serialize with flock, then drain a
 snapshot once. Thus an enqueue during worker shutdown always has a successor.
 The short queue lock protects generations; completion never overwrites a newer
-request. Failed/running requests survive crashes and `worker`/cron retry them.
+request. Failed/running requests survive crashes; retries stop after MAX_ATTEMPTS.
 """
 
 from __future__ import annotations
@@ -27,11 +27,12 @@ from .harnesses import SessionEvent, get_harness
 from .qmd import ensure_collection, list_collections, locked_index
 from .registry import BY_NAME
 from .runtime import background_environment
-from .storage import atomic_write, locked
+from .storage import atomic_write, lock_path, locked
 
-# Terminal requests (completed/disabled) are evidence, not work; keep a week of them.
+# Terminal requests are evidence, not work; keep a week of them.
 RETENTION_SECONDS = 7 * 24 * 3600
 RECENT_COMPLETED = 10  # completed requests shown by `hook status` without --all
+MAX_ATTEMPTS = 3
 
 
 def job_dir(config: CairnConfig) -> Path:
@@ -47,17 +48,42 @@ def allowed(config: CairnConfig, event: SessionEvent) -> bool:
 def enqueue(config: CairnConfig, event: SessionEvent) -> Path | None:
     if not allowed(config, event):
         return None
-    key = hashlib.sha256(f"{event.source}:{event.session_id}".encode()).hexdigest()
-    path = job_dir(config) / f"{key}.json"
-    with locked(job_dir(config) / ".queue.lock"):
-        request = {
-            "event": asdict(event),
-            "generation": uuid.uuid4().hex,
-            "state": "queued",
-            "queued_at": time.time(),
-            "attempts": 0,
-        }
-        atomic_write(path, json.dumps(request))
+    path = request_path(config, f"{event.source}:{event.session_id}")
+    with locked(lock_path(job_dir(config), "queue")):
+        atomic_write(path, json.dumps(queued_request(event)))
+    return path
+
+
+def request_path(config: CairnConfig, reference: str) -> Path:
+    key = hashlib.sha256(reference.encode()).hexdigest()
+    return job_dir(config) / f"{key}.json"
+
+
+def queued_request(event: SessionEvent) -> dict:
+    return {
+        "event": asdict(event),
+        "generation": uuid.uuid4().hex,
+        "state": "queued",
+        "queued_at": time.time(),
+        "attempts": 0,
+    }
+
+
+def retry(config: CairnConfig, reference: str) -> Path:
+    """Explicitly start a fresh attempt budget for one failed request."""
+    path = request_path(config, reference)
+    with locked(lock_path(job_dir(config), "queue")):
+        if not path.is_file():
+            raise ValueError(
+                f"No retained hook request for {reference}; use SOURCE:FULL_SESSION_ID"
+            )
+        request = json.loads(path.read_text(encoding="utf-8"))
+        if request["state"] not in ("failed", "exhausted"):
+            raise ValueError("Only failed or exhausted requests can be retried")
+        event = SessionEvent(**request["event"])
+        if not allowed(config, event):
+            raise ValueError("Hook sync is disabled for this source")
+        atomic_write(path, json.dumps(queued_request(event)))
     return path
 
 
@@ -136,17 +162,26 @@ def _process(config: CairnConfig, event: SessionEvent) -> None:
 
 def worker(config: CairnConfig) -> int:
     failures = 0
-    with locked(job_dir(config) / ".worker.lock"):
+    with locked(lock_path(job_dir(config), "worker")):
         for path in sorted(job_dir(config).glob("*.json")):
             try:
-                with locked(job_dir(config) / ".queue.lock"):
+                with locked(lock_path(job_dir(config), "queue")):
                     request = json.loads(path.read_text(encoding="utf-8"))
-                    if request["state"] in ("completed", "disabled"):
+                    if request["state"] in ("completed", "disabled", "exhausted"):
                         continue
                     event = SessionEvent(**request["event"])
                     if not allowed(config, event):
                         request.update(state="disabled", disabled_at=time.time())
                         atomic_write(path, json.dumps(request))
+                        continue
+                    if request.get("attempts", 0) >= MAX_ATTEMPTS:
+                        # Includes old failed requests and a crash on the last attempt.
+                        request.update(state="exhausted", exhausted_at=time.time())
+                        request.setdefault(
+                            "error", "Worker stopped before completing the last attempt"
+                        )
+                        atomic_write(path, json.dumps(request))
+                        failures += 1
                         continue
                     request.update(
                         state="running",
@@ -161,7 +196,9 @@ def worker(config: CairnConfig) -> int:
                 except Exception as exc:
                     failures += 1
                     request.update(state="failed", failed_at=time.time(), error=str(exc)[-2000:])
-                with locked(job_dir(config) / ".queue.lock"):
+                    if request["attempts"] >= MAX_ATTEMPTS:
+                        request.update(state="exhausted", exhausted_at=time.time())
+                with locked(lock_path(job_dir(config), "queue")):
                     current = json.loads(path.read_text(encoding="utf-8"))
                     if current["generation"] == request["generation"]:
                         atomic_write(path, json.dumps(request))
@@ -173,14 +210,14 @@ def worker(config: CairnConfig) -> int:
 
 
 def prune(config: CairnConfig, now: float | None = None) -> int:
-    """Delete terminal requests older than the retention window; never failed/running.
+    """Delete terminal requests older than the retention window.
 
-    Age is measured from the terminal timestamp (``completed_at``/``disabled_at``),
-    so a long-queued request that completed today still survives a full week.
+    Exhausted failures remain visible for a full week after retries stop. Requests
+    with attempts remaining and running requests are not deleted here.
     """
     now = time.time() if now is None else now
     removed = 0
-    with locked(job_dir(config) / ".queue.lock"):
+    with locked(lock_path(job_dir(config), "queue")):
         for path in job_dir(config).glob("*.json"):
             try:
                 request = json.loads(path.read_text(encoding="utf-8"))
@@ -189,6 +226,7 @@ def prune(config: CairnConfig, now: float | None = None) -> int:
             finished = {
                 "completed": request.get("completed_at"),
                 "disabled": request.get("disabled_at"),
+                "exhausted": request.get("exhausted_at"),
             }.get(request.get("state"))
             if isinstance(finished, int | float) and now - finished > RETENTION_SECONDS:
                 path.unlink(missing_ok=True)
@@ -207,7 +245,15 @@ def status(config: CairnConfig, harness: str | None = None) -> dict:
             requests.append({"state": "invalid", "error": str(exc), "path": str(path)})
     counts = {
         state: sum(r.get("state") == state for r in requests)
-        for state in ("queued", "running", "completed", "failed", "disabled", "invalid")
+        for state in (
+            "queued",
+            "running",
+            "completed",
+            "failed",
+            "exhausted",
+            "disabled",
+            "invalid",
+        )
     }
     return {
         "counts": counts,
@@ -271,6 +317,10 @@ def main(argv: list[str] | None = None) -> int:
     callback.add_argument("--harness", required=True, choices=("claude", "codex"))
     callback.add_argument("--require-plugin", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("worker", help="drain/retry durable work, without embedding")
+    retry_parser = sub.add_parser(
+        "retry", help="restart one failed/exhausted request's attempt budget"
+    )
+    retry_parser.add_argument("reference", metavar="SOURCE:FULL_SESSION_ID")
     inspect = sub.add_parser("status", help="show observed execution and queue state")
     inspect.add_argument("--harness", choices=("claude", "codex"))
     inspect.add_argument(
@@ -327,6 +377,11 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(handle(config, args.harness, payload)))
         elif args.command == "worker":
             return worker(config)
+        elif args.command == "retry":
+            path = retry(config, args.reference)
+            print(
+                json.dumps({"state": "queued", "request": str(path), "worker_pid": launch(config)})
+            )
         elif args.command == "status":
             report = compact_status(status(config, args.harness), args.all)
             if args.harness == "codex":
@@ -340,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             module = importlib.import_module(f"cairn.sources.{args.source}")
             source = getattr(module, f"{args.source.title()}Source")()
-            with locked(source.output_dir / ".operation.lock"):
+            with locked(lock_path(source.output_dir, "operation")):
                 try:
                     print(source.export_target(args.session_id, args.transcript))
                 finally:

@@ -14,7 +14,7 @@ from cairn import config, hooks, qmd
 from cairn.harnesses import get_harness
 from cairn.harnesses.codex_registration import configure
 from cairn.runtime import background_environment
-from cairn.storage import locked
+from cairn.storage import lock_path, locked
 from tests.test_shared_store import StoreFixture
 
 
@@ -225,7 +225,7 @@ class TestCollectionTimeouts(StoreFixture):
                 self.assertIn(f"collection {operation} timed out", request["error"])
                 with (
                     qmd.locked_index(blocking=False),
-                    locked(hooks.job_dir(cfg) / ".worker.lock", blocking=False),
+                    locked(lock_path(hooks.job_dir(cfg), "worker"), blocking=False),
                 ):
                     pass
                 probe.write_text(f"#!{sys.executable}\nprint('qmd://codex-sessions/')\n")

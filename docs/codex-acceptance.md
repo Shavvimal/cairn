@@ -94,10 +94,12 @@ below were not repeated after these changes and remain open.
 | Queue hygiene | Completed/disabled requests are pruned seven days after their terminal timestamp; failed and running requests are never pruned. `cairn hook status` shows actionable requests plus the ten most recent completed (`--all` for everything); doctor caps failure warnings at five. |
 | Checks | `make check`: ruff, mypy and 184 unit tests pass; `ruff format --check` passes. |
 
-Not repeated after these changes: installation from GitHub, real Claude and Codex
+At that checkpoint, not repeated after these changes: installation from GitHub, real Claude and Codex
 shutdowns through the installed plugin, the Codex user-level fallback registration, and
 the plugin-only upgrade path against a real 2.3.0 engine. These must be re-run with the
-temporary-profile method above before the PR leaves draft.
+temporary-profile method above before the PR leaves draft. The final CLI check below
+supersedes the outstanding shutdown/fallback checks; its package came from a local
+build of the final sources, not a new GitHub fetch.
 
 ## Acceptance still requiring evidence
 
@@ -120,12 +122,31 @@ This check did not run embedding or a real host shutdown; it does not close the
 live-host acceptance gaps above or below. The user's existing store was inspected
 read-only, with no exports or index updates against it.
 
-### Open host and platform checks
+### Remaining code findings and final CLI check (2026-10-17)
 
-- **Remaining code review findings:** failed hook requests have no attempt cap or
-  terminal failure retention policy. Document/collection locks still live inside
-  the Markdown corpus, and QMD locks live beside its config/database. These are
-  separate medium findings and are not resolved by the six fixes above.
+Both medium findings are resolved:
+
+- Requests stop after three attempts, including recovery from a crash on the last
+  attempt. `exhausted` requests retain the error for seven days and remain visible
+  in status/doctor. Explicit `cairn hook retry SOURCE:FULL_SESSION_ID` starts a new
+  budget. A final failure cannot overwrite a newer generation.
+- Document, collection, queue, worker, hook-registration and QMD locks live under
+  `~/.local/state/cairn/locks/`, keyed by canonical resource path and lock purpose.
+  Different config/cache homes still contend on shared resources. New tests run
+  export, annotation and indexing against a Git corpus and verify no lock sidecars.
+
+All 200 tests pass on Python 3.11, 3.12 and 3.13; lint, mypy, formatting and whitespace
+checks pass. The final sources were built into the isolated global tool installation
+and copied into both installed plugin caches in the existing acceptance profiles.
+No new GitHub fetch, user-store update, real cron registration or desktop test was run.
+
+| Final check | Evidence |
+| --- | --- |
+| Claude Code 2.1.302 shutdown | Authenticated print-mode session `471b423d-08bf-42d2-ae83-05ace9cd6f0b` returned the tangerine marker. Its installed bundled hook completed in 0.67 seconds on attempt 1. The matching export appeared in QMD despite wrong host `XDG_CONFIG_HOME`, `QMD_CONFIG_DIR` and `INDEX_PATH`. |
+| Codex CLI 0.160.0 shutdown | Session `01a14955-be22-7872-8a47-62170f0a9c63` returned the nectarine marker. The changed fallback hook was reviewed/trusted in the normal TUI, then `/exit` completed. The request finished in 0.38 seconds on attempt 1, and QMD returned the matching export despite wrong host index settings. |
+| Queue/index isolation | Both live checks completed without cron. Final queue counts: 6 completed, 0 queued/running/failed/exhausted/invalid. Codex reports the SessionEnd hook enabled and trusted. The host's alternate index was never created. |
+| Incremental maintenance | `cairn sync --cron` exited 0; real QMD embedded 9 chunks from 5 changed documents using cached models. Index: 17 documents, 65 vectors. No new lock sidecars appeared in the corpus or QMD directories. A nonfatal Metal compilation warning preceded successful embedding. |
+
 - **Catalog rejection diagnostics:** `Catalog.stats["rejected"]` counts invalid or
   unreadable cache loads; a missing cache is an ordinary cold load and is not counted.
 - **Bundled launcher environment follow-up:** installation now records identical
@@ -133,6 +154,8 @@ read-only, with no exports or index updates against it.
   launcher falls back to the latter when discovery misses. Regression coverage
   exercises both wrong and absent host `XDG_CONFIG_HOME`, plus removal of both copies.
   The follow-up `make check` passes all 194 tests.
+
+### Open host and platform checks
 
 - **Codex desktop:** no Codex desktop application is installed in this environment. Desktop
   package loading, onboarding, hook trust, lifecycle and resume UI remain unverified.
@@ -147,6 +170,9 @@ read-only, with no exports or index updates against it.
   CLI resume and Claude native resume in print mode were exercised. CLI 0.163.0 was checked
   for package/hook discovery, not its complete lifecycle matrix.
 
-These gaps remain open acceptance criteria. Packaging, a green doctor, generated resume
-argv, and a direct handler invocation do not substitute for the missing host evidence.
-OpenAI public-directory submission remains deferred.
+These gaps remain limitations on the support claim: the evidence supports the tested
+macOS CLI hosts, not full desktop/Linux parity or public-directory submission.
+For the CLI release, the remaining merge gate is green GitHub CI (including the
+Python matrix and version check) on the final pushed commits. Do not treat checks
+on an older PR head as verification of these changes. OpenAI public-directory
+submission remains deferred.

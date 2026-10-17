@@ -129,9 +129,9 @@ def run(source: ConversationSource, argv: list[str] | None = None) -> None:
     parser = build_parser(source)
     args = parser.parse_args(argv)
     if args.command in ("export", "sync"):
-        from .storage import locked
+        from .storage import lock_path, locked
 
-        with locked(source.output_dir / ".operation.lock"):
+        with locked(lock_path(source.output_dir, "operation")):
             try:
                 result = args.func(args)
             finally:
