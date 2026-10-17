@@ -220,6 +220,14 @@ def main(argv: list[str] | None = None):
         success = False
         log("UNCAUGHT ERROR:\n" + traceback.format_exc())
 
+    try:
+        from .invoke import drain_publications
+
+        for report in drain_publications(config):
+            log(f"  [invoke-publish] {report.get('thread_id')}: {report.get('rounds') or 'busy'}")
+    except Exception as exc:  # publishing leftovers must never fail the sync
+        log(f"  [invoke-publish] WARNING: {exc}")
+
     log("=== done ===" if success else "=== FAILED ===")
     return 0 if success else 1
 

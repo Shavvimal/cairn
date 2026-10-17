@@ -29,6 +29,8 @@ _ADMIN: dict[str, str] = {
     "doctor": "cairn.admin:doctor_main",
     "config": "cairn.admin:config_main",
     "cron": "cairn.admin:cron_main",
+    "invoke": "cairn.invoke:main",
+    "agents": "cairn.agents:main",
 }
 
 _HELP = """\
@@ -54,6 +56,19 @@ recall (temporal view over shared exported sessions; topic search is qmd's job):
   cairn recall list yesterday                sessions from a date window
   cairn recall list "last week" --json       machine-readable session list
   cairn recall expand <source:session-id>           condensed transcript for one session
+
+peer agents (one foreground round per call; run it in the background):
+  cairn invoke codex --prompt TEXT [--effort E] [--profile review|edit|full] [--json]
+  cairn invoke claude --prompt-file FILE [--model M] [--permission-mode MODE]
+  cairn invoke codex --resume THREAD_ID --prompt TEXT   follow up in the same thread
+  cairn invoke status THREAD_ID [--follow] [--json]     health, progress and answer
+  cairn invoke cancel THREAD_ID                         stop a running round
+  cairn invoke publish THREAD_ID                        finish pending exports/index
+  cairn invoke list-models [--json]                     the Codex model catalogue
+
+agents (peer runs and subagents of a session):
+  cairn agents list [--session SOURCE:ID] [--all] [--json] [--watch]
+  cairn agents wait [--session SOURCE:ID | ID...] [--timeout-s N] [--stall-after-s N]
 
 orchestration / admin:
   cairn sync [--hook | --cron | --all]       sync every source, then refresh QMD

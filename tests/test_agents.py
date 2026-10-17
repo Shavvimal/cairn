@@ -1,0 +1,231 @@
+"""``cairn agents list|wait`` over Claude subagents and peer runs."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+import unittest
+from pathlib import Path
+
+from cairn.agents import classify_claude_child, task_notifications
+from tests.test_shared_store import StoreFixture
+
+PARENT = "p0000000-aaaa-4bbb-8ccc-000000000001"
+PEER = "019a0000-0000-7000-8000-00000000peer"
+HINTS = ("CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CAIRN_HARNESS")
+
+
+def _iso(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _write(path: Path, records: list[dict]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+    return path
+
+
+class AgentsFixture(StoreFixture):
+    def setUp(self):
+        super().setUp()
+        for key in HINTS:
+            self.env.pop(key, None)
+            os.environ.pop(key, None)
+        self.now = time.time()
+        self.project = self.claude / "-demo"
+        self.subagents = self.project / PARENT / "subagents"
+        old = self.now - 300
+        recent = self.now - 5
+        self.child("f1", {"finished": True, "description": "finished one"}, old)
+        self.child("s1", {"stoppedByUser": True, "description": "stopped one"}, old)
+        self.child("n1", {"finished": False, "description": "notified one"}, old)
+        self.child("r1", {"finished": False, "description": "resumed one"}, recent)
+        self.child("q1", {"finished": False, "description": "silent one"}, self.now - 1000)
+        notify = self.now - 100  # newer than n1's last record, older than r1's
+        self.parent(
+            [
+                self.notification("n1", notify, "completed"),
+                self.notification("r1", notify, "completed"),
+            ]
+        )
+
+    def child(self, agent_id: str, meta: dict, last: float) -> None:
+        path = _write(
+            self.subagents / f"agent-{agent_id}.jsonl",
+            [
+                {
+                    "type": "user",
+                    "agentId": agent_id,
+                    "sessionId": PARENT,
+                    "timestamp": _iso(last - 60),
+                    "message": {"role": "user", "content": "go"},
+                },
+                {
+                    "type": "assistant",
+                    "agentId": agent_id,
+                    "sessionId": PARENT,
+                    "timestamp": _iso(last),
+                    "message": {"role": "assistant", "content": [], "stop_reason": "tool_use"},
+                },
+            ],
+        )
+        (self.subagents / f"agent-{agent_id}.meta.json").write_text(json.dumps(meta))
+        os.utime(path, (last, last))
+
+    @staticmethod
+    def notification(agent_id: str, when: float, status: str) -> dict:
+        return {
+            "type": "user",
+            "sessionId": PARENT,
+            "timestamp": _iso(when),
+            "origin": {"kind": "task-notification"},
+            "message": {
+                "role": "user",
+                "content": f"<task-notification><task-id>{agent_id}</task-id>"
+                f"<status>{status}</status><result>ok</result></task-notification>",
+            },
+        }
+
+    def parent(self, extra: list[dict]) -> None:
+        records = [
+            {
+                "type": "user",
+                "sessionId": PARENT,
+                "cwd": self.cwd,
+                "timestamp": _iso(self.now - 2000),
+                "message": {"role": "user", "content": "fan out"},
+            },
+            *extra,
+        ]
+        _write(self.project / f"{PARENT}.jsonl", records)
+
+    def peer_run(self, outcome: str = "succeeded") -> None:
+        run_dir = self.root / "data/logs/invoke/codex" / PEER
+        run_dir.mkdir(parents=True)
+        state = {
+            "peer": "codex",
+            "thread_id": PEER,
+            "cwd": self.cwd,
+            "profile": "review",
+            "native_policy": ["-s", "read-only"],
+            "caller_session": f"claude:{PARENT}",
+            "rounds": [
+                {
+                    "round": 1,
+                    "prompt": "Review the orchard",
+                    "caller_session": f"claude:{PARENT}",
+                    "started_at": _iso(self.now - 60),
+                    "finished_at": _iso(self.now - 30),
+                    "outcome": outcome,
+                    "events_path": str(run_dir / "events-01.jsonl"),
+                }
+            ],
+        }
+        (run_dir / "thread.json").write_text(json.dumps(state))
+
+    def agents(self, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "cairn", "agents", *args],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+
+    def rows(self):
+        result = self.agents("list", "--session", f"claude:{PARENT}", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return {row["id"]: row for row in json.loads(result.stdout)}
+
+
+class TestAgentsList(AgentsFixture):
+    def test_classifies_subagents_and_peer_runs(self):
+        self.peer_run()
+        rows = self.rows()
+        expect = {
+            "agent-f1": ("exited", "succeeded"),
+            "agent-s1": ("exited", "cancelled"),
+            "agent-n1": ("exited", "succeeded"),
+            "agent-r1": ("running", None),
+            "agent-q1": ("running", None),
+            PEER: ("exited", "succeeded"),
+        }
+        self.assertEqual({k: (v["execution"], v["outcome"]) for k, v in rows.items()}, expect)
+        self.assertEqual(rows["agent-r1"]["activity"], "active")
+        self.assertEqual(rows["agent-q1"]["activity"], "silent")
+        self.assertEqual(rows[PEER]["kind"], "peer-codex")
+        self.assertEqual(rows[PEER]["title"], "Review the orchard")
+        self.assertEqual(rows["agent-f1"]["parent"], f"claude:{PARENT}")
+        text = self.agents("list", "--session", f"claude:{PARENT}")
+        self.assertIn("claude-subagent", text.stdout)
+        self.assertIn("finished one", text.stdout)
+
+    def test_never_creates_directories_and_needs_a_session(self):
+        result = self.agents("list", "--session", f"claude:{PARENT}", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "data").exists())
+        result = self.agents("list")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--session", result.stderr)
+        self.assertFalse((self.root / "data").exists())
+
+    def test_notifications_parse_newest_status(self):
+        found = task_notifications(self.project / f"{PARENT}.jsonl")
+        self.assertEqual(set(found), {"n1", "r1"})
+        self.assertEqual(found["n1"][1], "completed")
+
+
+class TestAgentsWait(AgentsFixture):
+    def test_exit_codes(self):
+        session = ("--session", f"claude:{PARENT}", "--poll-s", "0.1")
+        ok = self.agents("wait", "agent-f1", "agent-n1", *session)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        failed = self.agents("wait", "agent-s1", *session)
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("not succeeded: claude-subagent agent-s1: cancelled", failed.stderr)
+        timed_out = self.agents("wait", "agent-q1", *session, "--timeout-s", "0.3")
+        self.assertEqual(timed_out.returncode, 124)  # silent alone never ends a wait
+        stalled = self.agents("wait", "agent-q1", *session, "--stall-after-s", "100")
+        self.assertEqual(stalled.returncode, 3)
+        self.assertIn("keeps running until its own idle watchdog", stalled.stderr)
+        running = self.agents("wait", "agent-r1", *session, "--timeout-s", "0.3")
+        self.assertEqual(running.returncode, 124)
+        self.assertFalse((self.root / "data").exists())
+
+    def test_peer_run_failure_exits_one(self):
+        self.peer_run(outcome="failed")
+        result = self.agents("wait", PEER[:12], "--poll-s", "0.1")
+        self.assertEqual(result.returncode, 1, result.stderr)
+
+
+class TestClassifyClaudeChild(unittest.TestCase):
+    def test_order_of_rules(self):
+        now = 10_000.0
+        end_turn = {
+            "type": "assistant",
+            "timestamp": "1970-01-01T02:00:00Z",
+            "message": {"stop_reason": "end_turn"},
+        }
+        tool_use = {**end_turn, "message": {"stop_reason": "tool_use"}}
+        cases = [
+            ({"stoppedByUser": True, "finished": True}, end_turn, None, ("exited", "cancelled")),
+            ({"finished": True}, tool_use, None, ("exited", "succeeded")),
+            ({"finished": False}, tool_use, (7300.0, "failed"), ("exited", "failed")),
+            ({"finished": False}, tool_use, (7100.0, "completed"), ("running", None)),
+            ({}, end_turn, None, ("exited", "succeeded")),  # older Claude: no finished key
+            ({"finished": False}, end_turn, None, ("running", None)),
+        ]
+        for meta, last, note, expected in cases:
+            with self.subTest(meta=meta, note=note):
+                execution, _activity, _age, outcome = classify_claude_child(
+                    meta, last, now - 5, note, now - 5, now, 120, 600
+                )
+                self.assertEqual((execution, outcome), expected)
+        unknown = classify_claude_child({}, tool_use, now - 900, None, now - 900, now, 120, 600)
+        self.assertEqual(unknown[0], "unknown")
+
+
+if __name__ == "__main__":
+    unittest.main()
