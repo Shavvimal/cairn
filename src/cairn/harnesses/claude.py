@@ -63,7 +63,14 @@ class Claude:
         return decode_event(self.name, payload)
 
     def current_id(self) -> str | None:
-        return os.environ.get("CLAUDE_SESSION_ID") or None
+        # Claude Code exports CLAUDE_CODE_SESSION_ID to every child process (2.1.x);
+        # CLAUDE_SESSION_ID is only a template variable substituted into skill text,
+        # so it is accepted for callers that export it by hand.
+        native = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        manual = os.environ.get("CLAUDE_SESSION_ID")
+        if native and manual and native != manual:
+            raise ValueError("conflicting Claude session hints; pass --session-id")
+        return native or manual or None
 
     def resume(self, session_id: str, fork: bool = False) -> list[str]:
         return ["claude", "--resume", session_id, *(["--fork-session"] if fork else [])]

@@ -19,6 +19,14 @@ from cairn.frontmatter import extract_my_notes_section, parse_frontmatter
 from cairn.harnesses import get_harness
 from cairn.store import SCHEMA_VERSION, SessionStore, bounded_content
 
+HOST_IDENTITY_HINTS = (
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
+    "CAIRN_HARNESS",
+)
+
 
 class StoreFixture(unittest.TestCase):
     def setUp(self):
@@ -48,8 +56,10 @@ class StoreFixture(unittest.TestCase):
         )
         # Every home-derived location points into the temp root, so neither this
         # process nor a spawned `python -m cairn` touches the developer's real home.
+        # Host identity hints are dropped too: under Claude Code every tool process
+        # carries CLAUDE_CODE_SESSION_ID, and a test must not see that session.
         self.env = dict(
-            os.environ,
+            {k: v for k, v in os.environ.items() if k not in HOST_IDENTITY_HINTS},
             HOME=str(self.root / "home"),
             CAIRN_CONFIG=str(self.config),
             XDG_CACHE_HOME=str(self.root / "cache"),
@@ -59,7 +69,7 @@ class StoreFixture(unittest.TestCase):
             QMD_CONFIG_DIR=str(self.root / "xdg/qmd"),
             INDEX_PATH=str(self.root / "cache/qmd/index.sqlite"),
         )
-        self.patch = patch.dict(os.environ, self.env)
+        self.patch = patch.dict(os.environ, self.env, clear=True)
         self.patch.start()
         config.get_config.cache_clear()
         self.addCleanup(self.patch.stop)

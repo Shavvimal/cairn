@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1]
+
+### Fixed
+
+- Claude Code exports `CLAUDE_CODE_SESSION_ID` to every tool process, not
+  `CLAUDE_SESSION_ID` (that name is only a template variable substituted into skill
+  text). cairn read the wrong one, so under Claude Code `cairn invoke` never detected
+  its caller without `--parent` (the exchange document then landed in the Codex session
+  folder with no `links:`), and `cairn claude note|close|log` could not infer the
+  current session. The Claude adapter now reads `CLAUDE_CODE_SESSION_ID` first and
+  still accepts a hand-set `CLAUDE_SESSION_ID`; conflicting values are refused like
+  the Codex pair.
+- The test suite scrubs host identity variables, so running it from inside a Claude
+  Code session no longer leaks that session into subprocess tests.
+
 ## [2.5.0]
 
 ### Upgrading from 2.4.0

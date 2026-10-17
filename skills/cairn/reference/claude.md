@@ -131,5 +131,5 @@ cairn claude close "finished the feature"                           # mark done 
 cairn claude log --status done --tags "implementation,automation" --rating 8 "Built the sync"
 ```
 
-Find the current session id with `echo $CLAUDE_SESSION_ID`. Full annotation workflow:
+Find the current session id with `echo $CLAUDE_CODE_SESSION_ID`. Full annotation workflow:
 `../workflows/log-session.md`.

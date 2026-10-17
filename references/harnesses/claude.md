@@ -61,7 +61,9 @@ Invoke `/cairn:setup` explicitly; other workflows are `/cairn:cairn`, `/cairn:re
 `/cairn:search`. `disable-model-invocation` keeps setup explicit. Read the selected source's
 reference for native data, independently of Claude as the executing harness.
 
-Use the current session ID supplied by Claude or verified `CLAUDE_SESSION_ID`; pass it
+Use the current session ID supplied by Claude or verified `CLAUDE_CODE_SESSION_ID` (the
+variable Claude Code exports to every tool process; `CLAUDE_SESSION_ID` is only a template
+variable inside skill text and is never set in a shell); pass it
 explicitly to mutations. The plugin manifest is `.claude-plugin/plugin.json`.
 Update the engine with `uv tool upgrade cairn`, then `/plugin update cairn@cairn` and
 `/reload-plugins`. Re-run `cairn hook install` after an engine reinstall.

@@ -552,7 +552,7 @@ class ClaudeSource(ConversationSource):
     subagent_type = "claude-subagent"
     collection = "claude-code-sessions"
     list_default = "active"
-    session_env_var = "CLAUDE_SESSION_ID"
+    session_env_var = "CLAUDE_CODE_SESSION_ID"
     id_field = "session_id"
     preserved_note = "syncs"
 
