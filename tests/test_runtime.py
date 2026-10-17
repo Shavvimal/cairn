@@ -192,6 +192,19 @@ class TestIndexLocks(StoreFixture):
             pass
 
 
+class TestIndexDirectories(StoreFixture):
+    def test_locked_index_creates_explicit_resource_directories(self):
+        # Pinned environments pass INDEX_PATH explicitly; QMD does not create its
+        # parent directory in that case (it does for the default location).
+        env = {
+            "INDEX_PATH": str(self.root / "fresh/cache/qmd/index.sqlite"),
+            "QMD_CONFIG_DIR": str(self.root / "fresh/config/qmd"),
+        }
+        with patch.dict(os.environ, env), qmd.locked_index():
+            self.assertTrue((self.root / "fresh/cache/qmd").is_dir())
+            self.assertTrue((self.root / "fresh/config/qmd").is_dir())
+
+
 class TestCollectionTimeouts(StoreFixture):
     def test_list_and_add_timeout_release_locks_and_allow_retry(self):
         probe = self.root / "qmd"

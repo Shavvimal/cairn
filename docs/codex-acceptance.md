@@ -193,3 +193,21 @@ For the CLI release, the remaining merge gate is green GitHub CI (including the
 Python matrix and version check) on the final pushed commits. Do not treat checks
 on an older PR head as verification of these changes. OpenAI public-directory
 submission remains deferred.
+
+### Isolated Claude profile check on the merge candidate (2026-10-17)
+
+Run against `2fa71cf` with a scratch `HOME` (`/tmp/cairn-test-home`), a scratch
+`CLAUDE_CONFIG_DIR`, the engine installed there with `uv tool install`, and the plugin
+installed from a local clone of the branch through `claude plugin marketplace add` and
+`claude plugin install`. The real `~/.claude`, `~/.config/cairn`, store and QMD index were
+not touched (checked after every step).
+
+| Check | Evidence |
+| --- | --- |
+| Hand-fired launcher with a real transcript | Request queued; first attempt failed with QMD `Cannot open database because the directory does not exist` for the pinned `INDEX_PATH`. Fixed in this commit (`locked_index` creates the directories). After `cairn hook retry`, completed on attempt 1. |
+| Claude Code 2.1.302 interactive session `2a8b3ca6` | Hook ran on `/exit`; request completed in 0.38 s on attempt 1; export written; `qmd search` returns the marker. |
+| Claude Code 2.1.302 print-mode session `594f74e9` | Debug log shows `Read hooks.json for plugin cairn` and `Registered 1 hooks`; request completed in 0.37 s; export indexed. |
+| Launcher without `hook-launcher.env`, 2.4.0 engine on PATH | Session `262d175c`: launcher path 2 queued and completed the request. |
+| 2.3.0 engine on PATH with the 2.4.0 plugin (violated upgrade order) | Session `6474a514`: launcher reported `completed with status 0` to the host, ran the legacy `cairn sync --hook` detached, which exported and indexed the session; no 2.4 queue request was created. |
+
+Not covered by this run: Codex, cron scheduling, embedding, desktop, Linux.

@@ -30,10 +30,17 @@ def locked_index(*, blocking: bool = True) -> Iterator[None]:
     explicit/default environment settings all coordinate. Acquire in path order
     to avoid deadlocks when only one resource is shared by two configurations.
     """
-    paths = sorted({lock_path(path, "qmd") for path in qmd_resources()})
+    index_yml, database = qmd_resources()
+    paths = sorted({lock_path(path, "qmd") for path in (index_yml, database)})
     with ExitStack() as stack:
         for path in paths:
             stack.enter_context(locked(path, blocking=blocking))
+        # QMD creates these directories for its default locations but not for an
+        # explicit INDEX_PATH / QMD_CONFIG_DIR, which the pinned hook and cron
+        # environments always pass. Without this, the first hook job on a machine
+        # where QMD has never run fails with "directory does not exist".
+        for directory in (database.parent, index_yml.parent):
+            directory.mkdir(parents=True, exist_ok=True)
         yield
 
 

@@ -64,6 +64,8 @@ Reinstall hooks and the existing cron entry to record the complete QMD environme
   `docs/codex-acceptance.md`.
 
 ### Fixed
+- Hook and cron index updates create the QMD database and config directories they
+  pin, so the first job on a machine where QMD has never run no longer fails.
 - A code fence left open in `## My Notes` no longer swallows the conversation that
   follows it, which made every export append another copy of the conversation.
 - Granola notes and summaries containing `## Conversation` no longer cause
