@@ -27,19 +27,6 @@ class TestHooks(StoreFixture):
             "reason": "other",
         }
 
-    def fake_qmd(self):
-        path = self.root / "qmd"
-        path.write_text(
-            "#!"
-            + sys.executable
-            + '\nimport sys,time\ntime.sleep(0.04)\nprint("qmd://codex-sessions/\\nqmd://claude-code-sessions/")\n'
-        )
-        path.chmod(0o755)
-        data = json.loads(self.config.read_text())
-        data["qmd_binary"] = str(path)
-        self.config.write_text(json.dumps(data))
-        config.get_config.cache_clear()
-
     def test_payload_validation_and_authoritative_event_identity(self):
         payload = self.event()
         with patch.dict(
@@ -258,7 +245,12 @@ class TestHooks(StoreFixture):
         result = subprocess.run(
             ["/bin/sh", "-c", command],
             cwd=self.root,
-            env={"PATH": "/usr/bin:/bin", "PYTHONPATH": os.path.abspath("src")},
+            # cron always sets HOME; without it Path.home() falls back to the real home.
+            env={
+                "PATH": "/usr/bin:/bin",
+                "PYTHONPATH": os.path.abspath("src"),
+                "HOME": self.env["HOME"],
+            },
             capture_output=True,
             text=True,
             timeout=10,

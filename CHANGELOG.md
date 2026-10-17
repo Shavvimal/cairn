@@ -44,8 +44,28 @@ the next `cairn sync --cron`. Windowed cron runs never re-export old documents.
   (gate prompts, critical evaluation, the bounded convergence loop), and peer-run recipes
   in the harness references.
 - `links` is a preserved frontmatter field.
+- `cairn doctor` probes the configured QMD: `qmd --version` (warns below the tested 2.5.3
+  or on a prerelease) and `qmd status` as a runtime check (a binary that crashes opening
+  its index is now a critical failure). The embeddings line reports documents, vectors and
+  pending documents. `cairn doctor --strict-index` fails unless the index is readable and
+  fully embedded; an empty index passes but says nothing can be verified.
+- Full sync logs a `[qmd-verify]` line with the index-wide counts after `qmd embed`, and
+  a `failed steps:` line naming every failed step before `=== FAILED ===`.
 
 ### Fixed
+- Sync reported `[qmd-embed] ok` when QMD exited 0 with failed chunks (seen: 48,219 of
+  131,291 chunks after QMD's 30-minute embed session expired). The whole embed output is
+  now checked for failed-chunk reports and chunk errors, and the run fails. A non-empty
+  index with no vectors, or an unreadable `qmd status`, also fails it.
+- Two `cairn sync` runs could overlap (an hourly cron run during a manual one) and
+  interleave their log blocks. A per-data-root sync lock now lets one run at a time; the
+  other logs one `skipped` line and exits 0.
+- A timed-out sync step, hook export or `qmd update` killed only its direct child, so the
+  Node grandchild behind the `qmd` launcher could keep running outside the index lock. The
+  whole process group is now killed (also on Ctrl-C).
+- Full sync no longer runs `qmd embed` after `qmd update` failed.
+- The test suite wrote catalogs and lock files into the real home (`~/.cache/cairn`,
+  `~/.local/state/cairn`); CI now fails if it does.
 - Codex: a forked subagent rollout carries two `session_meta` records; the parser let the
   last one win, so the child was parsed as its parent and dropped by the fragment dedupe.
   The first record now wins and the replayed parent history is cut. On the author's
@@ -55,6 +75,10 @@ the next `cairn sync --cron`. Windowed cron runs never re-export old documents.
 
 ### Changed
 - Export schema 2; see Upgrading.
+- `cairn doctor` no longer says "All critical checks passed." without a qualifier when the
+  semantic index is empty, unreadable or has pending documents.
+- Setup verifies keyword, vector and hybrid search separately and documents QMD
+  compatibility and recovery without touching QMD's database.
 - `cairn resume` refuses a subagent transcript and names the parent to resume instead.
 
 ## [2.4.0]

@@ -147,6 +147,10 @@ class TestAddLink(unittest.TestCase):
         self.path = Path(tmp.name) / "doc.md"
         self.path.write_text(DOC)
         self.find = lambda _sid: self.path
+        # add_link takes a document lock under $HOME; keep it in the temp dir.
+        home = patch.dict(os.environ, {"HOME": str(Path(tmp.name) / "home")})
+        home.start()
+        self.addCleanup(home.stop)
 
     def add(self, role, ref):
         out, err = io.StringIO(), io.StringIO()

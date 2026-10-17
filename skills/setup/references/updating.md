@@ -93,6 +93,36 @@ known term from an existing export with `qmd search "<known term>" -n 5`. Zero *
 embedded chunks is normal when nothing changed; verify the existing document/vector
 counts and search results. An empty corpus cannot establish working search.
 
+Then run `cairn doctor --strict-index`. It probes the **configured** QMD executable
+(`cairn config show`, key `qmd_binary`) with `--version` and `status`, and fails unless the
+index is readable and fully embedded. Plain `cairn doctor` only warns.
+
+### QMD compatibility and recovery
+
+- An existing QMD can still be too old or unable to run. A successful `npm install` or
+  `qmd --version` is not the finish line: `qmd status` must succeed.
+- cairn is tested with QMD 2.5.3. On macOS Apple Silicon with Node 22.12.0, 2.8.3 crashed
+  in its native SQLite module and 2.5.3 worked (one machine, not a support matrix). The
+  known-good recovery there is `npm install -g @tobilu/qmd@2.5.3`. Do not promise that
+  "latest" fixes it.
+- After reinstalling, recheck the configured absolute path. A package under a different
+  npm prefix can leave cairn on the old binary.
+- Preserve the config, Markdown, QMD index, models, cron, hooks/trust and enabled sources.
+  Before a dependency change that can migrate the index, wait until no `cairn sync` or
+  `qmd` process runs (`pgrep -fl 'cairn sync|qmd'`), then back up with
+  `sqlite3 "$INDEX" ".backup '$INDEX.bak'"` (`$INDEX` is QMD's `INDEX_PATH`, by default
+  `~/.cache/qmd/index.sqlite`). Copying only the live SQLite main file is not a safe backup.
+- Fix the QMD problem, then rerun incremental `cairn sync --cron` after the previous job
+  ends. Do not delete the index or run `qmd embed -f`.
+- A failed run and new work are different things. `[qmd-embed] FAILED - qmd exited 0 but
+  reported: N chunks failed` is a failed run (often QMD's 30-minute session limit on a
+  large backlog; each run keeps its vectors, so rerun). A `Pending` count that appears
+  after a passing run is new work for the next sync, not corruption.
+- BM25 keyword search works without vectors. A completed hook request means export and
+  keyword indexing finished, not that embeddings are ready.
+- If QMD cannot migrate a legacy index without re-embedding, report that upstream
+  limitation and the options; do not hand-edit QMD's database.
+
 Verify each enabled host hook by ending a real session, checking
 `cairn hook status --harness HOST` for that session's completed request, and finding
 its distinctive text through QMD without waiting for cron. If this cannot be exercised

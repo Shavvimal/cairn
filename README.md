@@ -281,6 +281,24 @@ cairn sync --hook    # fast: claude-sessions only + qmd update
 cairn sync --cron    # full: all exports + qmd update + qmd embed
 ```
 
+One `cairn sync` runs per data root at a time. A second one (an hourly cron run that
+overlaps a manual run, say) logs one `skipped: another cairn sync is running` line and
+exits 0. A step that times out takes its whole process group with it, so a `qmd` wrapper's
+Node child cannot keep running outside the index lock. When a run fails, the log names the
+failed steps on a `failed steps:` line just before `=== FAILED ===`.
+
+QMD exits 0 even when embedding chunks fail. Full sync reads the whole `qmd embed` output
+and fails on reported chunk failures, then logs a `[qmd-verify]` line with the index-wide
+documents, vectors and pending documents from `qmd status`. QMD 1.1.5 and 2.5.3 cap one
+embed session at 30 minutes, so a large backlog takes several hourly runs; each run keeps
+its vectors. BM25 keyword search works as soon as a session is exported and `qmd update`
+runs (the SessionEnd hook does both); semantic search waits for the next full sync.
+
+`cairn doctor` probes the configured QMD (`--version`, then `status` as a runtime check)
+and reports pending embeddings. `cairn doctor --strict-index` fails unless the index is
+readable and fully embedded; setup uses it. cairn is tested with QMD 2.5.3; a newer
+version is judged by the same runtime and output checks, not by its number.
+
 Recall uses the shared exported Markdown store, independent of the active harness:
 
 ```sh

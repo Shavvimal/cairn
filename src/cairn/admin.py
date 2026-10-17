@@ -32,7 +32,15 @@ from .config import (
     load_config_from,
     user_config_path,
 )
-from .qmd import list_collections
+from .qmd import (
+    TESTED_QMD_VERSION,
+    IndexStatus,
+    StatusFormatError,
+    index_status,
+    list_collections,
+    parse_version,
+    qmd_version,
+)
 from .sync import SOURCE_COLLECTIONS
 
 _CRON_TAG = "cairn sync"  # substring used to find/replace our line idempotently
@@ -526,20 +534,75 @@ def _fail(label: str, detail: str = "") -> None:
     print(f"  FAIL {label}" + (f" - {detail}" if detail else ""))
 
 
-def _qmd_vector_count(qmd_binary: str) -> int | None:
-    """The global embedded-vector count from ``qmd status`` (``None`` if unreadable).
+def _check_qmd_runtime(qmd_binary: str) -> tuple[int, IndexStatus | None, str | None]:
+    """Probe the configured QMD: version (diagnostic) and ``qmd status`` (runtime).
 
-    ``qmd status`` reports a single global ``Vectors: N embedded`` line (there is no
-    per-collection vector count), so this is necessarily an index-wide health check.
+    Returns ``(critical_failures, status, reason)``; ``reason`` says why ``status``
+    is ``None``. The embeddings check reuses this one status result. Doctor never
+    embeds, installs or upgrades anything.
     """
+    tested = ".".join(map(str, TESTED_QMD_VERSION))
     try:
-        result = subprocess.run([qmd_binary, "status"], capture_output=True, text=True)
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
-    m = re.search(r"Vectors:\s*([\d,]+)", result.stdout)
-    return int(m.group(1).replace(",", "")) if m else None
+        raw = qmd_version(qmd_binary)
+    except RuntimeError as e:
+        _warn("qmd version", str(e))
+    else:
+        version = parse_version(raw)
+        if version is None:
+            _warn("qmd version", f"{raw!r} is not a release version; cairn is tested with {tested}")
+        elif version < TESTED_QMD_VERSION:
+            _warn(
+                "qmd version",
+                f"{raw}: older than {tested}, the release cairn's embedding checks were "
+                "tested with; keyword search can still work. Read the QMD compatibility "
+                "notes in the setup skill before changing it",
+            )
+        else:
+            _ok("qmd version", raw)
+    try:
+        status = index_status(qmd_binary)
+    except StatusFormatError as e:
+        _warn("qmd runtime", f"ran, but {e}")
+        return 0, None, str(e)
+    except RuntimeError as e:
+        _fail("qmd runtime", f"{e} - QMD cannot open its index, so search cannot work")
+        return 1, None, "the QMD runtime probe failed"
+    _ok("qmd runtime", "'qmd status' succeeded")
+    return 0, status, None
+
+
+def _check_embeddings(
+    status: IndexStatus | None, reason: str | None, strict: bool
+) -> tuple[int, str | None]:
+    """Report index/embedding state; return ``(critical_failures, caveat)``.
+
+    Default mode only warns about incomplete or unverified indexing, and returns a
+    caveat for the summary line. ``--strict-index`` turns those into failures,
+    except an empty index, which cannot be verified either way.
+    """
+    if status is None:
+        caveat = f"could not read 'qmd status': {reason}"
+        (_fail if strict else _warn)("embeddings", caveat)
+        return int(strict), caveat
+    counts = status.describe()
+    if status.state == "empty":
+        caveat = "the index is empty, so no search can be verified yet"
+        _warn("embeddings", f"{caveat}; run 'cairn sync --cron'")
+        return 0, caveat
+    if status.state == "no-vectors":
+        caveat = f"{counts}: keyword search can work, semantic search is not ready"
+        (_fail if strict else _warn)("embeddings", f"{caveat}; run 'cairn sync --cron'")
+        return int(strict), caveat
+    if status.state == "pending":
+        caveat = f"{counts}: semantic search misses the pending documents"
+        (_fail if strict else _warn)(
+            "embeddings",
+            f"{caveat}; the next 'cairn sync --cron' continues (whitespace-only documents "
+            "never get vectors and stay pending)",
+        )
+        return int(strict), caveat
+    _ok("embeddings", counts)
+    return 0, None
 
 
 def _parse_semver(value: str) -> tuple[int, int, int] | None:
@@ -645,9 +708,17 @@ def doctor_main(argv: list[str] | None = None) -> int:
         help="path to the plugin's plugin.json (else $CLAUDE_PLUGIN_ROOT) for a drift check",
     )
     parser.add_argument("--harness", choices=("claude", "codex"))
+    parser.add_argument(
+        "--strict-index",
+        action="store_true",
+        help="fail unless the QMD index is readable and fully embedded (setup/acceptance)",
+    )
     args = parser.parse_args(argv)
     print(f"cairn {__version__} - health check\n")
     critical_failures = 0
+    index_caveat: str | None = None
+    qmd_status: IndexStatus | None = None
+    status_reason: str | None = "QMD was not probed"
 
     cairn_bin = shutil.which("cairn")
     if cairn_bin:
@@ -676,6 +747,8 @@ def doctor_main(argv: list[str] | None = None) -> int:
         qmd_path = shutil.which(qmd) or (qmd if Path(qmd).is_file() else None)
         if qmd_path:
             _ok("qmd", qmd_path)
+            failures, qmd_status, status_reason = _check_qmd_runtime(qmd)
+            critical_failures += failures
         else:
             _fail("qmd", f"{qmd!r} not found - install it (e.g. npm install -g @tobilu/qmd)")
             critical_failures += 1
@@ -733,16 +806,11 @@ def doctor_main(argv: list[str] | None = None) -> int:
     if config is not None:
         _check_invoke(config)
 
-    # embeddings present (an index with 0 vectors returns no search results).
-    # warn, never fail: zero is the expected state before the first embed.
+    # embeddings: index-wide counts from the single 'qmd status' probe above.
+    # Zero vectors leaves keyword (BM25) search working; only semantic search waits.
     if config is not None:
-        vectors = _qmd_vector_count(config.qmd_binary)
-        if vectors is None:
-            _warn("embeddings", "could not read 'qmd status'")
-        elif vectors > 0:
-            _ok("embeddings", f"{vectors} vectors embedded")
-        else:
-            _warn("embeddings", "0 vectors - run 'cairn sync --cron' to embed")
+        failures, index_caveat = _check_embeddings(qmd_status, status_reason, args.strict_index)
+        critical_failures += failures
 
     if config is not None:
         from .hooks import iso, launcher_path, status
@@ -812,7 +880,12 @@ def doctor_main(argv: list[str] | None = None) -> int:
     if critical_failures:
         print(f"{critical_failures} critical check(s) failed.")
         return 1
-    print("All critical checks passed.")
+    if index_caveat:
+        print(
+            f"All critical checks passed, but the semantic index is not verified: {index_caveat}."
+        )
+    else:
+        print("All critical checks passed.")
     return 0
 
 

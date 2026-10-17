@@ -1,6 +1,24 @@
 # Sync robustness and test hygiene: implementation plan
 
-Status: proposed; nothing in this document is implemented yet.
+## Validation (2026-10-17, branch feat/invoke-codex-skill)
+
+Checked against the code on this branch, the sync log, `ps -eo pid,ppid,pgid,etime,command`,
+`crontab -l`, `launchctl list` and the installed QMD 2.5.3 source. Implemented in the same
+branch; see CHANGELOG `[2.5.0]`.
+
+| Claim or change | Verdict | Evidence |
+| --- | --- | --- |
+| A: two cron syncs ran at once | VALID WITH CHANGES (diagnosis) | One crontab entry at `:07`, no launchd job. The 16:19, 17:00 and 17:04 runs were manual; the 17:07 cron run overlapped the 17:04 one. They did not embed at once: the 17:07 run waited (sync's `worker()` needs the hook worker lock, whose holder waits on `locked_index`) until the 17:04 embed ended. The 17:04 block does end in `=== FAILED ===`, after the interleaved 17:07 header. |
+| B: a timeout leaves the Node grandchild running | VALID, but not today's cause | `ps`: 82469 `node .../bin/qmd embed` is the parent of 82475 `node .../qmd.js embed`. The `SessionReleasedError` came from QMD's own 30-minute session (`maxDuration: 30 * 60 * 1000` in `dist/store.js`; the run printed `in 30m 1s`); cairn's timeout is 3600 s and no other embed ran. |
+| C: tests write into the real home | VALID WITH CHANGES | Measured per module: `test_recall` +23 locks +7 catalogs, `test_hooks` +10 locks, and two the plan missed: `test_frontmatter` +1 and `test_invoke_foundations` +2 (document locks from `add_link`). After the fix: +0, and the suite passes with `HOME` set to an empty directory. |
+| D: one failing source hides others | VALID | Granola fails in every block. |
+| Change 1: non-blocking sync lock, skip exits 0 | VALID WITH CHANGES | Only acquisition is guarded (a `BlockingIOError` inside the run is not a skip); `invoke` publishing stays inside the lock; lock order documented in `sync.py`. |
+| Change 2: kill the process group | VALID WITH CHANGES | `cairn.procs.run_capped` also kills the group on Ctrl-C (a child in a new session no longer receives the terminal's SIGINT), bounds the post-kill read, and covers `invoke.update_index`. |
+| Change 3: `=== FAILED: names ===` | VALID WITH CHANGES | The Claude harness Monitor filter matches `=== (done\|FAILED) ===` exactly, so the marker stays and a `failed steps:` line precedes it. |
+| Change 4: fixture fixes and CI guard | VALID | `StoreFixture` also pins `CODEX_HOME` and `CLAUDE_CONFIG_DIR`; `fake_qmd` moved into it. |
+| Release 2.4.1 | REJECTED | This branch is the unreleased 2.5.0. |
+
+Status: validated and implemented on feat/invoke-codex-skill with the changes recorded above.
 
 Observation date: 2026-10-17, on the first day of running cairn 2.4.0 (merge commit
 `1443f89`) on a real machine with Claude Code 2.1.302, Codex 0.160.0 and QMD 2.5.3.

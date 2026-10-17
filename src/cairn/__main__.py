@@ -74,7 +74,7 @@ orchestration / admin:
   cairn sync [--hook | --cron | --all]       sync every source, then refresh QMD
   cairn hook install | status | worker       configure hooks / inspect / retry sync
   cairn resume <source:session-id>            print the correct native resume command
-  cairn doctor                               check install, config, qmd, rg, cron, PATH
+  cairn doctor [--strict-index]              check install, config, qmd + index, rg, cron, PATH
   cairn config init | path                   create / locate the per-user config
   cairn config show [--json]                 print the resolved config + integrations
   cairn config set KEY VALUE                 set one config value (e.g. claude.store …)

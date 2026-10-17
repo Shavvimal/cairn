@@ -20,7 +20,8 @@ A foreground `Bash` call dies long before a ten-minute model download finishes, 
 
 2. Arm `Monitor` on the log when the tool is available. The filter must catch completion,
    progress AND failures; silence is not success. The embed ends with
-   `✓ Done! Embedded N chunks from M documents`; download progress prints percentages,
+   `✓ Done! Embedded N chunks from M documents` and a `[qmd-verify]` line with the
+   index-wide document/vector/pending counts; download progress prints percentages,
    "model" or "download"; failures show `Error`/`Traceback`/`failed`/`Killed`/`OOM`.
 
    > Monitor invocation:
@@ -29,7 +30,7 @@ A foreground `Bash` call dies long before a ten-minute model download finishes, 
    > - **command:**
    >   ```bash
    >   tail -n +1 -f "$DATA_ROOT/logs/context-sync.log" \
-   >     | grep -E --line-buffered "Done!|Embedded |[0-9]+%|download|model|Error|Traceback|failed|FAILED|Killed|OOM|=== (done|FAILED) ==="
+   >     | grep -E --line-buffered "Done!|Embedded |[0-9]+%|download|model|Error|Traceback|failed|FAILED|INCOMPLETE|qmd-verify|skipped|Killed|OOM|=== (done|FAILED) ==="
    >   ```
 
    `tail -n +1 -f` replays lines written before Monitor armed, then streams new ones.
@@ -40,6 +41,13 @@ A foreground `Bash` call dies long before a ten-minute model download finishes, 
      current; check total documents/vectors and a real query before declaring success.
    - **Failure:** the log shows `=== FAILED ===` or an error line, or the task exits
      non-zero. `Read` the full log and stop and report; do not verify a broken index.
+     The `failed steps:` line before `=== FAILED ===` names what failed.
+     `[qmd-embed] FAILED - qmd exited 0 but reported: N chunks failed` means QMD stopped
+     early (QMD 1.1.5 and 2.5.3 cap one embed session at 30 minutes); the next sync
+     continues.
+   - **Skipped:** `=== context-sync (...) skipped: another cairn sync is running ... ===`
+     means your run exited 0 without doing work. Wait for the running sync's own
+     `=== done ===` or `=== FAILED ===` and judge that instead.
    - **Silence or timeout:** `Read` the tail of the log. Download or percentage lines
      mean it is still working, so re-arm Monitor. Otherwise report it as wedged.
 

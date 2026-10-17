@@ -12,6 +12,7 @@ from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from cairn import config, recall
 from cairn.timeutil import parse_date_range
@@ -88,8 +89,20 @@ class _RecallFixture(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        self._prev = os.environ.get("CAIRN_CONFIG")
-        os.environ["CAIRN_CONFIG"] = str(cfg_path)
+        # HOME and the XDG homes go under the temp root too: catalogs and lock files
+        # (in this process and in the export subprocess) must not land in the real home.
+        env = patch.dict(
+            os.environ,
+            {
+                "CAIRN_CONFIG": str(cfg_path),
+                "HOME": str(root / "home"),
+                "XDG_CACHE_HOME": str(root / "cache"),
+                "XDG_CONFIG_HOME": str(root / "xdg"),
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self.addCleanup(config.get_config.cache_clear)
         config.get_config.cache_clear()
         subprocess.run(
             [sys.executable, "-m", "cairn", "claude", "export", "--all", "--quiet"],
@@ -98,11 +111,6 @@ class _RecallFixture(unittest.TestCase):
         )
 
     def tearDown(self):
-        if self._prev is None:
-            os.environ.pop("CAIRN_CONFIG", None)
-        else:
-            os.environ["CAIRN_CONFIG"] = self._prev
-        config.get_config.cache_clear()
         self._tmp.cleanup()
 
     def _run(self, argv: list[str]) -> tuple[int, str]:

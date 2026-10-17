@@ -25,6 +25,7 @@ from pathlib import Path
 
 from .config import CairnConfig, ConfigError, get_config, user_config_path
 from .harnesses import SessionEvent, get_harness
+from .procs import run_capped
 from .qmd import ensure_collection, list_collections, locked_index
 from .registry import BY_NAME
 from .runtime import background_environment
@@ -160,11 +161,11 @@ def export_and_index(
     ]
     if transcript:
         argv.extend(["--transcript", transcript])
-    result = subprocess.run(
+    # run_capped kills the export's whole process group on timeout, including any
+    # qmd it started, so nothing keeps running once the caller gives up on it.
+    result = run_capped(
         argv,
         env=dict(os.environ, CAIRN_CONFIG=str(config.config_path.resolve())),
-        capture_output=True,
-        text=True,
         timeout=EXPORT_TIMEOUT_S,
     )
     if result.returncode:
@@ -190,12 +191,7 @@ def _update_index(config: CairnConfig, collection: str, lock_timeout_s: float) -
                 )
                 if status not in ("added", "exists"):
                     raise RuntimeError(f"collection registration {status}: {collection}")
-                result = subprocess.run(
-                    [config.qmd_binary, "update"],
-                    capture_output=True,
-                    text=True,
-                    timeout=EXPORT_TIMEOUT_S,
-                )
+                result = run_capped([config.qmd_binary, "update"], timeout=EXPORT_TIMEOUT_S)
                 if result.returncode:
                     raise RuntimeError(
                         f"qmd update failed: {(result.stderr or result.stdout)[-2000:]}"

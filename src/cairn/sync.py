@@ -6,19 +6,36 @@ Each source runs as its own subprocess via ``python -m cairn <source> export`` -
 cron's minimal PATH, the SessionEnd hook, and a manual run. Per-source isolation
 (timeouts, independent ok/FAILED logging) is the whole point: one source failing
 never blocks the others or the index refresh.
+
+One sync per ``data_root`` runs at a time: a second ``cairn sync`` finds the sync
+lock held, logs one ``skipped`` line and exits 0 (the running sync covers the same
+work). Lock order, outermost first::
+
+    sync (this module) > hook worker > export operation > qmd index (locked_index)
+
+Only ``cairn sync`` takes the sync lock, always first and never blocking, so it
+cannot join a cycle. The hook worker, ``hooks.export_and_index`` and ``cairn
+invoke`` never take it; they meet a running sync only at the qmd index lock, which
+they take without blocking (bounded retry, then a busy/pending outcome) or, for
+the durable hook worker, wait on by design.
 """
 
 import argparse
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 
 from .config import CairnConfig, get_config
-from .qmd import ensure_collection, list_collections, locked_index
+from .procs import run_capped
+from .qmd import embed_failures, ensure_collection, index_status, list_collections, locked_index
 from .registry import SOURCE_COLLECTIONS as SOURCE_COLLECTIONS
 from .registry import SOURCES as _BINDINGS
+from .storage import lock_path, locked
+
+EMBED_TIMEOUT_S = 3600
 
 
 def _log_file() -> Path:
@@ -95,10 +112,13 @@ def _log_output(text, prefix="      "):
 
 
 def run_step(name, command, timeout=120):
-    """Run a command, log its status AND its output, return success."""
+    """Run a command, log its status AND its output, return success.
+
+    A timeout kills the command's whole process group (see :mod:`cairn.procs`).
+    """
     start = time.time()
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        result = run_capped(command, timeout=timeout)
         elapsed = time.time() - start
         status = "ok" if result.returncode == 0 else "FAILED"
         log(f"  [{name}] {status} ({elapsed:.1f}s)")
@@ -114,6 +134,68 @@ def run_step(name, command, timeout=120):
     except Exception as e:
         log(f"  [{name}] ERROR: {e}")
         return False
+
+
+def run_embed(qmd: str, timeout: int = EMBED_TIMEOUT_S) -> tuple[bool, bool]:
+    """Run ``qmd embed`` once; return ``(succeeded, exited)``.
+
+    QMD exits 0 even when chunks fail, so exit 0 alone is not success: the full
+    output is checked for failure reports before it is truncated for the log.
+    ``exited`` is True when QMD ran to a normal exit (any code), which is when the
+    caller verifies the index with :func:`verify_index` under the same lock.
+    """
+    start = time.time()
+    try:
+        result = run_capped([qmd, "embed"], timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        log(f"  [qmd-embed] TIMEOUT after {timeout}s")
+        _log_output(e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else e.stdout)
+        return False, False
+    except OSError as e:
+        log(f"  [qmd-embed] ERROR: {e}")
+        return False, False
+    elapsed = time.time() - start
+    problems = embed_failures(f"{result.stdout or ''}\n{result.stderr or ''}")
+    if result.returncode != 0:
+        log(f"  [qmd-embed] FAILED ({elapsed:.1f}s) - exit {result.returncode}")
+    elif problems:
+        log(f"  [qmd-embed] FAILED ({elapsed:.1f}s) - qmd exited 0 but reported: {problems[0]}")
+        for extra in problems[1:]:
+            log(f"      also: {extra}")
+    else:
+        log(f"  [qmd-embed] ok ({elapsed:.1f}s)")
+    _log_output(result.stdout)
+    if result.stderr and result.stderr.strip():
+        _log_output(result.stderr, prefix="      [stderr] ")
+    return result.returncode == 0 and not problems, True
+
+
+def verify_index(qmd: str) -> bool:
+    """Log the post-embed index state; return False when it shows a broken index.
+
+    Pending documents after a clean embed are reported but do not fail the run:
+    QMD never embeds a whitespace-only document yet counts it as pending, and a
+    writer outside cairn can add work at any time. Failed chunks are caught from
+    the embed output instead. All counts are index-wide.
+    """
+    try:
+        status = index_status(qmd)
+    except RuntimeError as e:
+        log(f"  [qmd-verify] FAILED - could not verify the index after embedding: {e}")
+        return False
+    if status.state == "empty":
+        log("  [qmd-verify] ok - empty index: no documents to embed")
+    elif status.state == "no-vectors":
+        log(f"  [qmd-verify] FAILED - {status.describe()}: no vectors after embedding")
+        return False
+    elif status.state == "pending":
+        log(
+            f"  [qmd-verify] INCOMPLETE - {status.describe()}; "
+            "the next sync embeds the rest (whitespace-only documents stay pending)"
+        )
+    else:
+        log(f"  [qmd-verify] ok - {status.describe()}")
+    return True
 
 
 def run_inproc(name, fn):
@@ -191,33 +273,64 @@ def main(argv: list[str] | None = None):
     args = parser.parse_args(argv)
 
     config = get_config()
-    qmd = config.qmd_binary
     mode = "hook" if args.hook else ("cron" if args.cron else "all")
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(locked(lock_path(config.data_root, "sync"), blocking=False))
+        except BlockingIOError:
+            # One line, so it cannot split a running sync's block. Not a failure.
+            log(
+                f"=== context-sync ({mode}) {datetime.now().isoformat()} skipped: "
+                f"another cairn sync is running for {config.data_root} ==="
+            )
+            return 0
+        return _run(config, mode)
+    raise AssertionError("unreachable")
+
+
+def _run(config: CairnConfig, mode: str) -> int:
+    """One sync run under the sync lock; returns the exit code."""
+    qmd = config.qmd_binary
     rotate_log()
     log(f"\n=== context-sync ({mode}) {datetime.now().isoformat()} ===")
 
     from .hooks import worker
 
-    success = True
+    failed: list[str] = []
+
+    def record(name: str, ok: bool) -> None:
+        if not ok:
+            failed.append(name)
+
     try:
         if mode != "hook":
-            success = worker(config) == 0
+            record("hook-worker", worker(config) == 0)
         # Run exports for the sources this mode enables (resolved from config).
         steps = _plan(config, mode)
         if not steps:
             log("  (no enabled sources for this mode - check 'sync.enabled' in your config)")
         for name, command in steps:
-            success = run_step(name, command) and success
+            record(name, run_step(name, command))
 
         with locked_index():
-            success = run_inproc("qmd-collections", lambda: _ensure_collections(config)) and success
-            success = run_step("qmd-update", [qmd, "update"]) and success
+            record(
+                "qmd-collections",
+                run_inproc("qmd-collections", lambda: _ensure_collections(config)),
+            )
+            updated = run_step("qmd-update", [qmd, "update"])
+            record("qmd-update", updated)
             if mode in ("cron", "all"):
-                success = run_step("qmd-embed", [qmd, "embed"], timeout=3600) and success
+                if updated:
+                    embedded, exited = run_embed(qmd)
+                    record("qmd-embed", embedded)
+                    if exited:
+                        record("qmd-verify", verify_index(qmd))
+                else:
+                    log("  [qmd-embed] skipped - qmd-update failed")
     except Exception:
         import traceback
 
-        success = False
+        failed.append("uncaught-error")
         log("UNCAUGHT ERROR:\n" + traceback.format_exc())
 
     try:
@@ -228,8 +341,10 @@ def main(argv: list[str] | None = None):
     except Exception as exc:  # publishing leftovers must never fail the sync
         log(f"  [invoke-publish] WARNING: {exc}")
 
-    log("=== done ===" if success else "=== FAILED ===")
-    return 0 if success else 1
+    if failed:
+        log(f"  failed steps: {', '.join(failed)}")
+    log("=== FAILED ===" if failed else "=== done ===")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

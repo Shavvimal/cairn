@@ -29,6 +29,13 @@ jobs:
       - run: uv run ruff format --check src tests
       - run: uv run mypy
       - run: uv run python -m unittest discover -s tests
+      # Tests must keep catalogs and lock files in their temp homes. Leaks come from
+      # subprocesses the tests spawn, so check the runner's real home afterwards.
+      - name: tests left nothing in the runner home
+        run: |
+          for d in ~/.local/state/cairn ~/.cache/cairn; do
+            if [ -e "$d" ]; then echo "::error::$d exists after the tests"; find "$d" | head -20; exit 1; fi
+          done
 
   version-bump:
     name: version-bump

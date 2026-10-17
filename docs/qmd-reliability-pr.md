@@ -1,6 +1,29 @@
 # PR specification: Verify QMD compatibility and embedding completion
 
-Status: proposed implementation; this document does not implement the changes below.
+## Validation (2026-10-17, branch feat/invoke-codex-skill)
+
+Checked against the code on this branch, the real sync log
+(`~/Code/context/.context/logs/context-sync.log`), the installed QMD 2.5.3 source, `ps`
+and `crontab -l`. Implemented in the same branch; see CHANGELOG `[2.5.0]`.
+
+| Proposal | Verdict | Evidence |
+| --- | --- | --- |
+| Exit 0 with failed chunks is a false success | VALID | 16:19 run logged `[qmd-embed] ok (1890.7s)` above `⚠ 48219 chunks failed`; QMD 2.5.3 `embed` prints failures and still exits 0 (`dist/cli/qmd.js` `vectorIndex`). |
+| Shared diagnostics in `qmd.py` | VALID WITH CHANGES | `parse_version`, `parse_status`, `index_status`, `qmd_version`, `embed_failures`. 2.5.3 prints `N chunks still failed after retries`, `Session expired` and `Error rate too high` (`dist/store.js`); the plan's patterns covered only the 1.1.5 wording. |
+| Version floor 2.5.3 gates embedding; doctor fails below it | REJECTED (kept as a doctor warning) | One machine. Sync now judges every version by embed output and `qmd status`, which catches the 1.1.5 failure without a number check. |
+| Runtime probe before the index stages in sync | REJECTED | `qmd collection list` and `qmd update` already fail loudly when QMD cannot run (02:07 to 16:07 runs: `[qmd-update] FAILED (0.0s)`). An extra hourly probe adds nothing. |
+| No embed after a failed `qmd update` | VALID | Those same runs then ran `[qmd-embed] FAILED (0.0s)` for nothing. Collection-registration failure does not block embed (other collections still index). |
+| One embed per run, same 3600 s timeout, status read inside the same lock | VALID | Tested: the stub records `embed held` and `status held`. |
+| Pending documents after embed make the run fail | VALID WITH CHANGES | After a clean embed, pending is logged `[qmd-verify] INCOMPLETE` but does not fail: QMD skips whitespace-only documents (`if (!doc.body.trim()) continue`) yet counts them pending, a permanent hourly false failure. Failed chunks still fail via the output; unreadable status and documents-without-vectors fail. |
+| Doctor: shared probe, `--strict-index` table | VALID WITH CHANGES | Runtime failure is critical; version rows warn in both modes; strict fails on unreadable status, no vectors or pending. The old `qmd status` call had no timeout. |
+| Setup, update, README, CHANGELOG guidance | VALID WITH CHANGES | Written shorter; the setup text that said zero vectors means no search works is fixed; separate `search`/`vsearch`/`query` added. |
+| Tests | VALID WITH CHANGES | `tests/test_qmd_health.py`, `tests/test_doctor_index.py`, and `tests/test_sync.py` (shared with the robustness plan, instead of `test_sync_embeddings.py`). |
+| Manual acceptance and `docs/qmd-reliability-acceptance.md` | NOT DONE | Running `cairn sync` against the real store was out of bounds for this pass; the stub-binary subprocess tests cover the failure and recovery path. |
+| Bump to 2.4.1 | REJECTED | This branch is the unreleased 2.5.0; entries go under `[2.5.0]`. |
+| "`make check` lacks the format check" | INACCURATE | `make lint` already runs `ruff format --check`. |
+| QMD 2.8.3 native SQLite crash | NOT VERIFIABLE HERE | Only `[qmd-embed] FAILED (123.0s)` at 17:00 and a qmd symlink re-created at 17:00 remain; recorded as a one-machine note in setup. |
+
+Status: validated and implemented on feat/invoke-codex-skill with the changes recorded above.
 Based on the Cairn 2.4.0 installation investigation on 2026-10-17.
 
 ## Proposed PR title

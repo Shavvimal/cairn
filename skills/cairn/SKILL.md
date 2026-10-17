@@ -89,7 +89,7 @@ Config resolution: `$CAIRN_CONFIG`, else `$XDG_CONFIG_HOME/cairn/config.json` (e
 ```bash
 cairn sync [--hook | --cron | --all]   # sync enabled sources, then refresh QMD index
 cairn recall list <date> | expand <id> # temporal session timeline (drives /cairn:recall)
-cairn doctor                           # check install, config, qmd, cron, PATH, stores
+cairn doctor [--strict-index]          # check install, config, qmd + index, cron, PATH, stores
 cairn config show [--json]             # print resolved config + integrations
 cairn config init [--enable ...] | set KEY VALUE | path
 cairn cron install | uninstall         # manage the hourly sync crontab entry

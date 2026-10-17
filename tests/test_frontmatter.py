@@ -218,12 +218,18 @@ class TestTitleLineFlattening(unittest.TestCase):
 
 class TestQuotedLinkDedupe(unittest.TestCase):
     def test_hand_quoted_link_is_not_duplicated(self):
+        import os
         import tempfile
         from pathlib import Path
+        from unittest.mock import patch
 
         from cairn.mutations import add_link
 
-        with tempfile.TemporaryDirectory() as tmp:
+        # add_link takes a document lock under $HOME; keep it in the temp dir.
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"HOME": str(Path(tmp) / "home")}),
+        ):
             doc = Path(tmp) / "s.md"
             doc.write_text(
                 "---\ntype: codex-session\nsession_id: abc\nstatus: active\ntags: []\n"

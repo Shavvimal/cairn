@@ -23,15 +23,22 @@ A single shell call cannot wait out a ten-minute model download, so run
    tail -n 20 "$DATA_ROOT/logs/context-sync.log"
    ```
 
-   Completion prints `✓ Done! Embedded N chunks from M documents` and then
+   Completion prints `✓ Done! Embedded N chunks from M documents`, a
+   `[qmd-verify]` line with the index-wide document/vector/pending counts, and then
    `=== done ===`; progress prints percentages, "model" or "download"; failures show
-   `Error`/`Traceback`/`failed`/`Killed`/`OOM` or `=== FAILED ===`.
+   `Error`/`Traceback`/`failed`/`Killed`/`OOM`, a `failed steps:` line and `=== FAILED ===`.
 
 3. Decide from evidence: exit 0 plus `=== done ===` is sync success. Note N/M; zero new
    chunks can mean the index is already current, so verify total documents/vectors and
    a real query. A non-zero exit or `=== FAILED ===` means stop and report with
-   the log. Silence with download lines means keep polling; silence without them means
+   the log; `failed steps:` names what failed. `[qmd-embed] FAILED - qmd exited 0 but
+   reported: N chunks failed` means QMD stopped early (QMD 1.1.5 and 2.5.3 cap one
+   embed session at 30 minutes); the next `cairn sync --cron` continues where it
+   stopped. Silence with download lines means keep polling; silence without them means
    report it as wedged. Elapsed time is never completion.
+   If the only new line is `=== context-sync (...) skipped: another cairn sync is
+   running ... ===`, your run exited 0 without doing work: wait for the running sync's
+   own `=== done ===` or `=== FAILED ===` and judge that instead.
 
 Collect missing settings with an available user-input tool. Some synchronous input tools
 are restricted to Plan mode; use asynchronous input or ordinary conversation otherwise.
