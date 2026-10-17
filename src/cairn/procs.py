@@ -19,6 +19,10 @@ from collections.abc import Mapping, Sequence
 KILL_GRACE_S = 5.0  # SIGTERM -> SIGKILL grace for a timed-out process group
 
 
+class ProcessCleanupError(RuntimeError):
+    """The child's process-group leader was not reaped within the bound after SIGKILL."""
+
+
 def _signal_group(pgid: int, sig: int) -> None:
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pgid, sig)
@@ -38,6 +42,31 @@ def kill_group(process: subprocess.Popen[str], grace_s: float = KILL_GRACE_S) ->
         process.wait(grace_s)
 
 
+def _text(value: str | bytes | None) -> str:
+    """Partial output from ``TimeoutExpired`` is bytes even in text mode."""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
+def finish(process: subprocess.Popen[str], grace_s: float = KILL_GRACE_S) -> None:
+    """Close the pipes and reap the leader with a bounded wait.
+
+    Raises :class:`ProcessCleanupError` ("cleanup incomplete") when the leader is
+    still not reaped after ``grace_s``, instead of waiting without a bound.
+    """
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            with contextlib.suppress(OSError):
+                stream.close()
+    try:
+        process.wait(grace_s)
+    except subprocess.TimeoutExpired:
+        raise ProcessCleanupError(
+            f"cleanup incomplete: pid {process.pid} was not reaped {grace_s:g}s after SIGKILL"
+        ) from None
+
+
 def run_capped(
     command: Sequence[str],
     *,
@@ -47,13 +76,13 @@ def run_capped(
 ) -> subprocess.CompletedProcess[str]:
     """Run ``command`` with captured text output; kill its process group on timeout.
 
-    Raises :class:`subprocess.TimeoutExpired` (carrying the partial output) after
-    the group is killed. Any other interruption of the wait (``KeyboardInterrupt``
-    included) also kills the group before it propagates, because a child in its
-    own session no longer receives the terminal's SIGINT.
+    Raises :class:`subprocess.TimeoutExpired` (carrying the partial stdout and
+    stderr) after the group is killed. Any other interruption of the wait
+    (``KeyboardInterrupt`` included) also kills the group before it propagates,
+    because a child in its own session no longer receives the terminal's SIGINT.
+    Every wait is bounded; see :func:`finish`.
     """
-    # The context manager closes the pipes and reaps the leader on every exit path.
-    with subprocess.Popen(
+    process = subprocess.Popen(
         list(command),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -62,23 +91,30 @@ def run_capped(
         env=dict(env) if env is not None else None,
         cwd=cwd,
         start_new_session=True,
-    ) as process:
+    )
+    try:
+        out, err = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as first:
+        out, err = _text(first.stdout), _text(first.stderr)
+        kill_group(process)
+        # A descendant that escaped the group (setsid) can keep the pipes open, so
+        # the final read is bounded too. Its exception carries everything read so
+        # far, which supersedes the first partial output.
         try:
-            out, err = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            kill_group(process)
-            out = err = ""
-            # A descendant that escaped the group can still hold the pipes open; never
-            # wait on it indefinitely. Partial output read so far is returned here.
-            with contextlib.suppress(subprocess.TimeoutExpired, ValueError, OSError):
-                out, err = process.communicate(timeout=KILL_GRACE_S)
-            raise subprocess.TimeoutExpired(
-                list(command), timeout, output=out, stderr=err
-            ) from None
-        except BaseException:
-            kill_group(process)
-            raise
+            out, err = process.communicate(timeout=KILL_GRACE_S)
+        except subprocess.TimeoutExpired as second:
+            out, err = _text(second.stdout) or out, _text(second.stderr) or err
+        except (ValueError, OSError):
+            pass
+        finish(process)
+        raise subprocess.TimeoutExpired(list(command), timeout, output=out, stderr=err) from None
+    except BaseException:
+        kill_group(process)
+        with contextlib.suppress(ProcessCleanupError):
+            finish(process)
+        raise
+    finish(process)
     return subprocess.CompletedProcess(list(command), process.returncode, out, err)
 
 
-__all__ = ["KILL_GRACE_S", "kill_group", "run_capped"]
+__all__ = ["KILL_GRACE_S", "ProcessCleanupError", "finish", "kill_group", "run_capped"]

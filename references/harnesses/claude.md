@@ -30,7 +30,7 @@ A foreground `Bash` call dies long before a ten-minute model download finishes, 
    > - **command:**
    >   ```bash
    >   tail -n +1 -f "$DATA_ROOT/logs/context-sync.log" \
-   >     | grep -E --line-buffered "Done!|Embedded |[0-9]+%|download|model|Error|Traceback|failed|FAILED|INCOMPLETE|qmd-verify|skipped|Killed|OOM|=== (done|FAILED) ==="
+   >     | grep -E --line-buffered "Done!|Embedded |[0-9]+%|download|model|Error|Traceback|failed|FAILED|INCOMPLETE|qmd-verify|coalesced|skipped|Killed|OOM|=== (done|FAILED) ==="
    >   ```
 
    `tail -n +1 -f` replays lines written before Monitor armed, then streams new ones.
@@ -42,12 +42,15 @@ A foreground `Bash` call dies long before a ten-minute model download finishes, 
    - **Failure:** the log shows `=== FAILED ===` or an error line, or the task exits
      non-zero. `Read` the full log and stop and report; do not verify a broken index.
      The `failed steps:` line before `=== FAILED ===` names what failed.
-     `[qmd-embed] FAILED - qmd exited 0 but reported: N chunks failed` means QMD stopped
-     early (QMD 1.1.5 and 2.5.3 cap one embed session at 30 minutes); the next sync
-     continues.
+     `[qmd-embed] FAILED - qmd exited 0 but reported: N chunks failed` or
+     `[qmd-verify] INCOMPLETE` means QMD stopped early (QMD 1.1.5 and 2.5.3 cap one embed
+     session at 30 minutes). Completed documents keep their vectors; a partly embedded
+     document restarts. Rerun only while the pending count in `cairn doctor` falls.
+     The embed line says `exited 0`, not `ok`; the `[qmd-verify]` line is the verdict.
    - **Skipped:** `=== context-sync (...) skipped: another cairn sync is running ... ===`
-     means your run exited 0 without doing work. Wait for the running sync's own
-     `=== done ===` or `=== FAILED ===` and judge that instead.
+     means your run exited 0 without doing work. The running sync runs its missing
+     stages (a `[coalesced]` line) before its own `=== done ===` or `=== FAILED ===`;
+     judge that instead.
    - **Silence or timeout:** `Read` the tail of the log. Download or percentage lines
      mean it is still working, so re-arm Monitor. Otherwise report it as wedged.
 

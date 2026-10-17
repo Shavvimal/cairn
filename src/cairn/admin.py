@@ -597,8 +597,8 @@ def _check_embeddings(
         caveat = f"{counts}: semantic search misses the pending documents"
         (_fail if strict else _warn)(
             "embeddings",
-            f"{caveat}; the next 'cairn sync --cron' continues (whitespace-only documents "
-            "never get vectors and stay pending)",
+            f"{caveat}; the next 'cairn sync --cron' continues. If this count does not fall "
+            "across runs, investigate instead of retrying",
         )
         return int(strict), caveat
     _ok("embeddings", counts)

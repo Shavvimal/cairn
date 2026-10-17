@@ -209,7 +209,8 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _VERSION = re.compile(r"\bqmd\s+v?(\d+)\.(\d+)\.(\d+)(?![-.\w])")
 _TOTAL = re.compile(r"^\s*Total:\s*([\d,]+) files? indexed", re.MULTILINE)
 _VECTORS = re.compile(r"^\s*Vectors:\s*([\d,]+) embedded", re.MULTILINE)
-_PENDING = re.compile(r"^\s*Pending:\s*([\d,]+) need embedding", re.MULTILINE)
+_PENDING = re.compile(r"^\s*Pending:\s*(\d[\d,]*) need embedding", re.MULTILINE)
+_PENDING_LINE = re.compile(r"^\s*Pending:", re.MULTILINE)
 # "⚠ 48219 chunks failed" (QMD 1.x) and "⚠ 48,219 chunks still failed after retries" (2.x).
 _FAILED_CHUNKS = re.compile(r"(\d[\d,]*) chunks? (?:still )?failed")
 _CHUNK_ERROR = re.compile(r"Error embedding\b")
@@ -255,7 +256,7 @@ def parse_status(text: str) -> IndexStatus | None:
 
     QMD prints ``Pending:`` only when work remains, so a block with ``Total`` and
     ``Vectors`` but no ``Pending`` line means zero pending. A missing ``Documents``
-    heading or count is unknown, never zero.
+    heading or count, or a ``Pending`` line in another shape, is unknown, never zero.
     """
     clean = strip_ansi(text)
     if not re.search(r"^Documents\s*$", clean, re.MULTILINE):
@@ -264,6 +265,8 @@ def parse_status(text: str) -> IndexStatus | None:
     if total is None or vectors is None:
         return None
     pending = _PENDING.search(clean)
+    if pending is None and _PENDING_LINE.search(clean):
+        return None  # a Pending line cairn cannot read is unknown, not zero
     return IndexStatus(_count(total), _count(vectors), _count(pending) if pending else 0)
 
 

@@ -220,14 +220,18 @@ look like.
 
 Do not start a second embedding process while sync is still running. A second
 `cairn sync` for the same data root logs one `skipped: another cairn sync is running` line
-and exits 0 without doing work. If embedding failed, retry `cairn sync --cron` after the
+and exits 0; the running sync runs that request's missing stages before it exits. If embedding failed, retry `cairn sync --cron` after the
 running job ends and the error is resolved.
 
 QMD exits 0 even when chunks fail, so cairn checks the embed output and then `qmd status`:
-`[qmd-embed] FAILED - qmd exited 0 but reported: N chunks failed` fails the sync, and a
-`[qmd-verify]` line reports the index-wide documents, vectors and pending documents. A
-first embed of a large history can pass QMD's 30-minute session limit (1.1.5 and 2.5.3):
-each run keeps the vectors it made, so rerun `cairn sync --cron` until it passes.
+`[qmd-embed] FAILED - qmd exited 0 but reported: N chunks failed` fails the sync. The
+embed step logs `exited 0` on a clean exit; the `[qmd-verify]` line gives the verdict with
+the index-wide documents, vectors and pending documents, and `INCOMPLETE` (pending > 0)
+also fails the sync. A first embed of a large history can pass QMD's 30-minute session
+limit (1.1.5 and 2.5.3). Completed documents keep their vectors, but QMD 2.5.3 removes the
+vectors of a partly embedded document, so it restarts on the next run. Rerun
+`cairn sync --cron` while the pending count in `cairn doctor` falls; if it stops falling,
+stop and report it (a document may never fit in one session).
 
 ## 6. Configure automatic sync and periodic maintenance
 

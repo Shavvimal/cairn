@@ -282,16 +282,23 @@ cairn sync --cron    # full: all exports + qmd update + qmd embed
 ```
 
 One `cairn sync` runs per data root at a time. A second one (an hourly cron run that
-overlaps a manual run, say) logs one `skipped: another cairn sync is running` line and
-exits 0. A step that times out takes its whole process group with it, so a `qmd` wrapper's
+overlaps a manual run, say) records its mode under `<data_root>/sync-requests/`, logs one
+`skipped: another cairn sync is running` line and exits 0. Before the running sync exits,
+it runs once the stages the skipped request needs that it did not run itself (for example
+the embed a `--cron` request needs after a legacy `--hook` run). A step that times out takes its whole process group with it, so a `qmd` wrapper's
 Node child cannot keep running outside the index lock. When a run fails, the log names the
 failed steps on a `failed steps:` line just before `=== FAILED ===`.
 
 QMD exits 0 even when embedding chunks fail. Full sync reads the whole `qmd embed` output
 and fails on reported chunk failures, then logs a `[qmd-verify]` line with the index-wide
-documents, vectors and pending documents from `qmd status`. QMD 1.1.5 and 2.5.3 cap one
-embed session at 30 minutes, so a large backlog takes several hourly runs; each run keeps
-its vectors. BM25 keyword search works as soon as a session is exported and `qmd update`
+documents, vectors and pending documents from `qmd status`. Pending documents left after
+the embed fail the run as `INCOMPLETE` (`failed steps: qmd-verify (incomplete)`), which is
+unfinished work, not corruption. The embed step logs `exited 0`; `[qmd-verify]` gives the
+verdict. QMD 1.1.5 and 2.5.3 cap one embed session at 30 minutes, so a large backlog takes
+several runs. Completed documents keep their vectors, but QMD 2.5.3 removes the vectors of
+a partly embedded document, so that document restarts on the next run. Check progress with
+the pending count in `cairn doctor`: if it does not fall across runs, a document may never
+fit in one session, so investigate instead of retrying. BM25 keyword search works as soon as a session is exported and `qmd update`
 runs (the SessionEnd hook does both); semantic search waits for the next full sync.
 
 `cairn doctor` probes the configured QMD (`--version`, then `status` as a runtime check)

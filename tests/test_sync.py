@@ -42,6 +42,12 @@ if command in ("embed", "status"):
 with open(here / "calls.log", "a") as log:
     log.write(f"{command} {held}\\n")
 spec = scenario.get(command, {})
+spawn = spec.get("spawn_sync")
+if spawn and not (spec.get("once") and (here / "spawned").exists()):
+    # A second `cairn sync` arriving while this one holds the sync lock.
+    import subprocess
+    (here / "spawned").touch()
+    subprocess.run([sys.executable, "-m", "cairn", "sync", spawn], check=True)
 if command == "collection list":
     print("qmd://codex-sessions/\\nqmd://claude-code-sessions/")
 sys.stdout.write(spec.get("out", ""))
@@ -72,6 +78,9 @@ class SyncFixture(StoreFixture):
     def sync_cron(self) -> subprocess.CompletedProcess[str]:
         return self.run_cli("sync", "--cron", check=False)
 
+    def count(self, command: str) -> int:
+        return sum(1 for c in self.calls() if c.split()[0] == command)
+
 
 class TestOneSyncAtATime(SyncFixture):
     def test_second_sync_logs_one_skip_line_and_exits_zero(self):
@@ -84,6 +93,8 @@ class TestOneSyncAtATime(SyncFixture):
         self.assertIn("skipped: another cairn sync is running", lines[0])
         self.assertNotIn("[claude-code-sessions]", self.log_text)
         self.assertEqual(self.calls(), [])
+        # The skipped mode is recorded durably for the lock holder.
+        self.assertTrue((cfg.data_root / "sync-requests/cron").is_file())
 
     def test_data_root_alias_contends_for_the_same_lock(self):
         alias = self.root / "alias"
@@ -103,7 +114,7 @@ class TestOneSyncAtATime(SyncFixture):
             "[codex-sessions] ok",
             "[qmd-collections] ok",
             "[qmd-update] ok",
-            "[qmd-embed] ok",
+            "[qmd-embed] exited 0",
             "[qmd-verify] ok - 4 documents, 9 vectors, 0 pending",
             "=== done ===",
         ]
@@ -147,7 +158,7 @@ class TestVerifiedEmbedding(SyncFixture):
         self.assertIn("[qmd-embed] FAILED", text)
         self.assertIn("qmd exited 0 but reported: 48,219 chunks failed", text)
         self.assertIn("[qmd-verify] INCOMPLETE - 4 documents, 9 vectors, 2 pending", text)
-        self.assertIn("failed steps: qmd-embed\n=== FAILED ===", text)
+        self.assertIn("failed steps: qmd-embed, qmd-verify (incomplete)\n=== FAILED ===", text)
         self.assertEqual([c for c in self.calls() if c.startswith("embed")], ["embed held"])
         # A later run with a clean embed recovers: no latched failure.
         self.scenario({"embed": {"out": "✓ Done! Embedded 2 chunks from 2 documents\n"}})
@@ -160,10 +171,28 @@ class TestVerifiedEmbedding(SyncFixture):
         self.assertEqual(held, ["embed held", "status held"])
         self.assertNotIn("embed -f", " ".join(self.calls()))
 
-    def test_pending_after_a_clean_embed_is_reported_but_not_a_failure(self):
+    def test_pending_after_a_clean_embed_is_incomplete_and_fails(self):
         self.scenario({"embed": {"out": "✓ Done!\n"}, "status": {"out": STATUS_PENDING}})
-        self.assertEqual(self.sync_cron().returncode, 0, self.log_text)
-        self.assertIn("[qmd-verify] INCOMPLETE", self.log_text)
+        self.assertEqual(self.sync_cron().returncode, 1)
+        text = self.log_text
+        self.assertIn("[qmd-embed] exited 0", text)
+        self.assertIn("[qmd-verify] INCOMPLETE - 4 documents, 9 vectors, 2 pending", text)
+        self.assertNotIn("corrupt", text)
+        self.assertIn("failed steps: qmd-verify (incomplete)\n=== FAILED ===", text)
+
+    def test_clean_exit_is_never_logged_ok_before_verification(self):
+        self.scenario({"status": {"out": "Documents\n  Total:    4 files indexed\n"}})
+        self.assertEqual(self.sync_cron().returncode, 1)
+        self.assertNotIn("[qmd-embed] ok", self.log_text)
+        self.assertIn("[qmd-embed] exited 0", self.log_text)
+        self.assertIn("[qmd-verify] FAILED", self.log_text)
+
+    def test_malformed_pending_line_is_unreadable_not_complete(self):
+        self.scenario(
+            {"status": {"out": STATUS_COMPLETE + "  Pending:  8 documents need embedding\n"}}
+        )
+        self.assertEqual(self.sync_cron().returncode, 1)
+        self.assertIn("[qmd-verify] FAILED - could not verify", self.log_text)
 
     def test_unreadable_post_status_fails(self):
         self.scenario({"status": {"out": "no idea", "rc": 0}})
@@ -203,12 +232,72 @@ class TestVerifiedEmbedding(SyncFixture):
 
     def test_embed_timeout(self):
         self.scenario({})
-        with mock.patch.object(
-            sync, "run_capped", side_effect=subprocess.TimeoutExpired("qmd", 1, output="partial")
-        ):
+        timeout = subprocess.TimeoutExpired("qmd", 1, output="partial out", stderr=b"partial err")
+        with mock.patch.object(sync, "run_capped", side_effect=timeout):
             self.assertEqual(sync.run_embed("qmd", timeout=1), (False, False))
         self.assertIn("[qmd-embed] TIMEOUT after 1s", self.log_text)
-        self.assertIn("partial", self.log_text)
+        self.assertIn("partial out", self.log_text)
+        self.assertIn("[stderr] partial err", self.log_text)
+
+    def test_cleanup_incomplete_is_logged_not_raised(self):
+        error = procs.ProcessCleanupError("cleanup incomplete: pid 1 was not reaped")
+        with mock.patch.object(sync, "run_capped", side_effect=error):
+            self.assertEqual(sync.run_embed("qmd"), (False, False))
+            self.assertFalse(sync.run_step("probe", ["qmd"]))
+        self.assertIn("[qmd-embed] ERROR: cleanup incomplete", self.log_text)
+        self.assertIn("[probe] ERROR: cleanup incomplete", self.log_text)
+
+
+class TestCoalescedRequests(SyncFixture):
+    def requests(self) -> list[str]:
+        folder = self.root / "data/sync-requests"
+        return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
+
+    def test_cron_arriving_during_a_hook_sync_gets_its_full_stages(self):
+        self.scenario({"update": {"spawn_sync": "--cron", "once": True}})
+        result = self.run_cli("sync", "--hook", check=False)
+        self.assertEqual(result.returncode, 0, self.log_text)
+        text = self.log_text
+        skip = text.index("=== context-sync (cron)")
+        coalesced = text.index("[coalesced] a skipped 'cron' sync arrived")
+        self.assertLess(skip, coalesced)
+        self.assertLess(text.index("[qmd-update] ok"), coalesced)
+        self.assertLess(coalesced, text.index("[qmd-embed] exited 0"))
+        self.assertLess(text.index("[qmd-verify] ok"), text.index("=== done ==="))
+        self.assertEqual(self.count("embed"), 1)
+        self.assertEqual(self.count("update"), 2)  # hook pass + follow-up pass
+        self.assertEqual(self.requests(), [])
+
+    def test_a_request_recorded_before_the_run_is_still_serviced(self):
+        sync.request_sync(config.get_config(), "cron")
+        self.assertEqual(self.run_cli("sync", "--hook", check=False).returncode, 0, self.log_text)
+        self.assertEqual(self.count("embed"), 1)
+        self.assertEqual(self.requests(), [])
+
+    def test_requests_during_the_follow_up_wait_for_the_next_invocation(self):
+        # Every update spawns another skipped --cron: one follow-up pass, no loop.
+        self.scenario({"update": {"spawn_sync": "--cron"}})
+        self.assertEqual(self.run_cli("sync", "--hook", check=False).returncode, 0, self.log_text)
+        self.assertEqual(self.count("embed"), 1)
+        self.assertEqual(self.requests(), ["cron"])  # left for the next invocation
+        self.assertEqual(self.run_cli("sync", "--hook", check=False).returncode, 0, self.log_text)
+        self.assertEqual(self.count("embed"), 2)
+
+    def test_full_run_answers_a_full_request_with_a_worker_retry_only(self):
+        self.scenario({"embed": {"spawn_sync": "--all", "once": True}})
+        self.assertEqual(self.sync_cron().returncode, 0, self.log_text)
+        self.assertIn(
+            "[coalesced] a skipped 'all' sync arrived; retrying hook requests", self.log_text
+        )
+        self.assertEqual(self.count("embed"), 1)
+
+    def test_narrower_request_is_consumed(self):
+        self.scenario({"embed": {"spawn_sync": "--hook", "once": True}})
+        self.assertEqual(self.sync_cron().returncode, 0, self.log_text)
+        self.assertIn(
+            "[coalesced] a skipped 'hook' sync arrived; this run covered it", self.log_text
+        )
+        self.assertEqual(self.requests(), [])
 
 
 class TestRunSummary(SyncFixture):
@@ -222,36 +311,101 @@ class TestRunSummary(SyncFixture):
         text = self.log_text
         self.assertIn("[broken-source] FAILED", text)
         self.assertIn("[good-source] ok", text)
-        self.assertIn("[qmd-embed] ok", text)
+        self.assertIn("[qmd-verify] ok", text)
         self.assertTrue(text.rstrip().endswith("failed steps: broken-source\n=== FAILED ==="))
 
 
+# Writes the grandchild pid to a file before anything else (readiness handshake).
 GRANDCHILD = (
     "import subprocess, sys, time\n"
     "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
-    "print(f'grandchild={child.pid}', flush=True)\n"
+    "open(sys.argv[1], 'w').write(str(child.pid))\n"
     "time.sleep(60)\n"
 )
+
+
+def _alive(pid: int) -> bool:
+    """True while ``pid`` runs; a zombie (state Z) counts as gone."""
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    return bool(state.stdout.strip()) and not state.stdout.strip().startswith("Z")
 
 
 def _gone(pid: int, within: float = 10) -> bool:
     deadline = time.monotonic() + within
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _alive(pid):
             return True
         time.sleep(0.1)
     return False
 
 
+def _wait_for(path: Path, within: float = 10) -> str:
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text():
+            return path.read_text()
+        time.sleep(0.05)
+    raise AssertionError(f"{path} never appeared")
+
+
 class TestProcessGroupTimeout(StoreFixture):
     def test_run_step_timeout_kills_the_grandchild(self):
-        self.assertFalse(sync.run_step("probe", [sys.executable, "-c", GRANDCHILD], timeout=1))
+        pid_file = self.root / "grandchild.pid"
+        # 5 s leaves room for a slow interpreter start; the pid file proves readiness.
+        ok = sync.run_step("probe", [sys.executable, "-c", GRANDCHILD, str(pid_file)], timeout=5)
+        self.assertFalse(ok)
         log = (self.root / "data/logs/context-sync.log").read_text()
-        self.assertIn("[probe] TIMEOUT after 1s", log)
-        pid = int(log.split("grandchild=")[1].split()[0])
+        self.assertIn("[probe] TIMEOUT after 5s", log)
+        pid = int(_wait_for(pid_file))
         self.assertTrue(_gone(pid), f"grandchild {pid} survived the timeout")
+
+    def test_escaped_grandchild_holding_the_pipes_keeps_partial_output(self):
+        pid_file = self.root / "escaped.pid"
+        script = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],"
+            " start_new_session=True)\n"  # setsid: outside the killed group, holds the pipes
+            "open(sys.argv[1], 'w').write(str(child.pid))\n"
+            "print('partial stdout', flush=True)\n"
+            "print('partial stderr', file=sys.stderr, flush=True)\n"
+            "time.sleep(30)\n"
+        )
+        try:
+            with (
+                mock.patch.object(procs, "KILL_GRACE_S", 0.5),
+                self.assertRaises(subprocess.TimeoutExpired) as caught,
+            ):
+                procs.run_capped([sys.executable, "-c", script, str(pid_file)], timeout=3)
+            self.assertIn("partial stdout", str(caught.exception.stdout))
+            self.assertIn("partial stderr", str(caught.exception.stderr))
+        finally:
+            if pid_file.exists():
+                os.kill(int(pid_file.read_text()), 9)
+
+    def test_finish_reports_cleanup_incomplete_instead_of_waiting_forever(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            with (
+                mock.patch.object(process, "wait", side_effect=subprocess.TimeoutExpired("x", 0.1)),
+                self.assertRaisesRegex(procs.ProcessCleanupError, "cleanup incomplete"),
+            ):
+                procs.finish(process, grace_s=0.1)
+        finally:
+            process.kill()
+            process.wait()
+
+    def test_run_capped_surfaces_cleanup_incomplete(self):
+        error = procs.ProcessCleanupError("cleanup incomplete: pid 1")
+        with (
+            mock.patch.object(procs, "finish", side_effect=error),
+            self.assertRaises(procs.ProcessCleanupError),
+        ):
+            procs.run_capped([sys.executable, "-c", "pass"], timeout=10)
 
     def test_run_capped_returns_output_and_exit_code(self):
         result = procs.run_capped(

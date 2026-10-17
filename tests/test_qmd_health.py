@@ -93,6 +93,17 @@ class TestParseStatus(unittest.TestCase):
         no_vectors = STATUS_EMPTY.replace("Total:    0", "Total:    5")
         self.assertEqual(_status(no_vectors).state, "no-vectors")
 
+    def test_pending_with_thousands_separator(self):
+        text = STATUS_COMPLETE + "  Pending:  1,204 need embedding (run 'qmd embed')\n"
+        self.assertEqual(_status(text).pending, 1204)
+
+    def test_malformed_pending_line_is_unknown_not_zero(self):
+        for line in (
+            "  Pending:  unknown need embedding\n",
+            "  Pending:  8 documents need embedding\n",
+        ):
+            self.assertIsNone(qmd.parse_status(STATUS_COMPLETE + line), line)
+
     def test_unrecognised_output_is_unknown_not_zero(self):
         for text in (
             "",

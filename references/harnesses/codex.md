@@ -32,13 +32,16 @@ A single shell call cannot wait out a ten-minute model download, so run
    chunks can mean the index is already current, so verify total documents/vectors and
    a real query. A non-zero exit or `=== FAILED ===` means stop and report with
    the log; `failed steps:` names what failed. `[qmd-embed] FAILED - qmd exited 0 but
-   reported: N chunks failed` means QMD stopped early (QMD 1.1.5 and 2.5.3 cap one
-   embed session at 30 minutes); the next `cairn sync --cron` continues where it
-   stopped. Silence with download lines means keep polling; silence without them means
+   reported: N chunks failed` or `[qmd-verify] INCOMPLETE` means QMD stopped early
+   (QMD 1.1.5 and 2.5.3 cap one embed session at 30 minutes). Completed documents keep
+   their vectors; a partly embedded document restarts. Rerun only while the pending
+   count in `cairn doctor` falls. The embed line says `exited 0`, not `ok`; the
+   `[qmd-verify]` line is the verdict. Silence with download lines means keep polling; silence without them means
    report it as wedged. Elapsed time is never completion.
    If the only new line is `=== context-sync (...) skipped: another cairn sync is
-   running ... ===`, your run exited 0 without doing work: wait for the running sync's
-   own `=== done ===` or `=== FAILED ===` and judge that instead.
+   running ... ===`, your run exited 0 without doing work: the running sync runs its
+   missing stages (a `[coalesced]` line) before its own `=== done ===` or
+   `=== FAILED ===`; judge that instead.
 
 Collect missing settings with an available user-input tool. Some synchronous input tools
 are restricted to Plan mode; use asynchronous input or ordinary conversation otherwise.

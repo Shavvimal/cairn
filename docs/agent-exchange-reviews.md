@@ -99,6 +99,25 @@ tested across a split multi-byte write, a final line without a newline, temporar
 live peer, and output emitted during cancellation; the Codex terminal-outcome fixtures include
 a replayed parent whose final answer is ignored once the boundary resolves.
 
+## Phase 4: sync and embedding reliability
+
+Reviewed commit `ae28d78`, the validated parts of `docs/qmd-reliability-pr.md` and
+`docs/sync-robustness-plan.md`. Duration 275 s. Verdict: not merge-ready. The reviewer
+confirmed the log evidence (the 83,072 of 131,291 false success, the interleaved 17:04 and
+17:07 runs), the rejections of the pre-flight probe and the 2.4.1 bump, the lock order, the
+exit codes and output capture of `run_capped`, the failure wordings, and the fixture changes.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | should-fix | A `--cron` sync skipped because a `--hook` sync held the lock exited 0 although hook mode retries no failed requests, exports no other sources and embeds nothing; a failed request arriving after a full sync's first worker pass waited for another invocation. | Fixed: a skipped sync writes a durable request marker for its mode; before releasing the lock the holder services the widest request once: a wider one gets the stages it has not run (worker retry, remaining exports, update, embed, verify), a same-mode or narrower one gets one more worker retry pass so a request that failed after the first pass does not wait an hour. One follow-up pass per run, so it cannot loop. Mixed-mode and late-request regressions. |
+| 2 | should-fix | A clean embed followed by positive pending returned 0 and `=== done ===`. The whitespace-only justification did not hold: QMD 2.5.3 skips such files before indexing. | Fixed: `INCOMPLETE` exits nonzero with its distinct message; the Validation row, changelog and README corrected. |
+| 3 | should-fix | When a descendant escaped the group and kept the pipes, the second `communicate` timed out and `run_capped` raised with empty output; sync's timeout handlers omitted stderr. | Fixed: the first timeout's partial output is kept and replaced by the second's when available; both stream tails are logged. |
+| 4 | should-fix | `Pending: unknown …` and `Pending: 8 documents need embedding` both parsed as zero pending, so an unfamiliar status format passed strict verification. | Fixed: an absent `Pending:` line is zero, a present but unparseable one is unknown, which fails strict doctor and sync verification. |
+| 5 | should-fix | Recovery text promised that each run keeps its vectors; QMD 2.5.3 removes the vectors of a partially embedded document after a batch, so a document that never fits the 30-minute session can lose progress repeatedly. | Fixed: the docs say completed documents keep their vectors, partial ones may restart, and repeated runs without a falling pending count need investigation. |
+| 6 | should-fix | `kill_group` bounded its own waits but leaving the `Popen` context waited without a bound, so a child stuck in kernel I/O could hold the sync locks past the advertised cleanup. | Fixed: pipes are closed and the child reaped with a bounded wait; an unreaped child is surfaced as incomplete cleanup. |
+| 7 | nit | `[qmd-embed] ok` was logged before verification, so an unreadable status produced `ok` then `[qmd-verify] FAILED`. | Fixed: the embed line reports the subprocess exit and the verdict lives in `[qmd-verify]`. |
+| 8 | nit | The process-tree timeout test started its clock before the grandchild existed and treated a zombie as alive. | Fixed: readiness handshake and a state check. |
+
 ## Live acceptance on the author's machine (2026-10-17)
 
 - **G7** `cairn codex export --all` on the real store: 610 rollouts in 7 s, 107 `codex-subagent`

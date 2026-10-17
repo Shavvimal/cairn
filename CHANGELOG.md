@@ -55,14 +55,23 @@ the next `cairn sync --cron`. Windowed cron runs never re-export old documents.
 ### Fixed
 - Sync reported `[qmd-embed] ok` when QMD exited 0 with failed chunks (seen: 48,219 of
   131,291 chunks after QMD's 30-minute embed session expired). The whole embed output is
-  now checked for failed-chunk reports and chunk errors, and the run fails. A non-empty
-  index with no vectors, or an unreadable `qmd status`, also fails it.
+  now checked for failed-chunk reports and chunk errors, and the run fails. A clean exit
+  logs `[qmd-embed] exited 0`; `[qmd-verify]` gives the verdict. Pending documents after
+  the embed fail the run as `INCOMPLETE` (`failed steps: qmd-verify (incomplete)`), and a
+  non-empty index with no vectors, an unreadable `qmd status`, or a `Pending` line in an
+  unknown shape also fails it.
 - Two `cairn sync` runs could overlap (an hourly cron run during a manual one) and
-  interleave their log blocks. A per-data-root sync lock now lets one run at a time; the
-  other logs one `skipped` line and exits 0.
+  interleave their log blocks. A per-data-root sync lock now lets one run at a time. The
+  other records its mode under `<data_root>/sync-requests/`, logs one `skipped` line and
+  exits 0; the running sync then runs, once, the stages the request needs that it did not
+  run (a `--cron` request after a legacy `--hook` run gets the worker retry, the other
+  exports, update, embed and verify; a full request after a full run gets a hook-worker
+  retry). Requests that arrive during that pass wait for the next invocation.
 - A timed-out sync step, hook export or `qmd update` killed only its direct child, so the
   Node grandchild behind the `qmd` launcher could keep running outside the index lock. The
-  whole process group is now killed (also on Ctrl-C).
+  whole process group is now killed (also on Ctrl-C). A timeout keeps the partial stdout
+  and stderr even when a descendant escaped the group, and process cleanup is bounded
+  (`cleanup incomplete` is reported instead of an unbounded wait).
 - Full sync no longer runs `qmd embed` after `qmd update` failed.
 - The test suite wrote catalogs and lock files into the real home (`~/.cache/cairn`,
   `~/.local/state/cairn`); CI now fails if it does.

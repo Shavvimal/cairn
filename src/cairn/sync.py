@@ -7,9 +7,14 @@ cron's minimal PATH, the SessionEnd hook, and a manual run. Per-source isolation
 (timeouts, independent ok/FAILED logging) is the whole point: one source failing
 never blocks the others or the index refresh.
 
-One sync per ``data_root`` runs at a time: a second ``cairn sync`` finds the sync
-lock held, logs one ``skipped`` line and exits 0 (the running sync covers the same
-work). Lock order, outermost first::
+One sync per ``data_root`` runs at a time. A second ``cairn sync`` finds the sync
+lock held, records its mode durably under ``<data_root>/sync-requests/<mode>``,
+tries the lock once more (the holder may have just released it), and otherwise
+logs one ``skipped`` line and exits 0. Before releasing the lock, the holder
+consumes those requests and runs, once, the stages a wider request needs that its
+own run did not do (modes widen hook < cron < all). Requests that arrive during
+that follow-up pass stay on disk for the next invocation, so the holder never
+loops. Lock order, outermost first::
 
     sync (this module) > hook worker > export operation > qmd index (locked_index)
 
@@ -33,9 +38,10 @@ from .procs import run_capped
 from .qmd import embed_failures, ensure_collection, index_status, list_collections, locked_index
 from .registry import SOURCE_COLLECTIONS as SOURCE_COLLECTIONS
 from .registry import SOURCES as _BINDINGS
-from .storage import lock_path, locked
+from .storage import atomic_write, lock_path, locked
 
 EMBED_TIMEOUT_S = 3600
+MODE_RANK = {"hook": 0, "cron": 1, "all": 2}
 
 
 def _log_file() -> Path:
@@ -111,6 +117,18 @@ def _log_output(text, prefix="      "):
         log(prefix + line)
 
 
+def _as_text(value: str | bytes | None) -> str:
+    return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
+
+
+def _log_timeout_output(error: subprocess.TimeoutExpired) -> None:
+    """Log the partial stdout and stderr a timed-out command left behind."""
+    _log_output(_as_text(error.stdout))
+    stderr = _as_text(error.stderr)
+    if stderr.strip():
+        _log_output(stderr, prefix="      [stderr] ")
+
+
 def run_step(name, command, timeout=120):
     """Run a command, log its status AND its output, return success.
 
@@ -128,8 +146,7 @@ def run_step(name, command, timeout=120):
         return result.returncode == 0
     except subprocess.TimeoutExpired as e:
         log(f"  [{name}] TIMEOUT after {timeout}s")
-        partial = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else e.stdout
-        _log_output(partial)
+        _log_timeout_output(e)
         return False
     except Exception as e:
         log(f"  [{name}] ERROR: {e}")
@@ -142,16 +159,17 @@ def run_embed(qmd: str, timeout: int = EMBED_TIMEOUT_S) -> tuple[bool, bool]:
     QMD exits 0 even when chunks fail, so exit 0 alone is not success: the full
     output is checked for failure reports before it is truncated for the log.
     ``exited`` is True when QMD ran to a normal exit (any code), which is when the
-    caller verifies the index with :func:`verify_index` under the same lock.
+    caller verifies the index with :func:`verify_index` under the same lock. A clean
+    exit logs ``exited 0``, never ``ok``: only ``[qmd-verify]`` gives the verdict.
     """
     start = time.time()
     try:
         result = run_capped([qmd, "embed"], timeout=timeout)
     except subprocess.TimeoutExpired as e:
         log(f"  [qmd-embed] TIMEOUT after {timeout}s")
-        _log_output(e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else e.stdout)
+        _log_timeout_output(e)
         return False, False
-    except OSError as e:
+    except (OSError, RuntimeError) as e:  # RuntimeError: ProcessCleanupError
         log(f"  [qmd-embed] ERROR: {e}")
         return False, False
     elapsed = time.time() - start
@@ -163,39 +181,41 @@ def run_embed(qmd: str, timeout: int = EMBED_TIMEOUT_S) -> tuple[bool, bool]:
         for extra in problems[1:]:
             log(f"      also: {extra}")
     else:
-        log(f"  [qmd-embed] ok ({elapsed:.1f}s)")
+        # Not "ok": the verdict comes from [qmd-verify], which reads the index next.
+        log(f"  [qmd-embed] exited 0 ({elapsed:.1f}s)")
     _log_output(result.stdout)
     if result.stderr and result.stderr.strip():
         _log_output(result.stderr, prefix="      [stderr] ")
     return result.returncode == 0 and not problems, True
 
 
-def verify_index(qmd: str) -> bool:
-    """Log the post-embed index state; return False when it shows a broken index.
+def verify_index(qmd: str) -> str | None:
+    """Log the post-embed index state; return the failed-step label, or None when complete.
 
-    Pending documents after a clean embed are reported but do not fail the run:
-    QMD never embeds a whitespace-only document yet counts it as pending, and a
-    writer outside cairn can add work at any time. Failed chunks are caught from
-    the embed output instead. All counts are index-wide.
+    Pending documents mean the run did not finish the work: ``INCOMPLETE``, a
+    failure distinct from a broken index (QMD skips whitespace-only files before
+    indexing, so they never show up as pending). An empty index is complete. All
+    counts are index-wide.
     """
     try:
         status = index_status(qmd)
     except RuntimeError as e:
         log(f"  [qmd-verify] FAILED - could not verify the index after embedding: {e}")
-        return False
+        return "qmd-verify"
     if status.state == "empty":
         log("  [qmd-verify] ok - empty index: no documents to embed")
     elif status.state == "no-vectors":
         log(f"  [qmd-verify] FAILED - {status.describe()}: no vectors after embedding")
-        return False
+        return "qmd-verify"
     elif status.state == "pending":
         log(
             f"  [qmd-verify] INCOMPLETE - {status.describe()}; "
-            "the next sync embeds the rest (whitespace-only documents stay pending)"
+            "the next 'cairn sync --cron' continues (see 'cairn doctor' for the pending count)"
         )
+        return "qmd-verify (incomplete)"
     else:
         log(f"  [qmd-verify] ok - {status.describe()}")
-    return True
+    return None
 
 
 def run_inproc(name, fn):
@@ -274,27 +294,109 @@ def main(argv: list[str] | None = None):
 
     config = get_config()
     mode = "hook" if args.hook else ("cron" if args.cron else "all")
+    sync_lock = lock_path(config.data_root, "sync")
     with ExitStack() as stack:
         try:
-            stack.enter_context(locked(lock_path(config.data_root, "sync"), blocking=False))
+            stack.enter_context(locked(sync_lock, blocking=False))
         except BlockingIOError:
-            # One line, so it cannot split a running sync's block. Not a failure.
-            log(
-                f"=== context-sync ({mode}) {datetime.now().isoformat()} skipped: "
-                f"another cairn sync is running for {config.data_root} ==="
-            )
-            return 0
+            request_sync(config, mode)
+            try:
+                # The holder may have released the lock between our first try and
+                # the request write; then nobody would consume it until later.
+                stack.enter_context(locked(sync_lock, blocking=False))
+            except BlockingIOError:
+                # One line, so it cannot split a running sync's block. Not a failure.
+                log(
+                    f"=== context-sync ({mode}) {datetime.now().isoformat()} skipped: "
+                    f"another cairn sync is running for {config.data_root}; "
+                    "it runs this request's stages before it exits ==="
+                )
+                return 0
         return _run(config, mode)
     raise AssertionError("unreachable")
 
 
+def _requests_dir(config: CairnConfig) -> Path:
+    return config.data_root / "sync-requests"
+
+
+def request_sync(config: CairnConfig, mode: str) -> None:
+    """Record that a ``mode`` sync was skipped, for the lock holder to service."""
+    atomic_write(_requests_dir(config) / mode, datetime.now().isoformat() + "\n")
+
+
+def consume_requests(config: CairnConfig) -> str | None:
+    """Remove every recorded request; return the widest mode among them (sync lock held)."""
+    widest: str | None = None
+    for mode in MODE_RANK:
+        path = _requests_dir(config) / mode
+        if path.is_file():
+            path.unlink(missing_ok=True)
+            if widest is None or MODE_RANK[mode] > MODE_RANK[widest]:
+                widest = mode
+    return widest
+
+
+def _index_stages(config: CairnConfig, embed: bool, record) -> None:
+    """Collections, ``qmd update`` and (if ``embed``) embed + verify, under the index lock."""
+    qmd = config.qmd_binary
+    with locked_index():
+        record(
+            "qmd-collections",
+            run_inproc("qmd-collections", lambda: _ensure_collections(config)),
+        )
+        updated = run_step("qmd-update", [qmd, "update"])
+        record("qmd-update", updated)
+        if not embed:
+            return
+        if not updated:
+            log("  [qmd-embed] skipped - qmd-update failed")
+            return
+        embedded, exited = run_embed(qmd)
+        record("qmd-embed", embedded)
+        if exited:
+            label = verify_index(qmd)
+            record(label or "qmd-verify", label is None)
+
+
+def _stages(config: CairnConfig, mode: str, record, exported: set[str]) -> None:
+    """Run ``mode``'s stages; skip exports already in ``exported`` (and add new ones)."""
+    from .hooks import worker
+
+    if mode != "hook":
+        record("hook-worker", worker(config) == 0)
+    steps = [(name, command) for name, command in _plan(config, mode) if name not in exported]
+    if not steps and not exported:
+        log("  (no enabled sources for this mode - check 'sync.enabled' in your config)")
+    for name, command in steps:
+        record(name, run_step(name, command))
+        exported.add(name)
+    _index_stages(config, embed=mode != "hook", record=record)
+
+
+def _follow_up(config: CairnConfig, mode: str, record, exported: set[str]) -> None:
+    """Service skipped requests once. A wider mode runs the stages this run skipped;
+    a full run answering a full request re-runs only the hook-worker retry pass (a
+    request that failed after the first pass); anything narrower is just consumed."""
+    from .hooks import worker
+
+    requested = consume_requests(config)
+    if requested is None:
+        return
+    if MODE_RANK[requested] > MODE_RANK[mode] and mode == "hook":
+        log(f"  [coalesced] a skipped '{requested}' sync arrived; running its remaining stages")
+        _stages(config, requested, record, exported)
+    elif requested != "hook" and mode != "hook":
+        log(f"  [coalesced] a skipped '{requested}' sync arrived; retrying hook requests")
+        record("hook-worker", worker(config) == 0)
+    else:
+        log(f"  [coalesced] a skipped '{requested}' sync arrived; this run covered it")
+
+
 def _run(config: CairnConfig, mode: str) -> int:
     """One sync run under the sync lock; returns the exit code."""
-    qmd = config.qmd_binary
     rotate_log()
     log(f"\n=== context-sync ({mode}) {datetime.now().isoformat()} ===")
-
-    from .hooks import worker
 
     failed: list[str] = []
 
@@ -302,31 +404,10 @@ def _run(config: CairnConfig, mode: str) -> int:
         if not ok:
             failed.append(name)
 
+    exported: set[str] = set()
     try:
-        if mode != "hook":
-            record("hook-worker", worker(config) == 0)
-        # Run exports for the sources this mode enables (resolved from config).
-        steps = _plan(config, mode)
-        if not steps:
-            log("  (no enabled sources for this mode - check 'sync.enabled' in your config)")
-        for name, command in steps:
-            record(name, run_step(name, command))
-
-        with locked_index():
-            record(
-                "qmd-collections",
-                run_inproc("qmd-collections", lambda: _ensure_collections(config)),
-            )
-            updated = run_step("qmd-update", [qmd, "update"])
-            record("qmd-update", updated)
-            if mode in ("cron", "all"):
-                if updated:
-                    embedded, exited = run_embed(qmd)
-                    record("qmd-embed", embedded)
-                    if exited:
-                        record("qmd-verify", verify_index(qmd))
-                else:
-                    log("  [qmd-embed] skipped - qmd-update failed")
+        _stages(config, mode, record, exported)
+        _follow_up(config, mode, record, exported)
     except Exception:
         import traceback
 

@@ -117,6 +117,13 @@ class TestDoctorIndex(StoreFixture):
         self.assertIn("not verified", out)
         self.assertEqual(self.doctor("--strict-index")[0], 1)
 
+    def test_malformed_pending_line_fails_strict(self):
+        self.stub(status=COMPLETE + "  Pending:  unknown need embedding\n")
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        self.assertIn("could not read 'qmd status'", out)
+        self.assertEqual(self.doctor("--strict-index")[0], 1)
+
     def test_complete_index_passes_and_composes_with_other_options(self):
         self.stub()
         manifest = self.root / "plugin.json"

@@ -115,9 +115,12 @@ index is readable and fully embedded. Plain `cairn doctor` only warns.
 - Fix the QMD problem, then rerun incremental `cairn sync --cron` after the previous job
   ends. Do not delete the index or run `qmd embed -f`.
 - A failed run and new work are different things. `[qmd-embed] FAILED - qmd exited 0 but
-  reported: N chunks failed` is a failed run (often QMD's 30-minute session limit on a
-  large backlog; each run keeps its vectors, so rerun). A `Pending` count that appears
-  after a passing run is new work for the next sync, not corruption.
+  reported: N chunks failed` or `[qmd-verify] INCOMPLETE` is an unfinished run, often
+  QMD's 30-minute session limit on a large backlog. Completed documents keep their vectors;
+  QMD 2.5.3 removes the vectors of a partly embedded document, so it restarts next run.
+  Rerun while the pending count in `cairn doctor` falls; if it stops falling, investigate
+  rather than retrying forever. A `Pending` count that appears after a passing run is new
+  work for the next sync, not corruption.
 - BM25 keyword search works without vectors. A completed hook request means export and
   keyword indexing finished, not that embeddings are ready.
 - If QMD cannot migrate a legacy index without re-embedding, report that upstream
