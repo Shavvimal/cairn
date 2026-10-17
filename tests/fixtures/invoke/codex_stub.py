@@ -6,11 +6,14 @@
 # STUB_MODE: (unset) normal | sleep (one event, a `sleep` child, then normal) |
 # hold (one event, touch $STUB_READY, wait for $STUB_RELEASE, then normal) |
 # rollout (one event, then only rollout records every 0.3 s for STUB_SLEEP s, then
-# normal) | closeout (one event, close stdout, sleep STUB_SLEEP s) | fail401 |
-# turnfail. STUB_SLEEP seconds (default 30). STUB_ANSWER final text.
+# normal) | closeout (one event, close stdout, sleep STUB_SLEEP s) | split (the
+# final answer "PONG é" written in two chunks split inside the "é", a pause, and a
+# last line with no trailing newline) | fail401 | turnfail. In sleep mode SIGTERM
+# prints a SHUTDOWN agent_message before exiting. STUB_SLEEP seconds (default 30). STUB_ANSWER final text.
 # STUB_LOG: append one JSON line per call (argv, env, cwd, stdin use, prompt).
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -121,7 +124,33 @@ if mode == "closeout":
     os.close(1)
     time.sleep(float(os.environ.get("STUB_SLEEP", "30")))
     sys.exit(0)
+if mode == "split":
+    out = sys.stdout.buffer
+    text = json.dumps(
+        {"type": "item.completed", "item": {"id": "i4", "type": "agent_message", "text": "PONG é"}},
+        ensure_ascii=False,
+    ).encode()
+    cut = text.index("é".encode()) + 1  # inside the two-byte character
+    out.write(text[:cut])
+    out.flush()
+    time.sleep(0.5)  # the runner meets a temporary EOF while the peer lives
+    out.write(text[cut:] + b"\n")
+    out.write(json.dumps({"type": "turn.completed", "usage": {"output_tokens": 3}}).encode())
+    out.flush()
+    if "-o" in options:
+        Path(options["-o"][0]).write_text("PONG é")
+    sys.exit(0)
 if mode == "sleep":
+
+    def shutdown(signum, frame):
+        emit_line = {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "SHUTDOWN"},
+        }
+        print(json.dumps(emit_line), flush=True)
+        sys.exit(143)
+
+    signal.signal(signal.SIGTERM, shutdown)
     child = subprocess.Popen(["sleep", os.environ.get("STUB_SLEEP", "30")])
     if log:
         with open(log, "a") as handle:

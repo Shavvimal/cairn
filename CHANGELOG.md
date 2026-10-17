@@ -24,7 +24,8 @@ the next `cairn sync --cron`. Windowed cron runs never re-export old documents.
   per peer (model, effort, profile, timeouts) live in the config `invoke` block.
 - Every peer run exports the peer session at once, writes `links:` on both session
   documents, and records an exchange document (prompt, progress, answer and result per
-  round) in the calling session's folder, so `/search` and `/recall` find it.
+  round) in the calling session's folder, so `/search` and `rg` find it (session recall
+  lists the peer session; exchange documents stay out of the session timeline by design).
 - Health for long-running work: execution state, activity with age, and outcome are
   reported separately; an idle watchdog kills a hung run; one invocation per thread is
   enforced; a runner killed mid-run leaves an orphaned round that `status` adopts.

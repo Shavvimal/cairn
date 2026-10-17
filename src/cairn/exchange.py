@@ -411,16 +411,23 @@ def write_exchange(
         path = exchange_destination(folder, state.peer, state.thread_id)
     previous = recorded if recorded is not None and recorded != path else None
     created_folder = not path.parent.exists()
-    with locked(document_lock(path)):
-        existing_fm, my_notes = _read_existing(path, state.thread_id)
-        if existing_fm is None and previous is not None:
-            existing_fm, my_notes = _read_existing(previous, state.thread_id)
-        text = render_exchange(state, existing_fm, my_notes)
-        atomic_write(path, text)
+    # The document records the anchor it is written under, so set it before rendering
+    # (and put the old value back if the write fails).
+    prior_session = state.anchor_session
+    state.anchor_session = anchor_session
+    try:
+        with locked(document_lock(path)):
+            existing_fm, my_notes = _read_existing(path, state.thread_id)
+            if existing_fm is None and previous is not None:
+                existing_fm, my_notes = _read_existing(previous, state.thread_id)
+            text = render_exchange(state, existing_fm, my_notes)
+            atomic_write(path, text)
+    except BaseException:
+        state.anchor_session = prior_session
+        raise
     if previous is not None and document_owner(previous) == state.thread_id:
         previous.unlink()
     state.anchor = str(folder) if final else None
-    state.anchor_session = anchor_session
     state.exchange_doc = str(path)
     if created_folder and describe_folder:
         _describe_folder(config, path.parent, anchor_session)

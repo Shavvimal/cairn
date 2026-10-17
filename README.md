@@ -195,7 +195,7 @@ Run the other agent headlessly from either host, for an adversarial review, a pl
 an independent pass, and keep the whole exchange searchable:
 
 ```bash
-cairn invoke codex --prompt-file brief.md --effort high     # background it; result is one JSON line
+cairn invoke codex --json --prompt-file brief.md --effort high   # background it; --json gives one result line
 cairn invoke status <thread-id>                             # health line, progress, answer so far
 cairn invoke codex --resume <thread-id> --prompt "…"         # continue the same thread, days later too
 cairn invoke claude --prompt "…" --profile review            # the mirror direction

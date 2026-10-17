@@ -2,8 +2,8 @@
 
 Branch `feat/invoke-codex-skill` in worktree `/Users/shav/Code/cairn-invoke-codex`, head set to
 `origin/main` at `1443f89` (PR #28 merged 2026-10-17). One PR against `main`. Version 2.5.0.
-Research with evidence: `docs/agent-exchange-research.md` (untracked in the worktree; folds into
-`docs/agent-exchange.md` during Part C).
+Research with evidence: `docs/agent-exchange-research.md`. Review trail and live acceptance:
+`docs/agent-exchange-reviews.md`.
 
 ## Goals (the acceptance checklist for this PR)
 
@@ -11,14 +11,14 @@ Each goal has a verifiable "done" condition. The PR is complete only when every 
 
 - [x] **G1 `cairn invoke codex`.** The personal `~/.claude/skills/invoke-codex` is ported into the
   cairn engine as a CLI command plus a thin `skills/invoke-codex` skill that works from both
-  Claude Code and Codex hosts. Done when `cairn invoke codex --prompt "Reply PONG" --effort low`
+  Claude Code and Codex hosts. Done when `cairn invoke codex --json --prompt "Reply PONG" --effort low`
   returns one JSON result line with `last_message == "PONG"` and the skill passes
   `tests/test_plugin_manifest.py` on both hosts' manifests.
   Status: verified 2026-10-17: live low-effort round returned PONG; manifest tests pass.
-- [x] **G2 `cairn invoke claude`.** The mirror direction with a `skills/invoke-claude` skill. Done
+- [~] **G2 `cairn invoke claude`.** The mirror direction with a `skills/invoke-claude` skill. Done
   when a Claude host run succeeds and a Codex host run either succeeds under escalated
   permissions or fails loud with the keychain guidance (`retryable: false`).
-  Status: verified from the Claude host 2026-10-17 (haiku round, review profile flags recorded); the Codex-host direction with escalated permissions is left for the user to exercise.
+  Status: verified from the Claude host 2026-10-17 (haiku round, review profile flags recorded). The Codex-host direction with escalated permissions is the user's acceptance step.
 - [x] **G3 Send off in the background, read it midway.** Runs stream `codex exec --json` /
   `claude -p --output-format stream-json` to `data_root/logs/invoke/<peer>/<thread>/events-NN.jsonl`.
   Done when `cairn invoke status <thread_id>` shows commentary, commands and todo state of a
@@ -55,30 +55,30 @@ Each goal has a verifiable "done" condition. The PR is complete only when every 
   `codex-subagent` documents on this machine and an invoke-codex review rollout shows its
   `exec` tool calls.
   Status: verified 2026-10-17: `cairn codex export --all` rendered 610 rollouts in 7 s and recovered 107 subagent documents.
-- [x] **G8 One folder per session.** Everything a session spawned (subagent docs, exchange docs)
+- [x] **G8 One folder per session (with one documented exception).** Everything a session spawned (subagent docs, exchange docs)
   lives in `<collection>/<project>/<date>-<shortid>/` next to the session document. No new
   collection, no config entry for storage.
-  Status: verified: subagent and exchange documents live in `<collection>/<project>/<date>-<shortid>/`; no new collection.
+  Status: verified: subagent and exchange documents live in `<collection>/<project>/<date>-<shortid>/`; no new collection. Exception: a Codex child exported before its parent keeps its canonical path when the parent appears later (documented in the Codex source reference).
 - [x] **G9 Listing and recall stay clean.** `cairn claude|codex list` show parents only;
   `cairn recall list` hides children unless `--include-subagents`; `recall expand`, `note`,
   `close`, `log` work on a child id; `resume` on a child is refused with the parent id.
   Status: verified by tests and live `list`; children resolve by id, hidden from plain listings.
-- [x] **G10 Host-agnostic skills.** No `${CLAUDE_SKILL_DIR}`, no `!` inline shell, no
-  `$ARGUMENTS`, no `when_to_use`; host mechanics live in `references/harnesses/*.md`; each new
+- [x] **G10 Host-agnostic skills.** No required Claude-only runtime syntax: no `${CLAUDE_SKILL_DIR}`,
+  no `!` inline shell, no `$ARGUMENTS`, no `when_to_use` (the `allowed-tools` metadata is Claude-only and ignored by Codex); host mechanics live in `references/harnesses/*.md`; each new
   skill has `agents/openai.yaml`; a shared `references/peer-review.md` holds the adversarial
   review doctrine and the bounded convergence loop.
   Status: verified by `tests/test_plugin_manifest.py`: no Claude-only syntax, `agents/openai.yaml` present, doctrine shared.
 - [x] **G11 Config as data.** Defaults for model, effort, sandbox and timeout per peer live in a
   top-level `invoke` block, parsed fail-loud, settable with `cairn config set invoke.codex.model`.
   Status: verified by tests: `invoke` block parsed fail-loud and settable with `cairn config set`.
-- [x] **G13 Follow up on a finished headless thread, first class.** A Codex or Claude thread
+- [~] **G13 Follow up on a finished headless thread, first class.** A Codex or Claude thread
   started by `cairn invoke` can be continued hours or days later from any session and any cwd
   with `cairn invoke <peer> --resume <thread_id>`, and opened interactively with
   `cairn resume codex:<thread_id>`. Done when a review thread finished in one Claude session is
   resumed from a different Claude session the next day, round 2 lands in the same rollout, and
   `thread.json` supplied the recorded cwd, sandbox and model without flags.
-  Status: verified 2026-10-17: resume by id from a later call reused the recorded cwd, profile and caller.
-- [x] **G14 Health reporting for peer runs and subagents, first class.** Every round reports
+  Status: code and tests complete; a later call in the same session reused the recorded cwd, profile and caller. The next-day resume from a different session is the user's acceptance step.
+- [~] **G14 Health reporting for peer runs and subagents, first class.** Every round reports
   three separate things: execution state (`pending`, `running`, `orphaned`, `exited`, `unknown`)
   from process identities that include start time, activity (`active`, `quiet`, `silent` with an
   age) from the native heartbeat, and outcome (`succeeded`, `failed`, `timeout`, `idle_timeout`,
@@ -89,12 +89,12 @@ Each goal has a verifiable "done" condition. The PR is complete only when every 
   reported `running, silent` within the threshold and killed at the idle timeout with outcome
   `idle_timeout`, a SIGKILLed runner leaves an `orphaned` round that `status` later finalises,
   and `cairn agents wait --session claude:<id>` returns when the last background subagent exits.
-  Status: verified by tests and live `agents list`: three axes reported, idle watchdog, thread lock, orphan adoption; `agents wait` on a live fan-out remains to be exercised by the user.
+  Status: verified by tests and live `agents list`: three axes reported, idle watchdog, thread lock, orphan adoption. Open: `agents wait` on a live fan-out and the next-day resume from another session remain to be exercised by the user; `[~]` marks goals whose code is complete but whose live acceptance is partly the user's.
 - [x] **G12 Quality gate.** `make check` (ruff, ruff format, mypy, unittest) passes on 3.11 to
   3.13; `SCHEMA_VERSION` is 2 with one coordinated bump; CHANGELOG, README, skill references
   and the three plugin manifests are updated; the standalone `~/.claude/skills/invoke-codex`
   is retired after install.
-  Status: verified 2026-10-17: `make check` green with 347 tests on 3.13 locally (CI covers 3.11 to 3.13); schema 2; docs, changelog and manifests at 2.5.0; retiring `~/.claude/skills/invoke-codex` is a user step after installing the plugin.
+  Status: `make check` (now including `ruff format --check`) green locally on 3.13; CI runs 3.11 to 3.13 on the PR; schema 2; docs, changelog and manifests at 2.5.0; retiring `~/.claude/skills/invoke-codex` is a user step after installing the plugin.
 
 Out of scope, recorded in `docs/agent-exchange.md`: mid-turn steering through
 `codex app-server` (`turn/steer`), Codex-to-Codex `send_message` plaintext (encrypted in 0.160),

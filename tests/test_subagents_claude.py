@@ -575,3 +575,21 @@ class TestDiscovery(SubagentFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMultilineDescription(SubagentFixture):
+    """Phase 1 review #2: a multiline meta description must still yield a valid document."""
+
+    def test_multiline_description_renders_one_line_title(self):
+        self.write_child(
+            "a9",
+            meta=self.meta_a1(description="First line\nSecond line\r\nThird"),
+            final="multi report",
+        )
+        self.export_all()
+        child = self.child_doc("a9")
+        fm = self.fm(child)  # parse_frontmatter must not raise
+        self.assertEqual(fm["title"], "First line Second line Third")
+        self.assertEqual(fm["description"], "First line Second line Third")
+        index = self.parent_doc().read_text()
+        self.assertIn("[First line Second line Third](./", index)

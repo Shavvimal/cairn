@@ -33,7 +33,7 @@ from pathlib import Path
 
 from .config import CairnConfig, ConfigError, get_config
 from .harnesses import detect_harness, get_harness
-from .health import activity_of, parse_iso
+from .health import Thresholds, activity_of, parse_iso
 
 _SESSION_REF = re.compile(r"^(claude|codex):\S+$")
 _TASK_ID = re.compile(r"<task-id>\s*([^<\s]+)\s*</task-id>")
@@ -272,22 +272,25 @@ def claude_rows(config: CairnConfig, session_id: str) -> list[Row]:
 _ABORT_CANCELLED = ("interrupted", "user", "cancelled", "canceled", "replaced")
 
 
-def codex_turn_outcome(rollout: Path) -> str | None:
-    """The terminal outcome of a Codex rollout's latest own turn, else ``None``.
+TERMINAL = ("succeeded", "cancelled", "failed")
+
+
+def codex_turn_state(rollout: Path) -> str:
+    """The state of a rollout fragment's latest own turn.
 
     Reads the native ``event_msg`` markers after the replay boundary of a forked
-    child (replayed parent history is skipped exactly as the exporter skips it):
-    the last of ``task_started`` / ``task_complete`` / ``turn_aborted`` decides.
-    ``task_complete`` is ``succeeded``; ``turn_aborted`` is ``cancelled`` for an
-    interruption, else ``failed``; a trailing ``task_started`` (or no marker) is
-    ``None``: the turn is still open.
+    child (replayed parent history is skipped exactly as the exporter skips it).
+    Returns ``succeeded`` (``task_complete``), ``cancelled`` (``turn_aborted`` for an
+    interruption), ``failed`` (any other abort), ``open`` (a trailing
+    ``task_started``), ``none`` (no own marker) or ``replaying`` (the replayed
+    parent history has no resolved end, so nothing here is the child's own).
     """
     from .jsonl import iter_jsonl
     from .sources.codex_replay import ReplayCut
 
     own_id: str | None = None
     cut: ReplayCut | None = None
-    latest: str | None = None
+    latest = "none"
     for _, record in iter_jsonl(rollout):
         rtype = record.get("type")
         payload = record.get("payload")
@@ -307,15 +310,47 @@ def codex_turn_outcome(rollout: Path) -> str | None:
             continue
         ptype = payload.get("type")
         if ptype == "task_started":
-            latest = None
+            latest = "open"
         elif ptype == "task_complete":
             latest = "succeeded"
         elif ptype == "turn_aborted":
             reason = str(payload.get("reason") or "").lower()
             latest = "cancelled" if reason in _ABORT_CANCELLED else "failed"
     if cut is not None and not cut.ended:
-        return None  # still replaying the parent's history: nothing of its own yet
+        return "replaying"
     return latest
+
+
+def codex_turn_outcome(rollout: Path) -> str | None:
+    """The terminal outcome of a fragment's latest own turn, else ``None``."""
+    state = codex_turn_state(rollout)
+    return state if state in TERMINAL else None
+
+
+def classify_codex_child(
+    fragments: list[tuple[str, dict | None]], age_s: float, thresholds: Thresholds
+) -> tuple[str, str, float | None, str | None]:
+    """``(execution, activity, age, outcome)`` for one child thread.
+
+    ``fragments`` holds ``(turn state, parsed rollout or None)`` per rollout file of
+    the thread, oldest first. The newest fragment with an own turn marker decides;
+    without one, a parsed ``finished`` (an assistant final answer) counts only when
+    the replay boundary resolved: an unresolved replay may carry the parent's final
+    answer, so it is ``unknown``, never ``succeeded``.
+    """
+    running = ("running", activity_of(age_s, thresholds), age_s, None)
+    decided = [state for state, _ in fragments if state not in ("none", "replaying")]
+    if decided:
+        last = decided[-1]
+        return ("exited", "none", None, last) if last in TERMINAL else running
+    parsed = [data for _, data in fragments if data is not None]
+    if any(data.get("replay_unresolved") for data in parsed):
+        return "unknown", "none", None, "unknown"
+    if parsed and any(state == "replaying" for state, _ in fragments):
+        return running
+    if any(data.get("finished") for data in parsed):
+        return "exited", "none", None, "succeeded"
+    return running
 
 
 def codex_rows(config: CairnConfig, thread_id: str) -> list[Row]:
@@ -328,37 +363,37 @@ def codex_rows(config: CairnConfig, thread_id: str) -> list[Row]:
     lineage = rollout_lineage(store)
     policy = config.invoke.codex
     now = time.time()
-    rows: list[Row] = []
+    # A resumed child thread spans several rollout files: one row per thread.
+    threads: dict[str, list[Path]] = {}
     for child in lineage.children_of(thread_id):
         meta = lineage.meta_of(child)
-        with contextlib.redirect_stdout(sys.stderr):
-            data = parse_rollout(child)
-        age = max(0.0, now - child.stat().st_mtime)
-        terminal = codex_turn_outcome(child) if data is not None else None
-        if terminal is None and data is not None and data.get("finished"):
-            terminal = "succeeded"
-        if terminal is not None:
-            execution, activity, shown_age, outcome = "exited", "none", None, terminal
-        else:
-            execution, activity, shown_age, outcome = (
-                "running",
-                activity_of(age, policy),
-                age,
-                None,
-            )
+        threads.setdefault(meta.id if meta else child.stem, []).append(child)
+    rows: list[Row] = []
+    for child_id, paths in threads.items():
+        paths.sort(key=lambda path: path.stat().st_mtime)
+        fragments: list[tuple[str, dict | None]] = []
+        for path in paths:
+            with contextlib.redirect_stdout(sys.stderr):
+                data = parse_rollout(path)
+            fragments.append((codex_turn_state(path), data))
+        newest = paths[-1]
+        age = max(0.0, now - newest.stat().st_mtime)
+        execution, activity, shown_age, outcome = classify_codex_child(fragments, age, policy)
+        meta = lineage.meta_of(paths[0])
         title = " ".join(p for p in (meta.role, meta.nickname) if p) if meta else ""
+        first = next((data for _, data in fragments if data), None) or {}
         rows.append(
             Row(
                 kind="codex-subagent",
-                id=meta.id if meta else child.stem,
+                id=child_id,
                 parent=f"codex:{thread_id}",
                 title=title,
                 execution=execution,
                 activity=activity,
                 activity_age_s=shown_age,
                 outcome=outcome,
-                started=(data or {}).get("first_timestamp"),
-                path=str(child),
+                started=first.get("first_timestamp"),
+                path=str(newest),
             )
         )
     return rows
@@ -444,7 +479,9 @@ def render(rows: list[Row]) -> str:
 
 
 def cmd_list(config: CairnConfig, args: argparse.Namespace) -> int:
-    session = resolve_session(args.session)
+    # --all bypasses the implicitly detected host session; an explicit --session
+    # still scopes the listing. Either way --all shows only rows not yet exited.
+    session = None if args.all and not args.session else resolve_session(args.session)
     if session is None and not args.all:
         raise UsageError(
             "no session detected; pass --session claude:<id> | codex:<id>, or --all for "
@@ -452,6 +489,8 @@ def cmd_list(config: CairnConfig, args: argparse.Namespace) -> int:
         )
     while True:
         rows = collect(config, session, args.all)
+        if args.all:
+            rows = [row for row in rows if row.execution != "exited"]
         if args.json:
             print(json.dumps([asdict(row) for row in rows], ensure_ascii=False), flush=True)
         else:
@@ -538,7 +577,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     listing = sub.add_parser("list", help="list peer runs and subagents")
     listing.add_argument("--session", metavar="SOURCE:ID")
-    listing.add_argument("--all", action="store_true", help="every peer run still going")
+    listing.add_argument(
+        "--all",
+        action="store_true",
+        help="only rows not yet exited; without --session, every peer run on this machine "
+        "(the detected host session is ignored)",
+    )
     listing.add_argument("--json", action="store_true")
     listing.add_argument("--watch", action="store_true", help="re-render every --poll-s")
     listing.add_argument("--poll-s", type=float, default=5.0)
@@ -572,7 +616,9 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "Row",
     "classify_claude_child",
+    "classify_codex_child",
     "codex_turn_outcome",
+    "codex_turn_state",
     "collect",
     "main",
     "task_notifications",

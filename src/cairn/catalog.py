@@ -137,6 +137,13 @@ class Catalog:
         self.stats["parsed"] += 1
         try:
             fm = read_frontmatter_head(self.path_of(rel))
+        except FileNotFoundError:
+            # The file vanished between the walk's stat and this read (an exchange
+            # document moving to its caller's folder, a session being re-exported
+            # under a new name). That is an ordinary disappearance, not a damaged
+            # document: drop the entry silently instead of warning on every listing.
+            self.errors.pop(rel, None)
+            return None
         except (OSError, UnicodeError, FrontmatterParseError) as exc:
             self.errors[rel] = str(exc)
             return None

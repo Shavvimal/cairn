@@ -62,6 +62,43 @@ and sandbox re-assertion; exchange head validation (`run_status`, no tail-key or
 growing fences); link targets and dedupe; the Claude subagent classification order; the Claude
 argv; the exit-code semantics of `status` versus `agents wait`; the skills' host-agnostic form.
 
+## Phase 3: verification pass over the whole branch
+
+Reviewed range: `1443f89..81d8799`. Duration 421 s. Verdict: not merge-ready.
+
+Of the 24 earlier findings the reviewer confirmed 19 as landed with tests and marked five
+partial: phase 1 #2 (flattening and validation landed, no child-export regression), phase 2
+#2 (moved exchange kept the old anchor in its head), #4 (the rename test did not exercise the
+transition itself), #5 (no tailer split-write or cancellation-output regression), #9 (no
+fixture with a replayed parent). New findings:
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | should-fix | For a Codex child with an unresolved replay, `agents` fell back to `finished`, which can come from the replayed parent's final answer, so `wait` could report success without evidence. | Fixed: unresolved replay classifies as unknown or running, never succeeded. Regression with a parent final answer and no child boundary. |
+| 2 | should-fix | Resumed Codex fragments produced one agent row per file, so one child appeared twice and `agents wait <id>` called the full id ambiguous. | Fixed: fragments are grouped by thread id and the newest fragment's terminal state decides. |
+| 3 | should-fix | `agents list --all` kept the implicitly detected host session as a filter and kept exited rows. | Fixed: `--all` bypasses implicit scoping (an explicit `--session` still applies) and shows non-exited rows only. |
+| 4 | should-fix | Between the pending-directory rename and the symlink, the `-o` answer path Codex was given did not exist. | Fixed: the answer file lives at a stable path outside the renamed directory and is moved into the round after the peer exits. |
+| 5 | should-fix | The exchange document was rendered before `anchor_session` was updated, so a moved document recorded the previous anchor and `publish` never repaired it. | Fixed: the anchor is resolved on the state before rendering; the move test asserts the document head and the ledger. |
+| 6 | nit | A reader that stat-ed a provisional exchange document before it moved recorded a spurious catalog error. | Fixed: `Catalog._parse` treats `FileNotFoundError` as a vanished entry, silently. Regression test. |
+
+User-facing corrections applied: the README's one-line-JSON example now passes `--json`; the
+skills and changelog say `/search` and `rg` find exchange documents while `/recall` lists the
+peer session (exchange documents stay out of the session timeline by design); the status
+description names the identity line before the health line; continuation commands include
+`--prompt`; `retryable: false` is read after `outcome` because cancellation also sets it;
+`--prompt -` already read stdin as the help says and now has a regression test; the G10 wording says "no required Claude-only
+runtime syntax" since `allowed-tools` metadata is Claude-only; the plan copy marks G2, G13 and
+G14 as code-complete with live acceptance steps left to the user, qualifies G8 with the
+documented Codex exception, and no longer points at a `docs/agent-exchange.md` that was never
+written. `make check` now includes `ruff format --check`.
+
+The partial dispositions gained their regressions: a multiline child description exports a
+valid document; `export_one` refuses an unparseable or mis-identified render and leaves the
+existing file untouched; the rename transition is exercised with a barrier; the tailer is
+tested across a split multi-byte write, a final line without a newline, temporary EOF with a
+live peer, and output emitted during cancellation; the Codex terminal-outcome fixtures include
+a replayed parent whose final answer is ignored once the boundary resolves.
+
 ## Live acceptance on the author's machine (2026-10-17)
 
 - **G7** `cairn codex export --all` on the real store: 610 rollouts in 7 s, 107 `codex-subagent`

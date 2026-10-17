@@ -65,7 +65,7 @@ refused at depth 1 unless the user asks for `--allow-nested`.
 cairn invoke status <session_id>
 ```
 
-Line one is the health line: execution state, activity with its age, and the last event.
+After the identity line, the health line shows execution state, activity with its age, and the last event.
 Then the progress bullets (tool calls and messages). `silent` beyond the stall threshold
 means a probable hang: wait one more interval, then `cairn invoke cancel <session_id>` and
 resume with a narrower task, or report. Silence from the host task is never completion.
@@ -89,10 +89,10 @@ then escalate to the user with the accepted, dismissed and unresolved lists.
 ## 8. Close
 
 Tell the user: the session id, the exchange document path and the Claude session document path
-from the result, and how to continue: `cairn invoke claude --resume <session_id>` for another
+from the result, and how to continue: `cairn invoke claude --resume <session_id> --prompt "…"` for another
 round, or `cairn resume claude:<session_id>` to open it interactively. If `warnings` is empty
-and `indexed` is true, `/search` and `/recall` find both documents now; if `indexed` is false,
-`rg` finds them at once and `/search` after `cairn invoke publish <session_id>` or the next
+and `indexed` is true, `/search` finds the exchange document and `/recall` lists the peer
+session now; if `indexed` is false, `rg` finds them at once and `/search` after `cairn invoke publish <session_id>` or the next
 `cairn sync`.
 
 ## Errors
@@ -101,7 +101,8 @@ and `indexed` is true, `/search` and `/recall` find both documents now; if `inde
 - Exit 124 or 125: raise `--timeout-s` or `--idle-timeout-s`, or narrow the task. Never retry
   blind; read `status` first.
 - `retryable: false` with the keychain guidance: rerun with escalated permissions or from the
-  Claude host. Any other `retryable: false`: report the `error` text.
+  Claude host. Otherwise check `outcome` first: `cancelled` means someone stopped it; any other
+  `retryable: false` is a provider error. Report the `error` text.
 - `warnings`: the answer is saved but a publishing step is pending. `cairn invoke publish
   <session_id>` finishes it; the next `cairn sync` also does.
 - `status: busy` (exit 75): another round of this session is running. Wait or `status` it.

@@ -60,7 +60,7 @@ asks for `--allow-nested`.
 cairn invoke status <thread_id>
 ```
 
-Line one is the health line: execution state (`running`, `orphaned`, `exited`), activity
+After the identity line, the health line shows execution state (`running`, `orphaned`, `exited`), activity
 (`active`, `quiet`, `silent` with its age) and the last event. Then the progress bullets.
 Check every few minutes or when the user asks. `silent` for more than the stall threshold
 means a probable hang: wait one more interval, then `cairn invoke cancel <thread_id>` and
@@ -86,10 +86,10 @@ then escalate to the user with the accepted, dismissed and unresolved lists.
 ## 8. Close
 
 Tell the user: the thread id, the exchange document path and the Codex session document path
-from the result, and how to continue: `cairn invoke codex --resume <thread_id>` for another
+from the result, and how to continue: `cairn invoke codex --resume <thread_id> --prompt "…"` for another
 round, or `cairn resume codex:<thread_id>` to open it interactively. If `warnings` is empty
-and `indexed` is true, `/search` and `/recall` find both documents now; if `indexed` is false,
-`rg` finds them at once and `/search` after `cairn invoke publish <thread_id>` or the next
+and `indexed` is true, `/search` finds the exchange document and `/recall` lists the peer
+session now; if `indexed` is false, `rg` finds them at once and `/search` after `cairn invoke publish <thread_id>` or the next
 `cairn sync`.
 
 ## Errors
@@ -98,7 +98,8 @@ and `indexed` is true, `/search` and `/recall` find both documents now; if `inde
   was refused. Re-check the list or ask the user.
 - Exit 124 or 125: raise `--timeout-s` or `--idle-timeout-s`, or narrow the task. Never retry
   blind; read `status` first.
-- `retryable: false`: a provider or login error. Report the `error` text.
+- `retryable: false`: check `outcome` first. `cancelled` means someone stopped it; otherwise it
+  is a provider or login error. Report the `error` text.
 - `warnings`: the answer is saved but a publishing step is pending (export, link or index).
   `cairn invoke publish <thread_id>` finishes it; the next `cairn sync` also does.
 - `status: busy` (exit 75): another round of this thread is running. Wait or `status` it.

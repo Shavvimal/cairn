@@ -169,7 +169,9 @@ class InvokeFixture(StoreFixture):
 
     def run_dirs(self, peer="codex"):
         folder = self.root / "data/logs/invoke" / peer
-        return sorted(folder.iterdir()) if folder.is_dir() else []
+        if not folder.is_dir():
+            return []
+        return sorted(d for d in folder.iterdir() if not d.name.startswith("."))
 
     def thread(self, thread_id, peer="codex"):
         return json.loads(
@@ -261,7 +263,9 @@ class TestCodexRun(InvokeFixture):
         argv = call["argv"]
         self.assertIn("read-only", argv)
         self.assertIn('approval_policy="never"', argv)
-        self.assertIn("/pending-", argv[argv.index("-o") + 1])  # kept valid by a symlink
+        answer_target = Path(argv[argv.index("-o") + 1])
+        self.assertEqual(answer_target.parent.name, ".answers")  # outside the renamed run dir
+        self.assertFalse(answer_target.exists())  # moved to answer-01.md
         # Peer export, then the exchange document in the peer's folder (no caller).
         peer_doc = Path(data["peer_session_doc"])
         self.assertTrue(peer_doc.is_file())
@@ -274,6 +278,7 @@ class TestCodexRun(InvokeFixture):
         self.assertEqual(fm["thread_id"], tid)
         self.assertEqual(fm["rounds"], "1")
         self.assertEqual(fm["run_status"], "succeeded")
+        self.assertEqual(fm["anchor_session"], f"codex:{tid}")
         self.assertIn("ANSWER", exchange.read_text())
         self.assertIn("- run: cat a.txt", exchange.read_text())
         state = self.thread(tid)
@@ -424,6 +429,10 @@ class TestCodexRun(InvokeFixture):
         self.assertEqual(data["status"], "cancelled")
         self.assertFalse(data["retryable"])
         self.wait_for(lambda: self.gone(child), timeout=10)
+        # The peer's shutdown output, written while it was being stopped, is kept.
+        events = Path(data["events_path"]).read_text()
+        self.assertIn('"SHUTDOWN"', events)
+        self.assertIn("message: SHUTDOWN", self.thread(data["thread_id"])["rounds"][-1]["progress"])
 
     def test_cancel_command_signals_the_runner(self):
         runner = self.spawn(
@@ -466,7 +475,7 @@ class TestCodexRun(InvokeFixture):
         self.assertEqual(round_["usage"], {"input_tokens": 10, "output_tokens": 2})
         for step in ("answer_saved", "exported", "exchange_written", "indexed"):
             self.assertIn(step, round_["publication"])
-        self.assertFalse(Path(round_["pending_link"]).is_symlink())
+        self.assertFalse(Path(round_["answer_target"]).exists())
         self.assertEqual((self.run_dirs()[0] / "answer-01.md").read_text().strip(), "ANSWER")
 
     def test_announces_thread_id_before_the_peer_finishes(self):
@@ -600,6 +609,91 @@ class TestCodexRun(InvokeFixture):
         self.assertTrue(call["stdin"])
         self.assertGreater(call["prompt_len"], 72000)
         self.assertEqual(call["argv"][-1], "-")
+
+
+class TestRunnerEdges(InvokeFixture):
+    def test_prompt_dash_reads_stdin(self):
+        for flag in ("--prompt", "--prompt-file"):
+            with self.subTest(flag=flag):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "cairn",
+                        "invoke",
+                        "codex",
+                        "--json",
+                        "--cd",
+                        self.cwd,
+                        flag,
+                        "-",
+                    ],
+                    env=self.env,
+                    input=f"PROMPT-FROM-STDIN {flag}",
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"PROMPT-FROM-STDIN {flag}", self.stub_calls()[-1]["prompt_head"])
+
+    def test_split_utf8_temporary_eof_and_unterminated_last_line(self):
+        result, data = self.run_codex(env={"STUB_MODE": "split"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "succeeded")  # turn.completed had no newline
+        self.assertEqual(data["usage"], {"output_tokens": 3})
+        self.assertEqual(data["last_message"], "PONG é")
+        progress = self.thread(data["thread_id"])["rounds"][0]["progress"]
+        self.assertIn("message: PONG é", progress)
+
+    def test_rename_transition_blocks_publish_and_keeps_the_answer_path(self):
+        real_rename = os.rename
+        seen: dict = {}
+
+        def barrier(src, dst):
+            real_rename(src, dst)
+            # Inside the transition: renamed, thread.json not yet rewritten.
+            round_ = json.loads((Path(dst) / "thread.json").read_text())["rounds"][-1]
+            target = Path(round_["answer_target"])
+            target.write_text("MID-TRANSITION")  # the peer's -o path is valid throughout
+            seen["target_ok"] = target.read_text() == "MID-TRANSITION"
+            seen["outside"] = Path(dst) not in target.parents
+            publish = subprocess.run(
+                [sys.executable, "-m", "cairn", "invoke", "publish", Path(dst).name],
+                env=self.env,
+                text=True,
+                capture_output=True,
+            )
+            seen["publish_rc"] = publish.returncode
+            self.release()  # only now may the held peer finish and write its -o file
+
+        out = io.StringIO()
+        with (
+            patch.object(invoke.os, "rename", barrier),
+            redirect_stdout(out),
+            redirect_stderr(io.StringIO()),
+            patch.dict(os.environ, self.hold_env()),
+        ):
+            code = invoke.main(["codex", "--json", "--cd", self.cwd, "--prompt", "x"])
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, {"target_ok": True, "outside": True, "publish_rc": invoke.EXIT_BUSY})
+        data = json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertEqual(data["status"], "succeeded")
+        self.assertEqual(data["last_message"], "ANSWER")  # the peer's final -o write won
+        self.assertEqual(self.thread(data["thread_id"])["thread_id"], data["thread_id"])
+
+
+class TestLineTail(unittest.TestCase):
+    def test_split_character_and_unterminated_line(self):
+        tail = invoke.LineTail()
+        text = '{"text": "é"}\n{"last": 1}'.encode()
+        cut = text.index("é".encode()) + 1
+        self.assertEqual(tail.feed(text[:cut]), [])
+        lines = tail.feed(text[cut:])
+        self.assertEqual([line.decode() for line in lines], ['{"text": "é"}\n'])
+        self.assertEqual(tail.feed(b""), [])  # a temporary EOF changes nothing
+        self.assertEqual(tail.flush(), [b'{"last": 1}\n'])
+        self.assertEqual(tail.flush(), [])
 
 
 # ---------------------------------------------------------------------------
@@ -826,8 +920,11 @@ class TestStatusAndPublish(InvokeFixture):
         self.assertFalse(provisional.exists())
         self.assertIn("NOTE-SURVIVES-MOVE", moved.read_text())
         self.assertEqual(state["anchor"], str(moved.parent))
+        self.assertEqual(state["anchor_session"], f"claude:{sid}")
+        self.assertEqual(parse_frontmatter(moved.read_text())["anchor_session"], f"claude:{sid}")
         round_ = state["rounds"][0]
         self.assertEqual(round_["publication"]["pending"], {})
+        self.assertIn("exchange_written", round_["publication"])
         caller_doc = Path(state["caller_session_doc"])
         self.assertEqual(parse_frontmatter(caller_doc.read_text())["links"], [f"child codex:{tid}"])
 

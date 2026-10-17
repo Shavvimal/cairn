@@ -75,6 +75,7 @@ as a discussion. Either side can be wrong.
   10 to 20 minutes.
 - Never retry a timeout blind. Read `cairn invoke status <thread_id>` first: a `silent` run may
   be hung, a `quiet` run may be thinking. Raise the timeout, narrow the task, or cancel.
-- `retryable: false` means a provider or login error. Report the `error` text; do not retry.
+- `retryable: false` with outcome `cancelled` means someone stopped the run. Any other
+  `retryable: false` is a provider or login error. Report the `error` text; do not retry.
 - `warnings` in the result mean the answer is saved but a publishing step is pending. Run
   `cairn invoke publish <thread_id>` when the lock is free, or let the next `cairn sync` do it.

@@ -14,10 +14,11 @@ Round lifecycle:
    ``busy`` (exit 75) and nothing is spawned. The lock is held until the round,
    including the post-run pipeline, is finalised. A thread whose id is not known
    up front (a fresh Codex run, a fork) starts in ``pending-<uuid>/``, locked by
-   that path; on ``thread_started`` the directory is renamed to the thread id,
-   the thread-id lock is taken and the pending lock released. A relative
-   ``pending-<uuid>`` symlink keeps the ``-o`` path Codex was given valid until
-   the round ends. The destination lock is taken before the rename.
+   that path; on ``thread_started`` the thread-id lock is taken, the directory
+   is renamed to the thread id and the pending lock released. Codex's ``-o``
+   file lives outside the run directory (``.answers/<uuid>.md``), so the rename
+   never invalidates a path the peer holds; it moves to ``answer-NN.md`` once
+   the peer has exited.
 3. Spawn the peer in its own session with a scrubbed environment (D13) and its
    stdout written straight to ``events-NN.jsonl``, record runner and peer
    identities (pid plus start time, D21), and tail that file on one thread:
@@ -193,6 +194,27 @@ def _split_ref(ref: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Event replay (shared by the live pump, status and adoption)
 # ---------------------------------------------------------------------------
+
+
+class LineTail:
+    """Complete lines from a growing byte stream.
+
+    A partial line, including one that ends inside a multi-byte UTF-8 character,
+    waits in the buffer for the rest; lines are only decoded once complete.
+    """
+
+    def __init__(self) -> None:
+        self.buffer = b""
+
+    def feed(self, chunk: bytes) -> list[bytes]:
+        self.buffer += chunk
+        *lines, self.buffer = self.buffer.split(b"\n")
+        return [line + b"\n" for line in lines]
+
+    def flush(self) -> list[bytes]:
+        """The final line when the stream ended without a trailing newline."""
+        rest, self.buffer = self.buffer, b""
+        return [rest + b"\n"] if rest.strip() else []
 
 
 @dataclass
@@ -567,6 +589,9 @@ def _finish(
 ) -> None:
     files = _round_files(state.path.parent if state.path else Path("."), int(round_["round"]))
     answer_path = files["answer_path"]
+    target = Path(round_["answer_target"]) if round_.get("answer_target") else None
+    if target is not None and target.is_file():
+        os.replace(target, answer_path)  # the peer has exited: its -o file is final
     answer = _read_text(answer_path).strip()
     done = replay.done
     if state.peer == "claude" or not answer:
@@ -624,9 +649,6 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
     if keychain_failure(text):
         error = KEYCHAIN_GUIDANCE
     round_["adopted_at"] = now_iso()
-    link = round_.get("pending_link")
-    if link and Path(link).is_symlink():
-        Path(link).unlink()
     _finish(
         state,
         round_,
@@ -874,7 +896,6 @@ class Runner:
         self.policy: PeerPolicy = config.invoke.for_peer(peer)
         self.warnings: list[str] = []
         self.lock = ThreadLock()
-        self.pending_link: Path | None = None
         self.cancel_requested = False
         self.state: ThreadState
         self.round: dict
@@ -1041,9 +1062,6 @@ class Runner:
             return self._run_locked(recorded, settings, prompt, caller, session_id, depth)
         finally:
             self.lock.release()
-            if self.pending_link is not None:
-                with contextlib.suppress(OSError):
-                    self.pending_link.unlink()
 
     def _new_state(self, recorded: ThreadState | None, settings: Settings, caller: str | None):
         if recorded is not None and not self.args.fork:
@@ -1101,6 +1119,13 @@ class Runner:
         extra = settings.extra
         if self.args.fork and self.peer == "claude":
             extra = ("--fork-session", *extra)
+        # Codex writes ``-o`` at the end of the run. The target lives outside the run
+        # directory, which may be renamed mid-run, and moves to answer-NN.md once the
+        # peer has exited (by the runner, or by whoever adopts the round).
+        answer_target: Path | None = None
+        if self.peer == "codex":
+            answer_target = invoke_root(self.config) / self.peer / ".answers" / f"{uuid.uuid4()}.md"
+            answer_target.parent.mkdir(parents=True, exist_ok=True)
         request = InvokeRequest(
             peer=self.peer,
             prompt=full_prompt,
@@ -1114,7 +1139,7 @@ class Runner:
             resume=resume_id,
             session_id=session_id,
             output_schema=settings.output_schema,
-            last_message_path=files["answer_path"] if self.peer == "codex" else None,
+            last_message_path=answer_target,
             prompt_via_stdin=via_stdin,
             extra=extra,
         )
@@ -1153,6 +1178,7 @@ class Runner:
             "peer_pgid": None,
             "peer_started": None,
             **{key: str(path) for key, path in files.items() if key != "result_path"},
+            "answer_target": str(answer_target) if answer_target else None,
             "publication": {"pending": {}},
         }
         state.rounds.append(self.round)
@@ -1260,11 +1286,9 @@ class Runner:
         pending = self.run_dir
         try:
             os.rename(pending, target)
-            os.symlink(target.name, pending)
         except OSError:
             destination.release()
             raise
-        self.pending_link = pending
         self.run_dir = target
         self.thread_id = thread_id
         self.state.thread_id = thread_id
@@ -1274,7 +1298,6 @@ class Runner:
         for key, path in _round_files(target, number).items():
             if key != "result_path":
                 self.round[key] = str(path)
-        self.round["pending_link"] = str(pending)
         self.state.save()
         self.lock.release()
         self.lock = destination
@@ -1314,7 +1337,7 @@ class Runner:
         last_exchange = time.monotonic()
         last_transcript_check = 0.0
         transcript_mtime: float | None = None
-        buffer = b""
+        tail = LineTail()
         outcome: str | None = None
         dirty = False
 
@@ -1330,17 +1353,14 @@ class Runner:
 
         def drain(reader: Any, *, final: bool) -> tuple[bool, bool]:
             """Parse every complete line now on disk: ``(read_any, saw_message)``."""
-            nonlocal buffer
             read_any = message = False
             while chunk := reader.read(65536):
                 read_any = True
-                buffer += chunk
-                while b"\n" in buffer:
-                    line, buffer = buffer.split(b"\n", 1)
-                    message = handle(line + b"\n") or message
-            if final and buffer:
-                message = handle(buffer + b"\n") or message
-                buffer = b""
+                for line in tail.feed(chunk):
+                    message = handle(line) or message
+            if final:
+                for line in tail.flush():
+                    message = handle(line) or message
             return read_any, message
 
         def transcript_beat() -> None:

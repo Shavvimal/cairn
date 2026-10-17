@@ -203,7 +203,7 @@ class TestAgentsWait(AgentsFixture):
 CODEX_PARENT = "019a0000-0000-7000-8000-0000000parent"
 
 
-class TestCodexSubagents(StoreFixture):
+class CodexSubagentsFixture(StoreFixture):
     def setUp(self):
         super().setUp()
         for key in HINTS:
@@ -250,6 +250,8 @@ class TestCodexSubagents(StoreFixture):
         path = _write(self.codex / f"rollout-{thread_id}.jsonl", records)
         os.utime(path, (mtime, mtime))
 
+
+class TestCodexSubagents(CodexSubagentsFixture):
     def test_native_turn_markers_decide_completion(self):
         result = subprocess.run(
             [
@@ -281,6 +283,181 @@ class TestCodexSubagents(StoreFixture):
             (rows["0busy"]["execution"], rows["0busy"]["activity"]), ("running", "active")
         )
         self.assertEqual(rows["0done"]["kind"], "codex-subagent")
+
+
+def _meta(thread_id: str, cwd: str, parent: str | None = CODEX_PARENT) -> dict:
+    payload: dict = {"id": thread_id, "cwd": cwd}
+    if parent:
+        payload["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1}}}
+    return {"type": "session_meta", "payload": payload}
+
+
+def _event(kind: str, **extra) -> dict:
+    return {"type": "event_msg", "payload": {"type": kind, **extra}}
+
+
+class TestCodexReplayAndFragments(CodexSubagentsFixture):
+    def rollout(self, name: str, records: list[dict], mtime: float) -> Path:
+        path = _write(self.codex / name, records)
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def replayed_parent(self) -> list[dict]:
+        return [
+            _meta(CODEX_PARENT, self.cwd, parent=None),
+            _event("task_started", turn_id="t-parent"),
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "PARENT FINAL"}],
+                },
+            },
+            _event("task_complete"),
+        ]
+
+    def list_rows(self) -> dict:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "cairn",
+                "agents",
+                "list",
+                "--session",
+                f"codex:{CODEX_PARENT}",
+                "--json",
+            ],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = json.loads(result.stdout)
+        ids = [row["id"] for row in rows]
+        self.assertEqual(len(ids), len(set(ids)), "one row per child thread")
+        return {row["id"]: row for row in rows}
+
+    def wait(self, *args) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "cairn",
+                "agents",
+                "wait",
+                *args,
+                "--session",
+                f"codex:{CODEX_PARENT}",
+                "--poll-s",
+                "0.1",
+            ],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_unresolved_replay_is_never_success(self):
+        child = "019a0000-0000-7000-8000-000000unres"
+        old = time.time() - 900  # past the live-child window: exported whole, unresolved
+        self.rollout(
+            f"rollout-{child}.jsonl", [_meta(child, self.cwd), *self.replayed_parent()], old
+        )
+        row = self.list_rows()[child]
+        self.assertEqual((row["execution"], row["outcome"]), ("unknown", "unknown"))
+        self.assertEqual(self.wait(child, "--timeout-s", "5").returncode, 1)
+
+    def test_resolved_replay_ignores_the_parents_final_answer(self):
+        open_child = "019a0000-0000-7000-8000-0000000open"
+        done_child = "019a0000-0000-7000-8000-00000000fin"
+        for child, own in (
+            (open_child, ["task_started"]),
+            (done_child, ["task_started", "task_complete"]),
+        ):
+            records = [
+                _meta(child, self.cwd),
+                *self.replayed_parent(),
+                _event("thread_settings_applied", thread_id=child),  # the boundary
+                *[_event(kind, turn_id="t-child") for kind in own],
+            ]
+            self.rollout(f"rollout-{child}.jsonl", records, time.time() - 900)
+        rows = self.list_rows()
+        self.assertEqual(rows[open_child]["execution"], "running")
+        self.assertIsNone(rows[open_child]["outcome"])
+        self.assertEqual(
+            (rows[done_child]["execution"], rows[done_child]["outcome"]), ("exited", "succeeded")
+        )
+
+    def test_resumed_fragments_form_one_thread(self):
+        child = "019a0000-0000-7000-8000-00000frags"
+        self.rollout(
+            f"rollout-a-{child}.jsonl",
+            [_meta(child, self.cwd), _event("task_started"), _event("task_complete")],
+            time.time() - 900,
+        )
+        second = self.rollout(
+            f"rollout-b-{child}.jsonl",
+            [_meta(child, self.cwd), _event("task_started")],
+            time.time() - 2,
+        )
+        row = self.list_rows()[child]
+        self.assertEqual(row["execution"], "running")
+        self.assertEqual(row["path"], str(second))
+        self.assertEqual(self.wait(child, "--timeout-s", "0.3").returncode, 124)  # not ambiguous
+        with second.open("a") as handle:
+            handle.write(json.dumps(_event("task_complete")) + "\n")
+        row = self.list_rows()[child]
+        self.assertEqual((row["execution"], row["outcome"]), ("exited", "succeeded"))
+        self.assertEqual(self.wait(child).returncode, 0)
+
+
+class TestAllPrecedence(AgentsFixture):
+    def test_all_ignores_the_detected_session_and_hides_exited_rows(self):
+        from cairn.health import process_identity
+
+        self.peer_run()  # exited, caller claude:PARENT
+        other = "019a0000-0000-7000-8000-0000000other"
+        run_dir = self.root / "data/logs/invoke/codex" / other
+        run_dir.mkdir(parents=True)
+        identity = process_identity(os.getpid())
+        assert identity is not None
+        state = {
+            "peer": "codex",
+            "thread_id": other,
+            "cwd": self.cwd,
+            "profile": "review",
+            "native_policy": [],
+            "caller_session": "claude:someone-else",
+            "rounds": [
+                {
+                    "round": 1,
+                    "prompt": "still going",
+                    "caller_session": "claude:someone-else",
+                    "started_at": _iso(self.now - 10),
+                    "runner_pid": identity[0],
+                    "runner_started": identity[1],
+                }
+            ],
+        }
+        (run_dir / "thread.json").write_text(json.dumps(state))
+        self.env["CLAUDE_SESSION_ID"] = PARENT  # an implicitly detected host session
+        everything = self.agents("list", "--all", "--json")
+        self.assertEqual(everything.returncode, 0, everything.stderr)
+        ids = {row["id"]: row for row in json.loads(everything.stdout)}
+        self.assertIn(other, ids)
+        self.assertNotIn(PEER, ids)  # exited
+        self.assertNotIn("agent-r1", ids)  # the implicit session no longer scopes --all
+        scoped = {row["id"] for row in json.loads(self.agents("list", "--json").stdout)}
+        self.assertIn(PEER, scoped)
+        self.assertNotIn(other, scoped)
+        explicit = self.agents("list", "--all", "--session", f"claude:{PARENT}", "--json")
+        rows = {row["id"]: row for row in json.loads(explicit.stdout)}
+        self.assertIn("agent-r1", rows)  # an explicit session still applies
+        self.assertNotIn("agent-f1", rows)  # exited
+        self.assertNotIn(PEER, rows)
+        self.assertNotIn(other, rows)
 
 
 class TestClassifyClaudeChild(unittest.TestCase):
