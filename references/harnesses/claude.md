@@ -62,3 +62,21 @@ plugin-declared timeout cannot raise, so the handler only queues the event and s
 detached worker. End a real session, then inspect `cairn hook status --harness claude`
 and search a distinctive phrase from that session. An isolated shell invocation of the
 handler is not host lifecycle verification.
+
+## Peer runs and fan-out health
+
+Start `cairn invoke <peer> … --json` with `Bash` `run_in_background: true` and keep the task
+id; the JSON result line arrives on the task's stdout when it exits, and the host sends a
+completion notice. Read the first stderr line for the thread id. Mid-run, read
+`cairn invoke status <id>`; with `Monitor` available, watch the thread's `events-NN.jsonl`
+under `<data_root>/logs/invoke/<peer>/<id>/`. Stop the monitor afterwards. Silence proves
+nothing: a `silent` activity label past the stall threshold means a probable hang.
+
+For a fan-out of `Agent` subagents plus peer runs, `cairn agents list` shows every item the
+current session spawned with its execution state, activity and outcome. Run
+`cairn agents wait --session claude:<id>` in the background to get one completion notice when
+the last one exits. After a context reset, run `cairn agents list` before resuming work.
+
+Skills: `/cairn:invoke-codex` and `/cairn:invoke-claude`. Both may be invoked by the model
+when the user asks for a peer run or a quality gate; the engine's read-only default profile,
+timeouts and depth guard bound what a run can do.

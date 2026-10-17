@@ -101,11 +101,37 @@ cairn --version
 full sync; `--all` also updates and embeds every enabled source using its configured window. Temporal recall has
 its own skill (`/cairn:recall`); `cairn recall --help` shows its args.
 
+## Peer agents and fan-out health
+
+```bash
+cairn invoke codex --prompt-file brief.md --effort high   # run Codex headlessly, record the exchange
+cairn invoke claude --prompt "…" --profile review          # the mirror direction
+cairn invoke status <thread-id> [--follow]                 # health line, progress, answer
+cairn invoke codex --resume <thread-id> --prompt "…"        # continue the same thread, any time later
+cairn invoke cancel | publish <thread-id>                  # stop a run; finish pending export/link/index
+cairn invoke list-models                                   # Codex model and effort catalogue
+cairn agents list [--session SOURCE:ID] [--all]            # peer runs plus Claude/Codex subagents, with health
+cairn agents wait --session SOURCE:ID [--timeout-s N]      # block until the fan-out has exited
+```
+
+The `invoke-codex` and `invoke-claude` skills drive these; the doctrine for adversarial
+review lives in `references/peer-review.md`. Defaults (model, effort, profile, timeouts) are
+config as data under the `invoke` block: `cairn config set invoke.codex.effort medium`.
+
+## One folder per session
+
+Everything a session spawned sits in a folder named after its document:
+`<collection>/<project>/<date>-<shortid>/`. Subagent transcripts export there as
+`agent-<id>.md` (`type: claude-subagent` / `codex-subagent`, hidden from `list`, shown by
+`cairn recall list --include-subagents`) and peer exchanges as `exchange-<peer>-<short>.md`
+(`type: agent-exchange`). The parent document carries a `## Subagents` index and `links:`
+to the peer sessions it spawned or was spawned by.
+
 ## Preserved on export (shared)
 
 Re-exporting never clobbers your annotations. Across all sources, exports preserve the
 `## My Notes` section and these frontmatter fields: `comments`, `status`, `tags`,
-`rating`, `title`, `projects`.
+`rating`, `title`, `projects`, `links`.
 
 ## Per-source reference
 

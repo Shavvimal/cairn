@@ -70,3 +70,19 @@ SessionEnd runs when the main session ends (normal client shutdown, archive/dele
 open conversation, or the host's idle timeout). Switching conversations does not immediately
 end one. End a real session and check completed sync plus a QMD search for its distinctive
 text, without waiting for cron. The three-second callback hands work to a detached process.
+
+## Peer runs and fan-out health
+
+Run `cairn invoke <peer> … --json` with `exec_command` and a long `yield_time_ms`, keep the
+session handle, and poll with `write_stdin` (an empty write returns new output) until it
+exits; the last stdout line is the JSON result. Read the first stderr line for the thread id
+and poll `cairn invoke status <id>` between writes. Run invoke with escalated permissions:
+the sandbox hides the login keychain (`claude -p` reports "Not logged in"), blocks the peer's
+network, and denies writes under `~/.codex` and `~/.claude`. Never start a nested
+`codex exec` inside the sandbox; the engine refuses depth 1 without `--allow-nested`.
+
+`cairn agents list` shows every peer run and subagent of the current thread with execution
+state, activity and outcome; `cairn agents wait --session codex:<id>` blocks until the last
+one exits. The `invoke-codex` and `invoke-claude` skills ship with
+`allow_implicit_invocation: true`, so a request in conversation can start them; setup stays
+explicit.

@@ -5,6 +5,57 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0]
+
+### Upgrading from 2.4.0
+
+Upgrade the engine (`uv tool upgrade cairn`) and the plugin, then run
+`cairn claude export --all` and `cairn codex export --all` once. The export schema is now 2:
+the full run re-renders every session document with the new head fields and, for the first
+time, exports subagent transcripts as child documents. On a machine with a year of history
+this is a one-time cost of a few minutes plus the embedding of the new child documents on
+the next `cairn sync --cron`. Windowed cron runs never re-export old documents.
+
+### Added
+- `cairn invoke codex|claude`: run the other agent headlessly from either host, stream its
+  events to a per-thread log, capture the real thread id, continue the same thread later
+  with `--resume`, read progress mid-run with `cairn invoke status`, cancel with
+  `cairn invoke cancel`, and finish pending publishing with `cairn invoke publish`. Defaults
+  per peer (model, effort, profile, timeouts) live in the config `invoke` block.
+- Every peer run exports the peer session at once, writes `links:` on both session
+  documents, and records an exchange document (prompt, progress, answer and result per
+  round) in the calling session's folder, so `/search` and `/recall` find it.
+- Health for long-running work: execution state, activity with age, and outcome are
+  reported separately; an idle watchdog kills a hung run; one invocation per thread is
+  enforced; a runner killed mid-run leaves an orphaned round that `status` adopts.
+- `cairn agents list|wait`: one view over the peer runs and the Claude and Codex subagents
+  a session spawned, and a blocking wait for a whole fan-out.
+- Claude Code subagent transcripts (`<session>/subagents/agent-*.jsonl`, including
+  workflow agents) export as `claude-subagent` documents in the parent's folder with the
+  agent's type, description, tool use id, spawn depth, request shape, model and lineage;
+  parents gain a `## Subagents` index; child-to-parent messages render as Agent turns.
+- Codex subagent rollouts export as `codex-subagent` documents with parent thread, role,
+  nickname, path and depth; rollouts carry `originator`, `thread_source`, `effort`,
+  `sandbox` and `approval_policy`; `custom_tool_call` records render like function calls;
+  inter-agent messages render as Agent turns marked encrypted.
+- `cairn recall list --include-subagents`; JSON rows carry `type` and `parent`.
+- Skills `invoke-codex` and `invoke-claude` for both hosts, `references/peer-review.md`
+  (gate prompts, critical evaluation, the bounded convergence loop), and peer-run recipes
+  in the harness references.
+- `links` is a preserved frontmatter field.
+
+### Fixed
+- Codex: a forked subagent rollout carries two `session_meta` records; the parser let the
+  last one win, so the child was parsed as its parent and dropped by the fragment dedupe.
+  The first record now wins and the replayed parent history is cut. On the author's
+  machine this recovers 100 of 108 subagent rollouts.
+- Codex: `custom_tool_call` and `custom_tool_call_output` records were silently skipped.
+- Claude: messages a subagent sent to its parent were dropped as meta records.
+
+### Changed
+- Export schema 2; see Upgrading.
+- `cairn resume` refuses a subagent transcript and names the parent to resume instead.
+
 ## [2.4.0]
 
 ### Upgrading from 2.3.0
