@@ -54,6 +54,8 @@ class ConversationSource(ABC):
     default_status: str = "active"
     # preserved-section wording in the My Notes placeholder ("syncs" vs "exports")
     preserved_note: str = "syncs"
+    # Chat transcript boundary; meetings have native notes before My Notes instead.
+    conversation_heading: str | None = "## Conversation"
 
     # ====================================================================
     # Overridable per source
@@ -236,7 +238,10 @@ class ConversationSource(ABC):
         except fm_mod.FrontmatterParseError as e:
             print(f"Warning: skipping {output_file}: {e}", file=sys.stderr)
             return None, None, False
-        return existing_fm, fm_mod.extract_my_notes_section(content), True
+        my_notes = fm_mod.extract_my_notes_section(
+            content, conversation_heading=self.conversation_heading
+        )
+        return existing_fm, my_notes, True
 
     def export_one(
         self, source_id: str, data: SessionData, existing_file: Path | None

@@ -173,22 +173,30 @@ def read_frontmatter_head(path: Path, limit: int = MAX_FRONTMATTER_BYTES) -> dic
     return parse_frontmatter("".join(parts))
 
 
-def extract_my_notes_section(content: str) -> str | None:
+def extract_my_notes_section(
+    content: str, *, conversation_heading: str | None = "## Conversation"
+) -> str | None:
     """Extract the '## My Notes' section from existing content.
 
     A ``## `` heading inside a fenced code block does not end the section. A fence
     left open to the end of the file is treated as plain text instead: otherwise
     the section would swallow the conversation that follows it, and every export
     would append one more copy of that conversation to the file.
+
+    Chat sources stop before their conversation so transcript text cannot become
+    annotations. Meetings pass ``None``: their native notes and summaries precede
+    My Notes and may legitimately contain any heading, including Conversation.
     """
     lines = content.splitlines()
-    result = _scan_my_notes(lines, track_fences=True)
+    result = _scan_my_notes(lines, track_fences=True, conversation_heading=conversation_heading)
     if result == "unclosed":
-        return _scan_my_notes(lines, track_fences=False)
+        return _scan_my_notes(lines, track_fences=False, conversation_heading=conversation_heading)
     return result
 
 
-def _scan_my_notes(lines: list[str], *, track_fences: bool) -> str | None:
+def _scan_my_notes(
+    lines: list[str], *, track_fences: bool, conversation_heading: str | None
+) -> str | None:
     start = None
     fence = None
     for index, line in enumerate(lines):
@@ -204,7 +212,7 @@ def _scan_my_notes(lines: list[str], *, track_fences: bool) -> str | None:
             if fence is not None:
                 continue
         if start is None:
-            if line == "## Conversation":
+            if line == conversation_heading:
                 return None
             if line == PRESERVED_SECTION:
                 start = index

@@ -23,6 +23,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 from cairn import config
+from cairn.schema import SessionData
 
 
 def _write_config(root: Path, stores: dict[str, str]) -> Path:
@@ -255,6 +256,42 @@ class TestCursorExport(_AdapterFixture):
         self.assertNotIn("\ud83c", text)  # lone surrogate stripped
         self.assertIn("Trophy", text)
         self.assertIn("here", text)
+
+
+class TestGranolaExport(_AdapterFixture):
+    module_name = "cairn.sources.granola"
+
+    def test_source_headings_do_not_erase_handwritten_notes_on_reexport(self):
+        mod = self._activate({"granola-sessions": str(self.root / "granola")})
+        for field in ("notes_markdown", "summary_markdown"):
+            with self.subTest(field=field):
+                source = mod.GranolaSource()
+                data: SessionData = {
+                    "meeting_id": field,
+                    "date": "2026-07-01",
+                    "title": "Meeting",
+                    "transcript_markdown": "Native transcript\n## My Notes\nTranscript text",
+                }
+                native_notes = "## Conversation\nCustomer feedback\n## Transcript\nMore notes"
+                if field == "notes_markdown":
+                    data["notes_markdown"] = native_notes
+                else:
+                    data["summary_markdown"] = native_notes
+                path = source.export_one(field, data, None)
+                assert path is not None
+                path.write_text(
+                    path.read_text().replace(
+                        "<!-- Add your notes here. This section is preserved across exports. -->",
+                        "Important handwritten follow-up\n```md\n## Conversation\n```",
+                    )
+                )
+                for _ in range(2):
+                    self.assertEqual(source.export_one(field, data, path), path)
+                    content = path.read_text()
+                    self.assertEqual(content.count("Important handwritten follow-up"), 1)
+                    self.assertEqual(content.count("Native transcript"), 1)
+                    self.assertEqual(content.count("Transcript text"), 1)
+                    self.assertIn("```md\n## Conversation\n```", content)
 
 
 class TestGranolaHelpers(unittest.TestCase):

@@ -321,6 +321,37 @@ class TestSharedStore(StoreFixture):
         bad = self.run_cli("claude", "note", "wrong", "--session-id", "codex:bounded", check=False)
         self.assertNotEqual(bad.returncode, 0)
 
+    def test_expansion_preserves_crlf_framing_before_and_after_annotation(self):
+        path = self.native("codex", "crlf", stamps=["2026-03-28T12:00:00Z"])
+        with path.open("a") as handle:
+            for text in (
+                "Second turn\r\n<!-- cairn:turn 999 -->\r\nEnd of second turn",
+                "THIRD TURN MUST NOT APPEAR",
+            ):
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "event_msg",
+                            "timestamp": "2026-03-28T12:01:00Z",
+                            "payload": {"type": "user_message", "message": text},
+                        }
+                    )
+                    + "\n"
+                )
+        self.run_cli("codex", "export", "--all")
+        record = self.records()[0]
+        body = record.path.read_bytes().split(b"\n## Conversation\n", 1)[1]
+        self.assertIn(b"\r\n", body)
+        for annotate in (False, True):
+            with self.subTest(annotate=annotate):
+                if annotate:
+                    self.run_cli("codex", "note", "Keep this note", "--session-id", "crlf")
+                result = self.run_cli("recall", "expand", "codex:crlf", "--max-msgs", "2")
+                self.assertIn("End of second turn", result.stdout)
+                self.assertNotIn("THIRD TURN MUST NOT APPEAR", result.stdout)
+                self.assertIn("message limit", result.stdout)
+                self.assertEqual(record.path.read_bytes().split(b"\n## Conversation\n", 1)[1], body)
+
     def test_concurrent_export_and_notes_do_not_lose_comments(self):
         self.native("codex", "race")
         self.run_cli("codex", "export", "--all")

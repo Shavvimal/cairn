@@ -267,7 +267,9 @@ def bounded_content(record: SessionRecord, max_messages: int, max_chars: int) ->
     Legacy Markdown has no reliable message boundaries, so it is bounded by
     characters only. We do not reinterpret arbitrary headings as transcript data.
     """
-    with record.path.open(encoding="utf-8") as handle:
+    # Frame lengths count the characters written, including embedded CRLF pairs.
+    # Universal newline conversion would shorten a turn and skip the next marker.
+    with record.path.open(encoding="utf-8", newline="") as handle:
         content = handle.read(max_chars + 1)
     marker = re.compile(r"<!-- cairn:turn (\d+) -->\n")
     position = count = 0

@@ -155,6 +155,23 @@ No new GitHub fetch, user-store update, real cron registration or desktop test w
   exercises both wrong and absent host `XDG_CONFIG_HOME`, plus removal of both copies.
   The follow-up `make check` passes all 194 tests.
 
+### Annotation and expansion follow-up (2026-10-17)
+
+Two additional regressions were reproduced with failing tests before fixing them:
+
+- Granola's native notes and summaries may contain `## Conversation` before Cairn's
+  handwritten `## My Notes`. The notes extractor now applies the conversation
+  boundary only to chat sources. Tests verify that handwritten notes and fenced
+  headings survive repeated meeting exports without duplicating transcript text.
+- Recall now reads length-framed turns without translating embedded CRLF pairs.
+  Annotation writes also preserve the transcript's original characters. A CLI
+  regression test verifies the message limit before and after adding a note, with
+  a forged marker inside the CRLF message, and checks unchanged transcript bytes.
+
+Local `make check` passes lint, mypy and all 202 tests; explicit formatting and
+whitespace checks pass. These changes were tested with synthetic exports and CLI
+calls; authenticated host lifecycle checks were not repeated for this follow-up.
+
 ### Open host and platform checks
 
 - **Codex desktop:** no Codex desktop application is installed in this environment. Desktop

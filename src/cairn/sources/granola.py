@@ -625,6 +625,7 @@ class GranolaSource(ConversationSource):
     id_field = "meeting_id"
     default_status = "raw"
     preserved_note = "exports"
+    conversation_heading = None
 
     # ---- rendering ----
     def render_document(

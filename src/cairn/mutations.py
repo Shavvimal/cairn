@@ -61,7 +61,10 @@ def _mutate_file(find_file: FindFile, session_id: str, mutate: Callable[[dict], 
         return False
 
     with locked(document_lock(session_file)):
-        content = session_file.read_text(encoding="utf-8")
+        # Preserve transcript characters exactly: converting CRLF would invalidate
+        # length-framed turns even though this mutation only changes frontmatter.
+        with session_file.open(encoding="utf-8", newline="") as handle:
+            content = handle.read()
         try:
             new_content = rewrite_preserved_tail(content, mutate)
         except FrontmatterParseError as e:
