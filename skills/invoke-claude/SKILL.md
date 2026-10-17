@@ -88,10 +88,12 @@ then escalate to the user with the accepted, dismissed and unresolved lists.
 
 ## 8. Close
 
-Tell the user: the session id, the exchange document path and the Claude session document
-path from the result, that `/search` and `/recall` now find both, and that the session can
-be continued later with `cairn invoke claude --resume <session_id>` or opened interactively
-with `cairn resume claude:<session_id>`.
+Tell the user: the session id, the exchange document path and the Claude session document path
+from the result, and how to continue: `cairn invoke claude --resume <session_id>` for another
+round, or `cairn resume claude:<session_id>` to open it interactively. If `warnings` is empty
+and `indexed` is true, `/search` and `/recall` find both documents now; if `indexed` is false,
+`rg` finds them at once and `/search` after `cairn invoke publish <session_id>` or the next
+`cairn sync`.
 
 ## Errors
 

@@ -86,9 +86,11 @@ then escalate to the user with the accepted, dismissed and unresolved lists.
 ## 8. Close
 
 Tell the user: the thread id, the exchange document path and the Codex session document path
-from the result, that `/search` and `/recall` now find both, and that the thread can be
-continued later with `cairn invoke codex --resume <thread_id>` or opened interactively with
-`cairn resume codex:<thread_id>`.
+from the result, and how to continue: `cairn invoke codex --resume <thread_id>` for another
+round, or `cairn resume codex:<thread_id>` to open it interactively. If `warnings` is empty
+and `indexed` is true, `/search` and `/recall` find both documents now; if `indexed` is false,
+`rg` finds them at once and `/search` after `cairn invoke publish <thread_id>` or the next
+`cairn sync`.
 
 ## Errors
 

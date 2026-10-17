@@ -269,6 +269,55 @@ def claude_rows(config: CairnConfig, session_id: str) -> list[Row]:
 # ---------------------------------------------------------------------------
 
 
+_ABORT_CANCELLED = ("interrupted", "user", "cancelled", "canceled", "replaced")
+
+
+def codex_turn_outcome(rollout: Path) -> str | None:
+    """The terminal outcome of a Codex rollout's latest own turn, else ``None``.
+
+    Reads the native ``event_msg`` markers after the replay boundary of a forked
+    child (replayed parent history is skipped exactly as the exporter skips it):
+    the last of ``task_started`` / ``task_complete`` / ``turn_aborted`` decides.
+    ``task_complete`` is ``succeeded``; ``turn_aborted`` is ``cancelled`` for an
+    interruption, else ``failed``; a trailing ``task_started`` (or no marker) is
+    ``None``: the turn is still open.
+    """
+    from .jsonl import iter_jsonl
+    from .sources.codex_replay import ReplayCut
+
+    own_id: str | None = None
+    cut: ReplayCut | None = None
+    latest: str | None = None
+    for _, record in iter_jsonl(rollout):
+        rtype = record.get("type")
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if rtype == "session_meta":
+            if own_id is None:
+                own_id = str(payload.get("id") or "")
+            elif payload.get("id") != own_id:
+                cut = cut.with_meta() if cut else ReplayCut.start(own_id)
+            continue
+        if cut is not None and not cut.ended:
+            cut = cut.observe(rtype, payload)
+            if not cut.ended:
+                continue
+        if rtype != "event_msg":
+            continue
+        ptype = payload.get("type")
+        if ptype == "task_started":
+            latest = None
+        elif ptype == "task_complete":
+            latest = "succeeded"
+        elif ptype == "turn_aborted":
+            reason = str(payload.get("reason") or "").lower()
+            latest = "cancelled" if reason in _ABORT_CANCELLED else "failed"
+    if cut is not None and not cut.ended:
+        return None  # still replaying the parent's history: nothing of its own yet
+    return latest
+
+
 def codex_rows(config: CairnConfig, thread_id: str) -> list[Row]:
     from .sources.codex import parse_rollout
     from .sources.codex_lineage import rollout_lineage
@@ -285,8 +334,11 @@ def codex_rows(config: CairnConfig, thread_id: str) -> list[Row]:
         with contextlib.redirect_stdout(sys.stderr):
             data = parse_rollout(child)
         age = max(0.0, now - child.stat().st_mtime)
-        if data is not None and data.get("finished"):
-            execution, activity, shown_age, outcome = "exited", "none", None, "succeeded"
+        terminal = codex_turn_outcome(child) if data is not None else None
+        if terminal is None and data is not None and data.get("finished"):
+            terminal = "succeeded"
+        if terminal is not None:
+            execution, activity, shown_age, outcome = "exited", "none", None, terminal
         else:
             execution, activity, shown_age, outcome = (
                 "running",
@@ -517,4 +569,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-__all__ = ["Row", "classify_claude_child", "collect", "main", "task_notifications"]
+__all__ = [
+    "Row",
+    "classify_claude_child",
+    "codex_turn_outcome",
+    "collect",
+    "main",
+    "task_notifications",
+]

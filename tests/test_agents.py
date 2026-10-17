@@ -200,6 +200,89 @@ class TestAgentsWait(AgentsFixture):
         self.assertEqual(result.returncode, 1, result.stderr)
 
 
+CODEX_PARENT = "019a0000-0000-7000-8000-0000000parent"
+
+
+class TestCodexSubagents(StoreFixture):
+    def setUp(self):
+        super().setUp()
+        for key in HINTS:
+            self.env.pop(key, None)
+            os.environ.pop(key, None)
+        old = time.time() - 900
+        _write(
+            self.codex / f"rollout-{CODEX_PARENT}.jsonl",
+            [{"type": "session_meta", "payload": {"id": CODEX_PARENT, "cwd": self.cwd}}],
+        )
+        self.child("019a0000-0000-7000-8000-00000000done", ["task_started", "task_complete"], old)
+        self.child("019a0000-0000-7000-8000-0000000abort", ["task_started", "turn_aborted"], old)
+        self.child("019a0000-0000-7000-8000-0000000lost", ["task_started", "turn_aborted:x"], old)
+        self.child(
+            "019a0000-0000-7000-8000-00000000busy",
+            ["task_started", "task_complete", "task_started"],
+            time.time() - 2,
+        )
+
+    def child(self, thread_id: str, markers: list[str], mtime: float) -> None:
+        meta = {
+            "id": thread_id,
+            "cwd": self.cwd,
+            "source": {
+                "subagent": {
+                    "thread_spawn": {
+                        "parent_thread_id": CODEX_PARENT,
+                        "depth": 1,
+                        "agent_role": "worker",
+                    }
+                }
+            },
+        }
+        records: list[dict] = [{"type": "session_meta", "payload": meta}]
+        records.append(
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "do it"}}
+        )
+        for marker in markers:
+            kind, _, reason = marker.partition(":")
+            payload: dict = {"type": kind}
+            if kind == "turn_aborted":
+                payload["reason"] = reason or "interrupted"
+            records.append({"type": "event_msg", "payload": payload})
+        path = _write(self.codex / f"rollout-{thread_id}.jsonl", records)
+        os.utime(path, (mtime, mtime))
+
+    def test_native_turn_markers_decide_completion(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "cairn",
+                "agents",
+                "list",
+                "--session",
+                f"codex:{CODEX_PARENT}",
+                "--json",
+            ],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {row["id"][-5:]: row for row in json.loads(result.stdout)}
+        self.assertEqual(
+            (rows["0done"]["execution"], rows["0done"]["outcome"]), ("exited", "succeeded")
+        )
+        self.assertEqual(
+            (rows["abort"]["execution"], rows["abort"]["outcome"]), ("exited", "cancelled")
+        )
+        self.assertEqual(
+            (rows["0lost"]["execution"], rows["0lost"]["outcome"]), ("exited", "failed")
+        )
+        self.assertEqual(
+            (rows["0busy"]["execution"], rows["0busy"]["activity"]), ("running", "active")
+        )
+        self.assertEqual(rows["0done"]["kind"], "codex-subagent")
+
+
 class TestClassifyClaudeChild(unittest.TestCase):
     def test_order_of_rules(self):
         now = 10_000.0

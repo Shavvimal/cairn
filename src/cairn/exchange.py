@@ -19,6 +19,7 @@ catalog on every listing.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -38,6 +39,7 @@ from .frontmatter import (
     notes_block,
     parse_frontmatter,
     preserved_tail,
+    read_frontmatter_head,
     resolve_title,
     title_line,
 )
@@ -158,13 +160,18 @@ def exchange_document_path(anchor: Path, peer: str, thread_id: str) -> Path:
     return exchange_path(anchor, peer, peer_short_id(peer, thread_id))
 
 
-def _anchor(state: ThreadState) -> tuple[Path, str | None] | None:
+def _anchor(state: ThreadState) -> tuple[Path, str | None, bool] | None:
+    """``(folder, anchor_session, final)``. A peer-folder anchor is provisional while a
+    known caller has no exported document yet: the document moves to the caller's
+    folder once the caller export lands."""
     if state.anchor:
-        return Path(state.anchor), state.anchor_session
+        return Path(state.anchor), state.anchor_session, True
     if state.caller_session_doc:
-        return session_dir_of(Path(state.caller_session_doc)), state.caller_session
+        return session_dir_of(Path(state.caller_session_doc)), state.caller_session, True
     if state.peer_session_doc and state.thread_id:
-        return session_dir_of(Path(state.peer_session_doc)), f"{state.peer}:{state.thread_id}"
+        final = not state.caller_session
+        peer_ref = f"{state.peer}:{state.thread_id}"
+        return session_dir_of(Path(state.peer_session_doc)), peer_ref, final
     return None
 
 
@@ -173,6 +180,31 @@ def resolve_anchor(config: CairnConfig, state: ThreadState) -> Path | None:
     caller session's folder, else the peer session's folder, else ``None``."""
     found = _anchor(state)
     return found[0] if found else None
+
+
+def document_owner(path: Path) -> str | None:
+    """The ``thread_id`` of an existing exchange document (``""`` when it has none),
+    or ``None`` when no file is there. An unparseable file raises ``ValueError``."""
+    if not path.exists():
+        return None
+    try:
+        fm = read_frontmatter_head(path)
+    except (FrontmatterParseError, UnicodeDecodeError) as exc:
+        raise ValueError(f"cannot parse frontmatter in {path}: {exc}") from exc
+    return str(fm.get("thread_id") or "")
+
+
+def exchange_destination(folder: Path, peer: str, thread_id: str) -> Path:
+    """A collision-safe document path: the short-id name, or, when another thread
+    already owns it, the name suffixed with ``sha256(thread_id)[:16]``."""
+    base = exchange_document_path(folder, peer, thread_id)
+    if document_owner(base) in (None, thread_id):
+        return base
+    digest = hashlib.sha256(thread_id.encode()).hexdigest()[:16]
+    alternative = base.with_name(f"{base.stem}-{digest}.md")
+    if document_owner(alternative) in (None, thread_id):
+        return alternative
+    raise ValueError(f"{alternative} belongs to another thread; refusing to overwrite it")
 
 
 # ---------------------------------------------------------------------------
@@ -339,41 +371,56 @@ def _describe_folder(config: CairnConfig, folder: Path, anchor_session: str | No
         print(f"Warning: qmd context add failed for {uri}", file=sys.stderr)
 
 
+def _read_existing(path: Path, thread_id: str) -> tuple[dict | None, str | None]:
+    owner = document_owner(path)
+    if owner is None:
+        return None, None
+    if owner != thread_id:
+        raise ValueError(f"{path} belongs to thread {owner!r}; refusing to overwrite it")
+    content = path.read_text(encoding="utf-8")
+    try:
+        existing_fm = parse_frontmatter(content)
+    except FrontmatterParseError as exc:
+        raise ValueError(f"cannot parse frontmatter in {path}: {exc}") from exc
+    return existing_fm, extract_my_notes_section(content, conversation_heading=ROUNDS_HEADING)
+
+
 def write_exchange(
     config: CairnConfig, state: ThreadState, *, describe_folder: bool = True
 ) -> Path | None:
     """Render and write the exchange document; ``None`` while no anchor exists.
 
-    When the write creates the session folder and ``describe_folder`` is set, a
-    best-effort ``qmd context add`` describes it (``--no-index`` runs skip that so
-    they never touch QMD). Records the chosen anchor and document path in ``state`` (the caller saves it),
-    so later rounds from other sessions keep writing the same document.
+    The document never overwrites another thread's file (see
+    :func:`exchange_destination`). A provisional document in the peer's folder
+    moves to the caller's folder, notes and preserved fields included, once the
+    caller's document exists. When the write creates the session folder and
+    ``describe_folder`` is set, a best-effort ``qmd context add`` describes it
+    (``--no-index`` runs skip that so they never touch QMD). Records the anchor and
+    document path in ``state`` (the caller saves it).
     """
     if not state.thread_id:
         return None
     found = _anchor(state)
     if found is None:
         return None
-    folder, anchor_session = found
-    path = (
-        Path(state.exchange_doc)
-        if state.exchange_doc
-        else exchange_document_path(folder, state.peer, state.thread_id)
-    )
-    state.anchor, state.anchor_session = str(folder), anchor_session
+    folder, anchor_session, final = found
+    recorded = Path(state.exchange_doc) if state.exchange_doc else None
+    if state.anchor and recorded is not None:
+        path = recorded
+    else:
+        path = exchange_destination(folder, state.peer, state.thread_id)
+    previous = recorded if recorded is not None and recorded != path else None
     created_folder = not path.parent.exists()
     with locked(document_lock(path)):
-        existing_fm: dict | None = None
-        my_notes: str | None = None
-        if path.exists():
-            content = path.read_text(encoding="utf-8")
-            try:
-                existing_fm = parse_frontmatter(content)
-            except FrontmatterParseError as exc:
-                raise ValueError(f"cannot parse frontmatter in {path}: {exc}") from exc
-            my_notes = extract_my_notes_section(content, conversation_heading=ROUNDS_HEADING)
+        existing_fm, my_notes = _read_existing(path, state.thread_id)
+        if existing_fm is None and previous is not None:
+            existing_fm, my_notes = _read_existing(previous, state.thread_id)
         text = render_exchange(state, existing_fm, my_notes)
         atomic_write(path, text)
+    if previous is not None and document_owner(previous) == state.thread_id:
+        previous.unlink()
+    state.anchor = str(folder) if final else None
+    state.anchor_session = anchor_session
     state.exchange_doc = str(path)
     if created_folder and describe_folder:
         _describe_folder(config, path.parent, anchor_session)
@@ -384,6 +431,8 @@ __all__ = [
     "EXCHANGE_TYPE",
     "ROUNDS_HEADING",
     "ThreadState",
+    "document_owner",
+    "exchange_destination",
     "exchange_document_path",
     "now_iso",
     "peer_short_id",

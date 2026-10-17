@@ -6,6 +6,7 @@ a temp ``bin/`` prepended to PATH; nothing touches the network or the real store
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -16,6 +17,7 @@ import sys
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import patch
@@ -23,10 +25,18 @@ from unittest.mock import patch
 from cairn import config, invoke, qmd
 from cairn.catalog import load_catalog
 from cairn.config import PeerPolicy
-from cairn.exchange import ThreadState, render_exchange, validate_head
+from cairn.exchange import ThreadState, render_exchange, validate_head, write_exchange
 from cairn.frontmatter import parse_frontmatter, rewrite_preserved_tail
 from cairn.harnesses.claude import KEYCHAIN_GUIDANCE
-from cairn.health import Heartbeat, classify, heartbeat, identity_alive, process_identity
+from cairn.health import (
+    Heartbeat,
+    classify,
+    heartbeat,
+    identity_alive,
+    parse_linux_stat,
+    parse_ps_line,
+    process_identity,
+)
 from cairn.paths import session_dir_of
 from tests.test_shared_store import StoreFixture
 
@@ -191,6 +201,18 @@ class InvokeFixture(StoreFixture):
 
         return self.wait_for(ready)
 
+    def hold_env(self, name="hold"):
+        """Stub env that blocks after thread.started until :meth:`release` (a handshake,
+        not a sleep): ``ready`` exists once the stub is waiting."""
+        ready, release = self.root / f"{name}.ready", self.root / f"{name}.release"
+        return {"STUB_MODE": "hold", "STUB_READY": str(ready), "STUB_RELEASE": str(release)}
+
+    def wait_ready(self, name="hold"):
+        self.wait_for(lambda: (self.root / f"{name}.ready").exists())
+
+    def release(self, name="hold"):
+        (self.root / f"{name}.release").touch()
+
     @staticmethod
     def gone(pid):
         try:
@@ -353,19 +375,19 @@ class TestCodexRun(InvokeFixture):
         _, data = self.run_codex()
         assert data is not None
         tid = data["thread_id"]
-        env = {"STUB_MODE": "sleep", "STUB_SLEEP": "3"}
-        first = self.spawn("codex", "--json", "--resume", tid, "--prompt", "a", env=env)
-        self.wait_for(lambda: len(self.thread(tid)["rounds"]) == 2)
-        second = self.spawn("codex", "--json", "--resume", tid, "--prompt", "b", env=env)
+        first = self.spawn("codex", "--json", "--resume", tid, "--prompt", "a", env=self.hold_env())
+        self.wait_ready()  # the first resume holds the thread lock and its peer is waiting
+        second = self.spawn("codex", "--json", "--resume", tid, "--prompt", "b")
         out2, _ = second.communicate(timeout=60)
-        _out1, _ = first.communicate(timeout=60)
+        self.release()
+        first.communicate(timeout=60)
         self.assertEqual(first.returncode, 0)
         self.assertEqual(second.returncode, invoke.EXIT_BUSY)
         busy = json.loads(out2.strip().splitlines()[-1])
         self.assertEqual(busy["status"], "busy")
         self.assertEqual(busy["holder"]["round"], 2)
         self.assertEqual(len(self.thread(tid)["rounds"]), 2)
-        self.assertEqual(len(self.stub_calls()), 2 + 1)  # two runs plus the sleep child line
+        self.assertEqual(len(self.stub_calls()), 2)  # the busy call spawned nothing
 
     def test_timeout_kills_process_group(self):
         result, data = self.run_codex(
@@ -416,14 +438,9 @@ class TestCodexRun(InvokeFixture):
 
     def test_sigkill_runner_leaves_orphan_then_status_adopts(self):
         runner = self.spawn(
-            "codex",
-            "--json",
-            "--cd",
-            self.cwd,
-            "--prompt",
-            "x",
-            env={"STUB_MODE": "sleep", "STUB_SLEEP": "4"},
+            "codex", "--json", "--cd", self.cwd, "--prompt", "x", env=self.hold_env()
         )
+        self.wait_ready()
         state = self.started_round()
         tid = state["thread_id"]
         peer_pid = state["rounds"][-1]["peer_pid"]
@@ -435,16 +452,85 @@ class TestCodexRun(InvokeFixture):
         self.assertEqual(data["execution"], "orphaned")
         self.assertFalse(data["runner_alive"])
         self.assertTrue(data["peer_alive"])
-        # The stub cannot write to the dead runner's pipe; once it exits, status adopts.
+        # The peer writes its stdout straight to the events file, so it finishes
+        # normally after the runner died and status adopts a successful round.
+        self.release()
         self.wait_for(lambda: self.gone(peer_pid), timeout=30)
         result, data = self.invoke("status", tid, "--json")
         assert data is not None
         self.assertEqual(data["execution"], "exited")
-        self.assertEqual(data["outcome"], "aborted")
+        self.assertEqual(data["outcome"], "succeeded")
+        self.assertEqual(data["last_message"], "ANSWER")
         round_ = self.thread(tid)["rounds"][-1]
         self.assertIn("adopted_at", round_)
-        self.assertIn("answer_saved", round_["publication"])
-        self.assertIn("exported", round_["publication"])
+        self.assertEqual(round_["usage"], {"input_tokens": 10, "output_tokens": 2})
+        for step in ("answer_saved", "exported", "exchange_written", "indexed"):
+            self.assertIn(step, round_["publication"])
+        self.assertFalse(Path(round_["pending_link"]).is_symlink())
+        self.assertEqual((self.run_dirs()[0] / "answer-01.md").read_text().strip(), "ANSWER")
+
+    def test_announces_thread_id_before_the_peer_finishes(self):
+        runner = self.spawn(
+            "codex", "--json", "--cd", self.cwd, "--prompt", "x", env=self.hold_env()
+        )
+        assert runner.stderr is not None
+        line = runner.stderr.readline()
+        while line and not line.startswith("cairn invoke:"):
+            line = runner.stderr.readline()
+        self.assertIsNone(runner.poll())  # still running: the peer waits for release
+        state = self.started_round()
+        tid = state["thread_id"]
+        self.assertTrue(line.startswith(f"cairn invoke: codex thread {tid} round 1 (run dir "))
+        self.assertIn(str(self.run_dirs()[0]), line)
+        self.release()
+        out, err = runner.communicate(timeout=60)
+        self.assertEqual(runner.returncode, 0, err)
+        self.assertNotIn("cairn invoke:", err)  # announced exactly once
+        self.assertEqual(json.loads(out.strip().splitlines()[-1])["thread_id"], tid)
+
+    def test_rename_holds_the_thread_lock_before_exposing_the_directory(self):
+        runner = self.spawn(
+            "codex", "--json", "--cd", self.cwd, "--prompt", "x", env=self.hold_env()
+        )
+        self.wait_ready()
+        state = self.started_round()
+        tid = state["thread_id"]
+        self.assertEqual(state["thread_id"], self.run_dirs()[0].name)  # coherent identity
+        result, _ = self.invoke("publish", tid)
+        self.assertEqual(result.returncode, invoke.EXIT_BUSY, result.stdout + result.stderr)
+        self.release()
+        out, err = runner.communicate(timeout=60)
+        self.assertEqual(runner.returncode, 0, err)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1])["status"], "succeeded")
+
+    def test_transcript_only_activity_is_not_idle(self):
+        self.write_config(codex={"idle_timeout_s": 1})
+        result, data = self.run_codex(env={"STUB_MODE": "rollout", "STUB_SLEEP": "3"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "succeeded")
+
+    def test_closed_stdout_keeps_the_watchdogs(self):
+        self.write_config(codex={"idle_timeout_s": 1})
+        started = time.monotonic()
+        result, data = self.run_codex(env={"STUB_MODE": "closeout", "STUB_SLEEP": "30"})
+        self.assertEqual(result.returncode, invoke.EXIT_IDLE, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "idle_timeout")
+        self.assertLess(time.monotonic() - started, 20)
+
+    def test_resume_defaults_to_the_recorded_caller(self):
+        sid = "c0ffee00-1111-4222-8333-444455558888"
+        self.native("claude", sid)
+        _, data = self.run_codex("--parent", f"claude:{sid}")
+        assert data is not None
+        result, data2 = self.invoke(
+            "codex", "--json", "--resume", data["thread_id"], "--prompt", "y"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data2 is not None
+        self.assertEqual(data2["caller"], f"claude:{sid}")
+        self.assertFalse([w for w in data2["warnings"] if "caller unknown" in w])
 
     def test_fail401_is_not_retryable(self):
         result, data = self.run_codex(env={"STUB_MODE": "fail401"})
@@ -491,12 +577,14 @@ class TestCodexRun(InvokeFixture):
             "CLAUDE_CODE_ENTRYPOINT": "cli",
             "CLAUDE_PLUGIN_ROOT": "/x",
             "PLUGIN_ROOT": "/y",
+            "ACME_TOOL_PLUGIN_ROOT": "/z",
             "CAIRN_INVOKE_DEPTH": "1",
         }
         result, _data = self.run_codex("--allow-nested", env=hints)
         self.assertEqual(result.returncode, 0, result.stderr)
         env = self.stub_calls()[-1]["env"]
-        for key in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT"):
+        scrubbed = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")
+        for key in (*scrubbed, "ACME_TOOL_PLUGIN_ROOT"):
             self.assertNotIn(key, env)
         self.assertEqual(env["CAIRN_INVOKE_DEPTH"], "2")
         self.assertEqual(env["CAIRN_INVOKE_CALLER"], "unknown")
@@ -648,6 +736,101 @@ class TestStatusAndPublish(InvokeFixture):
         again, _ = self.invoke("publish", data["thread_id"])
         self.assertIn("nothing pending", again.stdout)
 
+    def test_interrupted_publication_is_finished_by_publish(self):
+        def killed(*_args):
+            raise SystemExit("runner killed between steps")
+
+        with (
+            patch.dict(invoke._STEP_FUNCTIONS, {"exchange_written": killed}),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            invoke.main(["codex", "--json", "--cd", self.cwd, "--prompt", "x"])
+        tid = self.run_dirs()[0].name
+        round_ = self.thread(tid)["rounds"][0]
+        self.assertTrue(round_["finished_at"])
+        self.assertIn("exported", round_["publication"])
+        self.assertEqual(set(round_["publication"]["pending"]), {"exchange_written", "indexed"})
+        result, _ = self.invoke("publish", tid)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        round_ = self.thread(tid)["rounds"][0]
+        self.assertEqual(round_["publication"]["pending"], {})
+        for step in ("exchange_written", "indexed"):
+            self.assertIn(step, round_["publication"])
+        self.assertTrue(Path(self.thread(tid)["exchange_doc"]).is_file())
+
+    def test_late_upstream_success_redoes_downstream_steps(self):
+        cfg = config.get_config()
+        state = ThreadState("codex", "t-1", self.cwd, "review", [])
+        state.path = self.root / "t.json"
+        round_: dict = {"round": 1, "finished_at": "2026-10-17T10:00:00+00:00"}
+        state.rounds.append(round_)
+        calls: list[str] = []
+
+        def step(name, error=None):
+            def run(*_args):
+                calls.append(name)
+                if error:
+                    raise RuntimeError(error)
+
+            return run
+
+        fake_index = patch.object(invoke, "update_index", lambda *a, **k: calls.append("indexed"))
+        with (
+            patch.dict(
+                invoke._STEP_FUNCTIONS,
+                {"exported": step("exported", "export broke"), "exchange_written": step("x")},
+            ),
+            fake_index,
+        ):
+            invoke.publish_round(cfg, state, round_)
+        self.assertEqual(calls, ["exported", "x", "indexed"])
+        self.assertEqual(invoke.pending_steps(round_), ("exported",))
+        calls.clear()
+        with (
+            patch.dict(
+                invoke._STEP_FUNCTIONS,
+                {"exported": step("exported"), "exchange_written": step("x")},
+            ),
+            fake_index,
+        ):
+            invoke.publish_round(cfg, state, round_, steps=invoke.pending_steps(round_))
+        self.assertEqual(calls, ["exported", "x", "indexed"])  # downstream redone
+        self.assertEqual(invoke.pending_steps(round_), ())
+        self.assertEqual(round_["publication"]["pending"], {})
+
+    def test_late_caller_export_moves_the_exchange_to_the_caller_folder(self):
+        sid = "c0ffee00-1111-4222-8333-44445555aaaa"
+        _, data = self.run_codex("--parent", f"claude:{sid}")  # no caller transcript yet
+        assert data is not None
+        tid = data["thread_id"]
+        pending = data["publication"]["pending"]
+        self.assertIn("caller_exported", pending)
+        self.assertIn("linked", pending)
+        provisional = Path(data["exchange_doc"])
+        self.assertEqual(provisional.parent, session_dir_of(Path(data["peer_session_doc"])))
+        self.assertIsNone(self.thread(tid)["anchor"])  # not chosen for good
+        provisional.write_text(
+            provisional.read_text().replace(
+                "<!-- Add your notes here. This section is preserved across exports. -->",
+                "NOTE-SURVIVES-MOVE",
+            )
+        )
+        self.native("claude", sid)
+        result, _ = self.invoke("publish", tid)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.thread(tid)
+        moved = Path(state["exchange_doc"])
+        self.assertEqual(moved.parent, session_dir_of(Path(state["caller_session_doc"])))
+        self.assertFalse(provisional.exists())
+        self.assertIn("NOTE-SURVIVES-MOVE", moved.read_text())
+        self.assertEqual(state["anchor"], str(moved.parent))
+        round_ = state["rounds"][0]
+        self.assertEqual(round_["publication"]["pending"], {})
+        caller_doc = Path(state["caller_session_doc"])
+        self.assertEqual(parse_frontmatter(caller_doc.read_text())["links"], [f"child codex:{tid}"])
+
     def test_sync_drains_pending_publications(self):
         _, data = self.run_codex("--no-index")
         assert data is not None
@@ -748,6 +931,64 @@ class TestExchangeRenderer(unittest.TestCase):
         validate_head(["run_status: running", "peer_session: codex:x"])
 
 
+class TestExchangeCollisions(InvokeFixture):
+    def state(self, thread_id, peer="codex"):
+        doc = self.root / "data/codex-sessions/2026-10-17-peerdoc.md"
+        state = ThreadState(peer, thread_id, self.cwd, "review", [])
+        state.peer_session_doc = str(doc)
+        state.rounds.append({"round": 1, "prompt": f"prompt of {thread_id}"})
+        return state
+
+    def test_colliding_short_ids_never_share_a_document(self):
+        cfg = config.get_config()
+        for peer, first_id, second_id in (
+            (
+                "codex",
+                "019a0000-1111-7000-8000-abcd00000001",
+                "019a0000-2222-7000-8000-abcd00000002",
+            ),
+            (
+                "claude",
+                "deadbeef-1111-4000-8000-000000000001",
+                "deadbeef-2222-4000-8000-000000000002",
+            ),
+        ):
+            with self.subTest(peer=peer):
+                one, two = self.state(first_id, peer), self.state(second_id, peer)
+                first = write_exchange(cfg, one, describe_folder=False)
+                second = write_exchange(cfg, two, describe_folder=False)
+                assert first is not None and second is not None
+                self.assertNotEqual(first, second)
+                self.assertEqual(parse_frontmatter(first.read_text())["thread_id"], first_id)
+                self.assertEqual(parse_frontmatter(second.read_text())["thread_id"], second_id)
+                self.assertIn(hashlib.sha256(second_id.encode()).hexdigest()[:16], second.name)
+                # Re-writing both keeps each in its own file.
+                self.assertEqual(write_exchange(cfg, one, describe_folder=False), first)
+                self.assertEqual(write_exchange(cfg, two, describe_folder=False), second)
+
+    def test_refuses_to_overwrite_another_threads_document(self):
+        cfg = config.get_config()
+        one = self.state("019a0000-1111-7000-8000-abcd00000001")
+        path = write_exchange(cfg, one, describe_folder=False)
+        assert path is not None
+        intruder = self.state("019a0000-9999-7000-8000-ffff00000009")
+        intruder.anchor, intruder.exchange_doc = str(path.parent), str(path)
+        with self.assertRaisesRegex(ValueError, "belongs to thread"):
+            write_exchange(cfg, intruder, describe_folder=False)
+        self.assertEqual(parse_frontmatter(path.read_text())["thread_id"], one.thread_id)
+
+
+class TestFollowCursor(unittest.TestCase):
+    def test_cursor_is_absolute_past_the_cap(self):
+        self.assertEqual(invoke.unseen_progress(["a", "b"], 0, 0), (["a", "b"], 2))
+        self.assertEqual(invoke.unseen_progress(["a", "b", "c"], 0, 2), (["c"], 3))
+        window = [f"item {n}" for n in range(5, 205)]  # 205 seen in total, 5 dropped
+        fresh, cursor = invoke.unseen_progress(window, 5, 200)
+        self.assertEqual(fresh, [f"item {n}" for n in range(200, 205)])
+        self.assertEqual(cursor, 205)
+        self.assertEqual(invoke.unseen_progress(window, 5, 205), ([], 205))
+
+
 # ---------------------------------------------------------------------------
 # Health (pure)
 # ---------------------------------------------------------------------------
@@ -799,6 +1040,35 @@ class TestHealth(unittest.TestCase):
         self.assertFalse(identity_alive(os.getpid(), "1"))  # a reused pid
         self.assertFalse(identity_alive(None, identity[1]))
         self.assertIsNone(process_identity(2**22 + 12345))
+
+    def test_zombies_are_not_alive(self):
+        child = subprocess.Popen(["true"])
+        try:
+            # Not reaped yet: kill(pid, 0) still succeeds, but it is a zombie.
+            deadline = time.monotonic() + 10
+            while process_identity(child.pid) is not None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertIsNone(process_identity(child.pid))
+            os.kill(child.pid, 0)  # the pid still exists
+        finally:
+            child.wait()
+
+    def test_start_token_parsers(self):
+        stat = (
+            "1234 (my (odd) cmd) S 1 1234 1234 0 -1 4194560 " + " ".join(["0"] * 12) + " 98765 rest"
+        )
+        self.assertEqual(parse_linux_stat(stat, "1700000000"), "1700000000:98765")
+        zombie = stat.replace(") S ", ") Z ")
+        self.assertIsNone(parse_linux_stat(zombie, "1700000000"))
+        self.assertIsNone(parse_linux_stat(stat.replace(") S ", ") X "), "1"))
+        self.assertNotEqual(
+            parse_linux_stat(stat, "1"), parse_linux_stat(stat.replace("98765", "98766"), "1")
+        )
+        self.assertEqual(
+            parse_ps_line("Ss   Sat Oct 17 16:51:32 2026"),
+            str(int(datetime(2026, 10, 17, 16, 51, 32).timestamp())),
+        )
+        self.assertIsNone(parse_ps_line("Z+   Sat Oct 17 16:51:32 2026"))
 
     def test_heartbeat_takes_newest_source(self):
         beat = heartbeat(None, None, "2026-10-17T10:00:00+00:00", "x")

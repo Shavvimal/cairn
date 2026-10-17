@@ -44,32 +44,52 @@ class Thresholds(Protocol):
 # ---------------------------------------------------------------------------
 
 
+def parse_linux_stat(stat: str, boot_id: str) -> str | None:
+    """The start token from a ``/proc/<pid>/stat`` line, or ``None`` for a zombie.
+
+    The token is ``<btime>:<starttime ticks>``: raw clock ticks (no rounding to
+    seconds, so a pid reused within the same second still differs) plus the boot
+    identity, so a reboot can never make an old record match.
+    """
+    # Field 2 (comm) may hold spaces and parentheses; split after its closing paren.
+    fields = stat[stat.rfind(")") + 2 :].split()
+    # After comm the fields start at field 3 (state); field 22 (starttime) is index 19.
+    if len(fields) < 20 or fields[0] in ("Z", "X", "x"):
+        return None
+    if not fields[19].isdigit():
+        return None
+    return f"{boot_id}:{fields[19]}"
+
+
 def _linux_start_token(pid: int) -> str | None:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
-        return None
-    # Field 2 (comm) may hold spaces and parentheses; split after its closing paren.
-    fields = stat[stat.rfind(")") + 2 :].split()
-    # After comm the fields start at field 3 (state), so field 22 is index 19.
-    if len(fields) < 20:
-        return None
-    try:
-        ticks = int(fields[19])
         boot = next(
-            int(line.split()[1])
+            line.split()[1]
             for line in Path("/proc/stat").read_text().splitlines()
             if line.startswith("btime ")
         )
-    except (OSError, ValueError, StopIteration):
+    except (OSError, StopIteration, IndexError):
         return None
-    return str(boot + ticks // os.sysconf("SC_CLK_TCK"))
+    return parse_linux_stat(stat, boot)
+
+
+def parse_ps_line(line: str) -> str | None:
+    """The start token from ``ps -o stat=,lstart=`` output, or ``None`` for a zombie."""
+    parts = line.split()
+    if len(parts) < 2 or parts[0].startswith("Z"):
+        return None
+    text = " ".join(parts[1:])
+    try:
+        return str(int(datetime.strptime(text, "%a %b %d %H:%M:%S %Y").timestamp()))
+    except ValueError:
+        return text  # an unexpected format is still a stable token for this pid
 
 
 def _ps_start_token(pid: int) -> str | None:
     try:
         result = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
+            ["ps", "-o", "stat=,lstart=", "-p", str(pid)],
             capture_output=True,
             text=True,
             timeout=5,
@@ -77,21 +97,18 @@ def _ps_start_token(pid: int) -> str | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    text = " ".join(result.stdout.split())
-    if result.returncode or not text:
+    if result.returncode or not result.stdout.strip():
         return None
-    try:
-        return str(int(datetime.strptime(text, "%a %b %d %H:%M:%S %Y").timestamp()))
-    except ValueError:
-        return text  # an unexpected format is still a stable token for this pid
+    return parse_ps_line(result.stdout.strip())
 
 
 def process_identity(pid: int | None) -> tuple[int, str] | None:
     """``(pid, start_token)`` for a live process, else ``None``.
 
-    The token is the process start time as whole epoch seconds (``/proc`` on
-    Linux, ``ps -o lstart=`` elsewhere), so it stays the same for the life of
-    the process and differs for a later process that reuses the pid.
+    The token is the process start time (``/proc`` ticks plus boot time on Linux,
+    ``ps -o lstart=`` seconds elsewhere), stable for the life of the process and
+    different for a later process that reuses the pid. A zombie (exited, not yet
+    reaped) is not alive: it passes ``kill(pid, 0)`` but will never write again.
     """
     if not isinstance(pid, int) or pid <= 0:
         return None
@@ -237,5 +254,7 @@ __all__ = [
     "heartbeat",
     "identity_alive",
     "parse_iso",
+    "parse_linux_stat",
+    "parse_ps_line",
     "process_identity",
 ]

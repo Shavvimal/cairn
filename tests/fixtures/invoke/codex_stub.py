@@ -4,7 +4,10 @@
 # $CODEX_HOME/sessions/YYYY/MM/DD/, and the -o last-message file.
 #
 # STUB_MODE: (unset) normal | sleep (one event, a `sleep` child, then normal) |
-# fail401 | turnfail. STUB_SLEEP seconds (default 30). STUB_ANSWER final text.
+# hold (one event, touch $STUB_READY, wait for $STUB_RELEASE, then normal) |
+# rollout (one event, then only rollout records every 0.3 s for STUB_SLEEP s, then
+# normal) | closeout (one event, close stdout, sleep STUB_SLEEP s) | fail401 |
+# turnfail. STUB_SLEEP seconds (default 30). STUB_ANSWER final text.
 # STUB_LOG: append one JSON line per call (argv, env, cwd, stdin use, prompt).
 import json
 import os
@@ -102,6 +105,22 @@ record(
     },
 )
 emit({"type": "thread.started", "thread_id": thread})
+if mode == "hold":
+    Path(os.environ["STUB_READY"]).touch()
+    release = Path(os.environ["STUB_RELEASE"])
+    deadline = time.monotonic() + 120
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+if mode == "rollout":
+    until = time.monotonic() + float(os.environ.get("STUB_SLEEP", "30"))
+    while time.monotonic() < until:
+        record("event_msg", {"type": "token_count", "info": None})
+        time.sleep(0.3)
+if mode == "closeout":
+    sys.stdout.flush()
+    os.close(1)
+    time.sleep(float(os.environ.get("STUB_SLEEP", "30")))
+    sys.exit(0)
 if mode == "sleep":
     child = subprocess.Popen(["sleep", os.environ.get("STUB_SLEEP", "30")])
     if log:

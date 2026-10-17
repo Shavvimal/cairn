@@ -17,11 +17,12 @@ Round lifecycle:
    that path; on ``thread_started`` the directory is renamed to the thread id,
    the thread-id lock is taken and the pending lock released. A relative
    ``pending-<uuid>`` symlink keeps the ``-o`` path Codex was given valid until
-   the round ends.
-3. Spawn the peer in its own session with a scrubbed environment (D13), record
-   runner and peer identities (pid plus start time, D21), and pump stdout with
-   ``selectors`` on one thread: tee, parse, heartbeat, exchange refresh, the
-   wall-clock and idle watchdogs, and SIGTERM/SIGINT forwarding.
+   the round ends. The destination lock is taken before the rename.
+3. Spawn the peer in its own session with a scrubbed environment (D13) and its
+   stdout written straight to ``events-NN.jsonl``, record runner and peer
+   identities (pid plus start time, D21), and tail that file on one thread:
+   parse, heartbeat, exchange refresh, the wall-clock and idle watchdogs, and
+   SIGTERM/SIGINT forwarding. A runner that dies loses none of the stream.
 4. Finalise the outcome, save the answer, then run the publication pipeline
    (peer export, caller export, links, exchange document, index). Pipeline
    failures never change the outcome (D11); each step lands in the round's
@@ -37,7 +38,6 @@ import importlib
 import json
 import os
 import re
-import selectors
 import signal
 import subprocess
 import sys
@@ -73,6 +73,7 @@ PROGRESS_CHARS = 200
 STATE_WRITE_INTERVAL_S = 2.0
 EXCHANGE_REFRESH_S = 30.0
 TRANSCRIPT_POLL_S = 10.0
+PUMP_POLL_S = 0.1
 KILL_GRACE_S = 10.0
 INDEX_LOCK_TIMEOUT_S = 60.0
 INDEX_RETRY_INTERVAL_S = 1.0
@@ -456,10 +457,46 @@ _STEP_FUNCTIONS = {
 }
 
 
+# The steps each step feeds. When a step completes (first run or a retry), the
+# steps downstream of it are redone so they never describe stale upstream state:
+# a late peer or caller export must be linked, re-anchor the exchange document
+# and be indexed.
+DOWNSTREAM: dict[str, tuple[str, ...]] = {
+    "exported": ("linked", "exchange_written", "indexed"),
+    "caller_exported": ("linked", "exchange_written", "indexed"),
+    "linked": ("indexed",),
+    "exchange_written": ("indexed",),
+    "indexed": (),
+}
+NOT_ATTEMPTED = "not attempted yet"
+
+
 def _applicable(step: str, round_: dict) -> bool:
     if step in ("caller_exported", "linked"):
         return bool(round_.get("caller_session"))
     return True
+
+
+def applicable_steps(round_: dict) -> tuple[str, ...]:
+    return tuple(step for step in PUBLICATION_STEPS if _applicable(step, round_))
+
+
+def init_ledger(round_: dict) -> None:
+    """Record every applicable step without a completion timestamp as pending, so a
+    runner killed between steps leaves an explicit to-do list behind."""
+    publication = round_.setdefault("publication", {})
+    pending = publication.setdefault("pending", {})
+    for step in applicable_steps(round_):
+        if step not in publication:
+            pending.setdefault(step, NOT_ATTEMPTED)
+
+
+def pending_steps(round_: dict) -> tuple[str, ...]:
+    """Applicable steps of a finished round that have no completion timestamp."""
+    if not round_.get("finished_at"):
+        return ()
+    publication = round_.get("publication") or {}
+    return tuple(step for step in applicable_steps(round_) if step not in publication)
 
 
 def publish_round(
@@ -467,18 +504,22 @@ def publish_round(
     state: ThreadState,
     round_: dict,
     *,
-    steps: tuple[str, ...] = PUBLICATION_STEPS,
+    steps: tuple[str, ...] | None = None,
     index: bool = True,
     warnings: list[str] | None = None,
 ) -> list[str]:
-    """Run publication ``steps`` for one finalised round, saving the ledger after each.
+    """Run publication ``steps`` (default: every applicable step) for one finalised
+    round, in dependency order, saving the ledger after each.
 
-    Failures are recorded as ``publication.pending.<step>`` and returned as
-    warnings; they never raise and never touch the round's outcome (D11).
+    A step that completes invalidates and redoes the steps downstream of it
+    (:data:`DOWNSTREAM`). Failures are recorded as ``publication.pending.<step>`` and
+    returned as warnings; they never raise and never touch the outcome (D11).
     """
     warnings = warnings if warnings is not None else []
-    for step in steps:
-        if not _applicable(step, round_):
+    todo = set(applicable_steps(round_) if steps is None else steps)
+    init_ledger(round_)
+    for step in PUBLICATION_STEPS:
+        if step not in todo or not _applicable(step, round_):
             continue
         try:
             if step == "indexed":
@@ -496,13 +537,12 @@ def publish_round(
             warnings.append(f"{step}: {_clip(str(exc), 500)}")
         else:
             _mark(round_, step, None)
+            for later in DOWNSTREAM[step]:
+                if _applicable(later, round_) and later not in todo:
+                    _mark(round_, later, f"redo after {step}")
+                    todo.add(later)
         state.save()
     return warnings
-
-
-def pending_steps(round_: dict) -> tuple[str, ...]:
-    pending = (round_.get("publication") or {}).get("pending") or {}
-    return tuple(step for step in PUBLICATION_STEPS if step in pending)
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +590,7 @@ def _finish(
         answer_path=str(answer_path) if answer_path.exists() else None,
     )
     _mark(round_, "answer_saved", None)
+    init_ledger(round_)
 
 
 def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str | None = None):
@@ -583,6 +624,9 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
     if keychain_failure(text):
         error = KEYCHAIN_GUIDANCE
     round_["adopted_at"] = now_iso()
+    link = round_.get("pending_link")
+    if link and Path(link).is_symlink():
+        Path(link).unlink()
     _finish(
         state,
         round_,
@@ -802,7 +846,11 @@ def resolve_caller(parent: str | None) -> tuple[str | None, list[str]]:
 
 
 def scrubbed_env(depth: int, caller: str | None) -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if key not in SCRUBBED_ENV}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in SCRUBBED_ENV and not key.endswith("PLUGIN_ROOT")
+    }
     env[DEPTH_ENV] = str(depth + 1)
     env[CALLER_ENV] = caller or "unknown"
     return env
@@ -947,7 +995,6 @@ class Runner:
         if args.fork and not args.resume:
             raise UsageError("--fork needs --resume THREAD_ID (the thread to fork)")
         caller, caller_warnings = resolve_caller(args.parent)
-        self.warnings += caller_warnings
         prompt = _read_prompt(args)
 
         recorded: ThreadState | None = None
@@ -957,6 +1004,14 @@ class Runner:
             except LookupError as exc:
                 raise UsageError(str(exc)) from exc
             recorded = ThreadState.load(source_dir / "thread.json")
+            if caller is None:
+                # A follow-up from a context with no host hint continues for the
+                # session that started the thread; --parent still wins.
+                last = recorded.last_round or {}
+                caller = last.get("caller_session") or recorded.caller_session
+                if caller:
+                    caller_warnings = []
+        self.warnings += caller_warnings
         settings = self.settings(recorded)
         if recorded is None and not args.skip_self_check:
             problems = self.harness.self_check(settings.model, settings.effort, settings.fast)
@@ -1141,12 +1196,19 @@ class Runner:
                 files["stderr_path"].open("ab") as stderr,
             ):
                 try:
+                    if self.thread_id:
+                        print(
+                            f"cairn invoke: {self.peer} thread {self.thread_id} "
+                            f"round {int(self.round['round'])} (run dir {self.run_dir})",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                     process = subprocess.Popen(
                         argv,
                         cwd=str(request.cwd),
                         env=scrubbed_env(depth, caller),
                         stdin=subprocess.PIPE if request.prompt_via_stdin else subprocess.DEVNULL,
-                        stdout=subprocess.PIPE,
+                        stdout=events,
                         stderr=stderr,
                         start_new_session=True,
                         close_fds=True,
@@ -1161,7 +1223,7 @@ class Runner:
                     peer_started=identity[1] if identity else None,
                 )
                 self.state.save()
-                outcome, replay = self._pump(process, events, request, started)
+                outcome, replay = self._pump(process, files["events_path"], request, started)
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
@@ -1184,16 +1246,26 @@ class Runner:
             process.wait(KILL_GRACE_S)
 
     def _adopt_thread_id(self, thread_id: str) -> None:
-        """Rename ``pending-<uuid>/`` to the thread id and move the lock with it."""
+        """Rename ``pending-<uuid>/`` to the thread id, holding both locks across it.
+
+        The destination lock is taken before the directory appears under its final
+        name, so no reader (``publish``, ``status``) can lock it first; ``thread.json``
+        is rewritten with the real id before the pending lock is released.
+        """
         target = self.run_dir.parent / thread_id
         if target.exists():
             raise RuntimeError(f"run directory already exists for thread {thread_id}: {target}")
+        destination = ThreadLock()
+        destination.acquire(target)
         pending = self.run_dir
-        os.rename(pending, target)
-        os.symlink(target.name, pending)
+        try:
+            os.rename(pending, target)
+            os.symlink(target.name, pending)
+        except OSError:
+            destination.release()
+            raise
         self.pending_link = pending
         self.run_dir = target
-        self.lock.acquire(target)
         self.thread_id = thread_id
         self.state.thread_id = thread_id
         self.state.path = target / "thread.json"
@@ -1202,27 +1274,41 @@ class Runner:
         for key, path in _round_files(target, number).items():
             if key != "result_path":
                 self.round[key] = str(path)
+        self.round["pending_link"] = str(pending)
+        self.state.save()
+        self.lock.release()
+        self.lock = destination
+        # The skills read this line to learn the id while the run is still going.
+        print(
+            f"cairn invoke: {self.peer} thread {thread_id} round {number} (run dir {target})",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _pump(
         self,
         process: subprocess.Popen[bytes],
-        events: Any,
+        events_path: Path,
         request: InvokeRequest,
         started: float,
     ) -> tuple[str | None, Replay]:
-        assert process.stdout is not None
+        """Tail the events file the peer writes its stdout to, with the watchdogs.
+
+        The peer writes straight into ``events-NN.jsonl``, so a runner that dies
+        loses nothing: the stream keeps landing on disk and an adopting reader sees
+        the final event. The loop ends only when the process has exited and the
+        file is drained; the wall clock, idle watchdog and cancellation keep
+        running whatever the peer does with its stdout.
+        """
         replay = Replay()
-        selector = selectors.DefaultSelector()
-        stdout_fd = process.stdout.fileno()
-        selector.register(stdout_fd, selectors.EVENT_READ)
         pending_input = request.prompt.encode("utf-8") if request.prompt_via_stdin else b""
         stdin_fd: int | None = None
         if process.stdin is not None:
             stdin_fd = process.stdin.fileno()
             os.set_blocking(stdin_fd, False)
-            selector.register(stdin_fd, selectors.EVENT_WRITE)
         deadline = started + int(self.round["timeout_s"])
         idle_timeout = int(self.round["idle_timeout_s"])
+        beat_interval = max(0.05, min(TRANSCRIPT_POLL_S, idle_timeout / 4))
         last_beat = time.time()
         last_state_write = 0.0
         last_exchange = time.monotonic()
@@ -1233,8 +1319,6 @@ class Runner:
         dirty = False
 
         def handle(line: bytes) -> bool:
-            events.write(line)
-            events.flush()
             parsed = self.harness.parse_event(line.decode("utf-8", errors="replace"))
             replay.feed(parsed)
             message = False
@@ -1244,8 +1328,62 @@ class Runner:
                 message = message or event.kind == "message"
             return message
 
-        try:
+        def drain(reader: Any, *, final: bool) -> tuple[bool, bool]:
+            """Parse every complete line now on disk: ``(read_any, saw_message)``."""
+            nonlocal buffer
+            read_any = message = False
+            while chunk := reader.read(65536):
+                read_any = True
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    message = handle(line + b"\n") or message
+            if final and buffer:
+                message = handle(buffer + b"\n") or message
+                buffer = b""
+            return read_any, message
+
+        def transcript_beat() -> None:
+            nonlocal transcript_mtime, last_beat, dirty
+            if not self.thread_id:
+                return
+            path = _transcript(self.config, self.harness, self.state, self.round)
+            try:
+                mtime = path.stat().st_mtime if path is not None else None
+            except OSError:
+                mtime = None
+            if mtime is not None and mtime != transcript_mtime:
+                transcript_mtime = mtime
+                last_beat = max(last_beat, mtime)
+                dirty = True
+
+        def feed_stdin() -> None:
+            nonlocal pending_input, stdin_fd
+            if stdin_fd is None:
+                return
+            try:
+                written = os.write(stdin_fd, pending_input[:65536])
+                pending_input = pending_input[written:]
+            except BlockingIOError:
+                return
+            except BrokenPipeError:
+                pending_input = b""
+            if not pending_input:
+                assert process.stdin is not None
+                with contextlib.suppress(BrokenPipeError):
+                    process.stdin.close()
+                stdin_fd = None
+
+        with events_path.open("rb") as reader:
             while True:
+                feed_stdin()
+                exited = process.poll() is not None
+                read_any, message = drain(reader, final=exited)
+                if read_any:
+                    last_beat = time.time()
+                    dirty = True
+                if exited:
+                    break
                 now_mono = time.monotonic()
                 if self.cancel_requested:
                     self._kill(process, graceful=True)
@@ -1255,52 +1393,15 @@ class Runner:
                     self._kill(process, graceful=False)
                     outcome = "timeout"
                     break
-                if now_mono - last_transcript_check >= TRANSCRIPT_POLL_S and self.thread_id:
+                if now_mono - last_transcript_check >= beat_interval:
                     last_transcript_check = now_mono
-                    path = _transcript(self.config, self.harness, self.state, self.round)
-                    mtime = path.stat().st_mtime if path is not None and path.exists() else None
-                    if mtime is not None and mtime != transcript_mtime:
-                        transcript_mtime = mtime
-                        last_beat = max(last_beat, mtime)
-                        dirty = True
+                    transcript_beat()
                 if time.time() - last_beat >= idle_timeout:
-                    self._kill(process, graceful=False)
-                    outcome = "idle_timeout"
-                    break
-                ready = selector.select(timeout=max(0.0, min(1.0, deadline - now_mono)))
-                eof = False
-                message = False
-                for key, _mask in ready:
-                    if key.fd == stdin_fd and stdin_fd is not None:
-                        try:
-                            written = os.write(stdin_fd, pending_input[:65536])
-                            pending_input = pending_input[written:]
-                        except BlockingIOError:
-                            written = 0
-                        except BrokenPipeError:
-                            pending_input = b""
-                        if not pending_input:
-                            selector.unregister(stdin_fd)
-                            assert process.stdin is not None
-                            with contextlib.suppress(BrokenPipeError):
-                                process.stdin.close()
-                            stdin_fd = None
-                        continue
-                    chunk = os.read(stdout_fd, 65536)
-                    if not chunk:
-                        eof = True
-                        continue
-                    last_beat = time.time()
-                    buffer += chunk
-                    while b"\n" in buffer:
-                        line, buffer = buffer.split(b"\n", 1)
-                        message = handle(line + b"\n") or message
-                        dirty = True
-                if eof:
-                    if buffer:
-                        handle(buffer + b"\n")
-                        buffer = b""
-                    break
+                    transcript_beat()  # never declare idle on a stale reading
+                    if time.time() - last_beat >= idle_timeout:
+                        self._kill(process, graceful=False)
+                        outcome = "idle_timeout"
+                        break
                 now_wall = time.time()
                 if dirty and (message or now_wall - last_state_write >= STATE_WRITE_INTERVAL_S):
                     self._write_progress(replay, last_beat)
@@ -1308,15 +1409,10 @@ class Runner:
                 if message or time.monotonic() - last_exchange >= EXCHANGE_REFRESH_S:
                     last_exchange = time.monotonic()
                     self._refresh_exchange(replay, last_beat)
-            if outcome is None:
-                remaining = max(0.5, deadline - time.monotonic())
-                try:
-                    process.wait(remaining)
-                except subprocess.TimeoutExpired:
-                    self._kill(process, graceful=False)
-                    outcome = "timeout"
-        finally:
-            selector.close()
+                if not read_any:
+                    time.sleep(max(0.0, min(PUMP_POLL_S, deadline - now_mono)))
+            # Keep whatever the peer wrote while it was being stopped.
+            drain(reader, final=True)
         return outcome, replay
 
     def _write_progress(self, replay: Replay, last_beat: float) -> None:
@@ -1504,6 +1600,14 @@ def _print_status(obs: Observation, as_json: bool) -> None:
             print(f"exchange: {obs.state.exchange_doc}")
 
 
+def unseen_progress(progress: list[str], dropped: int, seen: int) -> tuple[list[str], int]:
+    """Bullets past absolute position ``seen`` and the new cursor. The replay keeps the
+    newest :data:`PROGRESS_CAP` bullets and counts the ``dropped`` older ones, so the
+    cursor is absolute and keeps advancing past the cap."""
+    fresh = [item for offset, item in enumerate(progress) if dropped + offset >= seen]
+    return fresh, max(seen, dropped + len(progress))
+
+
 def cmd_status(config: CairnConfig, thread_id: str, follow: bool, as_json: bool) -> int:
     run_dir = locate(config, thread_id)
     if not follow:
@@ -1520,10 +1624,10 @@ def cmd_status(config: CairnConfig, thread_id: str, follow: bool, as_json: bool)
             if line != last_line:
                 print(line, flush=True)
                 last_line = line
-            progress = observation_json(obs)["progress"]
-            for item in progress[seen:]:
+            dropped = obs.replay.dropped if obs.replay.progress else 0
+            fresh, seen = unseen_progress(observation_json(obs)["progress"], dropped, seen)
+            for item in fresh:
                 print(f"  - {item}", flush=True)
-            seen = len(progress)
         if obs.health.execution in ("exited", "unknown"):
             if not as_json:
                 print("answer:")
