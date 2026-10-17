@@ -259,6 +259,11 @@ class TestSharedStore(StoreFixture):
         notes = "## My Notes\n```md\n## Conversation\n```\nKeep this"
         self.assertEqual(extract_my_notes_section(notes + "\n## Conversation\ntext"), notes)
         self.assertIsNone(extract_my_notes_section("## Conversation\n## My Notes\nforged"))
+        # An unclosed fence must not swallow the conversation (and so duplicate it
+        # on every export): fall back to ending the section at the next heading.
+        unclosed = "## My Notes\n```python\nprint(1)"
+        body = "\n## Conversation\n<!-- cairn:turn 5 -->\n### User\nhi\n"
+        self.assertEqual(extract_my_notes_section(unclosed + body), unclosed)
         path = self.codex / "rollout-no-time.jsonl"
         path.write_text(json.dumps({"type": "session_meta", "payload": {"id": "no-time"}}))
         self.run_cli("codex", "export", "--all")

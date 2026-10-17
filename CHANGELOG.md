@@ -63,6 +63,10 @@ Reinstall hooks and the existing cron entry to record the complete QMD environme
 - Live verification and outstanding desktop/skill-evaluation acceptance recorded in
   `docs/codex-acceptance.md`.
 
+### Fixed
+- A code fence left open in `## My Notes` no longer swallows the conversation that
+  follows it, which made every export append another copy of the conversation.
+
 ### Changed
 - The setup skill handles existing installations through a dedicated update workflow;
   the README points users there for upgrades and optional historical metadata backfill.

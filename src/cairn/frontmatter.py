@@ -174,22 +174,35 @@ def read_frontmatter_head(path: Path, limit: int = MAX_FRONTMATTER_BYTES) -> dic
 
 
 def extract_my_notes_section(content: str) -> str | None:
-    """Extract the '## My Notes' section from existing content."""
+    """Extract the '## My Notes' section from existing content.
+
+    A ``## `` heading inside a fenced code block does not end the section. A fence
+    left open to the end of the file is treated as plain text instead: otherwise
+    the section would swallow the conversation that follows it, and every export
+    would append one more copy of that conversation to the file.
+    """
     lines = content.splitlines()
+    result = _scan_my_notes(lines, track_fences=True)
+    if result == "unclosed":
+        return _scan_my_notes(lines, track_fences=False)
+    return result
+
+
+def _scan_my_notes(lines: list[str], *, track_fences: bool) -> str | None:
     start = None
     fence = None
     for index, line in enumerate(lines):
-        stripped = line.lstrip()
-        match = re.match(r"(`{3,}|~{3,})", stripped)
-        if match:
-            token = match[1]
-            if fence is None:
-                fence = token
-            elif token[0] == fence[0] and len(token) >= len(fence):
-                fence = None
-            continue
-        if fence is not None:
-            continue
+        if track_fences:
+            match = re.match(r"(`{3,}|~{3,})", line.lstrip())
+            if match:
+                token = match[1]
+                if fence is None:
+                    fence = token
+                elif token[0] == fence[0] and len(token) >= len(fence):
+                    fence = None
+                continue
+            if fence is not None:
+                continue
         if start is None:
             if line == "## Conversation":
                 return None
@@ -197,6 +210,8 @@ def extract_my_notes_section(content: str) -> str | None:
                 start = index
         elif line.startswith("## "):
             return "\n".join(lines[start:index]).rstrip()
+    if start is not None and fence is not None:
+        return "unclosed"
     return "\n".join(lines[start:]).rstrip() if start is not None else None
 
 
