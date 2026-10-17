@@ -94,43 +94,41 @@ Collection registration is automatic and self-healing: every `cairn sync` idempo
 > [!NOTE]
 > The first embed downloads ~2GB of models (embeddings + reranker + query
 > expansion) and takes a few minutes — `/cairn:setup` waits for it. Every run
-> after that is incremental — only new or changed chunks are embedded.
+> after that is incremental — only new or changed documents need embedding.
 
 ### Updating cairn
 
-cairn has **two pieces that share one version**: the plugin (skills + hook) and the `cairn` CLI engine. The versions in root `plugin.json`, `.codex-plugin/plugin.json`, and `.claude-plugin/plugin.json` are locked to the engine's `__version__` (CI fails if they drift), so a given release is one number across both.
+Run the [setup skill](skills/setup/SKILL.md) again and ask it to update Cairn:
 
-They update through different channels, so update both:
+- **Claude Code:** `/cairn:setup`
+- **Codex:** select **cairn:setup** in `/skills` or the `$` picker and explicitly run it.
 
-```bash
-uv tool upgrade cairn     # the engine (the CLI installed by /cairn:setup)
-```
+Setup detects existing installations and follows its [update workflow](skills/setup/references/updating.md):
+upgrade the engine and plugin, preserve your configuration, refresh hooks and any existing
+cron entry, run incremental sync, and verify search. It also walks you through required
+host restarts and hook trust checks.
 
-```text
-/plugin update            # the plugin (skills + hook); also auto-updates at startup
-/reload-plugins           # apply it to the running session
-```
-
-`cairn doctor` warns when the plugin and engine versions have drifted (e.g. the plugin auto-updated but the engine didn't) and tells you which one to update. If you installed before a release and a new skill calls a CLI subcommand your engine lacks, run `uv tool upgrade cairn`.
-
-For Codex, after upgrading the engine:
+For a manual Codex update from your terminal:
 
 ```sh
+uv tool upgrade cairn
 codex plugin marketplace upgrade cairn
 codex plugin add cairn@cairn
 cairn hook install --harness codex
 ```
 
-Restart and review changed hooks. For Claude, run `cairn hook install --harness claude`
-once after upgrading to 2.4.0 and again after any engine reinstall. Diagnose package drift
-with `cairn doctor --harness HOST --plugin-manifest /absolute/installed/package/plugin.json`
-(use `.claude-plugin/plugin.json` for Claude). Cron and hooks use recorded absolute paths.
+Then restart Codex and review changed hooks. For Claude, upgrade the engine with
+`uv tool upgrade cairn`, run `/plugin update cairn@cairn` and `/reload-plugins`, then
+`cairn hook install --harness claude`. The guided workflow also refreshes existing
+cron entries and verifies incremental sync and search.
 
-**Upgrade order is engine first, then plugin.** Plugins auto-update, so the bundled
-launcher (`hooks/launch.sh`) tolerates the reverse: without a recorded engine it uses
-`cairn` from PATH, and if that engine is 2.3.x (no `cairn hook` command) it runs the
-legacy `cairn sync --hook` detached and logs the upgrade command. It never calls the
-macOS `/usr/bin/python3` stub unless the Command Line Tools are installed.
+If your installed setup skill still says “fresh setup only”, refresh the plugin using
+the [Claude](references/harnesses/claude.md) or [Codex](references/harnesses/codex.md)
+instructions, then reload/restart the host to load the updated skill.
+
+**Existing stores need no conversion or full re-index for 2.4.0.** Keep your Markdown
+and QMD database. The setup skill explains optional historical metadata backfill and
+its re-embedding cost; there is no separate “v2 store” to create.
 
 ### Disable or remove
 

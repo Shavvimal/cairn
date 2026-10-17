@@ -66,7 +66,7 @@ class Catalog:
         self.snapshot_ns = 0
         self.dirty = False
         self.generation = 0  # bumps on any change to ``entries``; callers key indexes on it
-        self.stats = {"walks": 0, "parsed": 0, "reused": 0}
+        self.stats = {"walks": 0, "parsed": 0, "reused": 0, "rejected": 0}
 
     # ---- paths ----
 
@@ -97,15 +97,40 @@ class Catalog:
         return found
 
     def _load(self) -> tuple[int, dict[str, Entry]]:
+        def reject() -> tuple[int, dict[str, Entry]]:
+            self.stats["rejected"] += 1
+            return 0, {}
+
         try:
             data = json.loads(catalog_path(self.output_dir).read_text(encoding="utf-8"))
-            if data.get("version") != CATALOG_VERSION:
-                return 0, {}
-            return int(data["snapshot_ns"]), {
-                rel: Entry(**entry) for rel, entry in data["entries"].items()
-            }
-        except (OSError, ValueError, TypeError, KeyError):
+            if not isinstance(data, dict) or data.get("version") != CATALOG_VERSION:
+                return reject()
+            snapshot = data["snapshot_ns"]
+            raw_entries = data["entries"]
+            if type(snapshot) is not int or snapshot <= 0 or not isinstance(raw_entries, dict):
+                return reject()
+            entries = {}
+            for rel, raw in raw_entries.items():
+                if not isinstance(raw, dict):
+                    return reject()
+                entry = Entry(**raw)
+                if any(
+                    type(value) is not int
+                    for value in (entry.mtime_ns, entry.ctime_ns, entry.size, entry.ino)
+                ):
+                    return reject()
+                if not isinstance(entry.frontmatter, dict) or any(
+                    not isinstance(value, str)
+                    and not (isinstance(value, list) and all(isinstance(v, str) for v in value))
+                    for value in entry.frontmatter.values()
+                ):
+                    return reject()
+                entries[rel] = entry
+            return snapshot, entries
+        except FileNotFoundError:
             return 0, {}
+        except (OSError, ValueError, TypeError, KeyError):
+            return reject()
 
     def _parse(self, rel: str, st: os.stat_result) -> Entry | None:
         """Build an entry from ``st`` (taken before the read) and the file's frontmatter."""

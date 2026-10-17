@@ -177,7 +177,7 @@ def record_from_frontmatter(
             last = _date(fm.get("last_activity"))
         activity = tuple(t for t in (first, last) if t is not None)
         precision = "endpoints"
-        date = _date(fm.get("date"))
+        date = _utc_day(fm.get("date"))
         if date is not None and first is None and fm.get("time_precision") != "unknown":
             activity = (*activity, date)
             precision = "date"

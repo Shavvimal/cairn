@@ -1,6 +1,6 @@
 ---
 name: setup
-description: One-time setup for cairn on this machine - install prerequisites and the engine, write the per-user config, bootstrap the QMD collections, run the first embed, register the hourly sync, and verify search actually returns results. Use only when the user explicitly requests Cairn setup or runs onboarding. Side-effectful - never auto-invoke.
+description: Install or update Cairn on this machine, including its engine, plugin, hooks, scheduled sync, and search verification. Preserve existing configuration and stores during updates. Use only when the user explicitly invokes Cairn setup, update, or onboarding. Side-effectful - never auto-invoke.
 disable-model-invocation: true
 allowed-tools: Bash, Read, Edit, AskUserQuestion, Monitor
 ---
@@ -9,23 +9,26 @@ Read [the harness contract](../../references/harnesses/contract.md) and its rele
 Claude or Codex reference from this installed package before host-specific operations.
 
 
-# Install Cairn
+# Install or update Cairn
 
-Guided, user-initiated setup. It installs the prerequisites, installs the `cairn` CLI
-globally, writes the per-user config, **bootstraps the QMD collections and runs the first
-embed**, registers the hourly sync, and verifies that **search actually returns results** -
-not just that the plumbing is wired. Because it installs software, writes
-`~/.config/cairn/config.json`, and edits the crontab, only the user can trigger it
+Guided, user-initiated installation or update. Verify that **search actually returns
+results** and report host lifecycle checks separately. Because this skill installs
+software and can write configuration and the crontab, only the user can trigger it
 (Claude `disable-model-invocation: true`; Codex `allow_implicit_invocation: false`).
 
-Drive the steps in order, pausing where noted. **Stop and report if any step fails; do not
-silently continue.** A green `cairn doctor` is **not** the finish line - step 7 is: a real
-query returning hits.
+## Choose the workflow first
 
-> **Already installed and just need the latest?** This is a fresh setup. To *update* an
-> existing install, upgrade the engine and the plugin together (they're version-locked):
-> `uv tool upgrade cairn`, then update the plugin using the relevant harness reference. `cairn doctor` warns
-> when the two have drifted. See "Updating cairn" in the README.
+- **Existing installation or update request:** read [Updating an existing installation](references/updating.md)
+  and follow that workflow. Detect the current installation with `command -v cairn`,
+  `cairn --version`, and `cairn config show --json` when available. An existing config or
+  store still counts if the CLI is missing or broken; repair the engine without resetting
+  the user's setup. Check `CAIRN_CONFIG` or the per-user config under
+  `${XDG_CONFIG_HOME:-$HOME/.config}/cairn/config.json` before assuming a fresh install.
+- **First installation:** follow steps 1–7 below. Collect only missing choices.
+
+**Stop and report if a required step fails; do not silently continue.** A green
+`cairn doctor` alone does not establish working search. Do not run the fresh-install
+configuration steps during an update.
 
 ## 1. Preflight - check ALL prerequisites at once
 

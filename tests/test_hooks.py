@@ -353,6 +353,7 @@ class TestLauncher(StoreFixture):
     def test_recorded_launcher_is_posix_sh_and_exports_environment(self):
         self.run_cli("hook", "install")
         text = hooks.launcher_path().read_text()
+        self.assertEqual((Path.home() / ".config/cairn/hook-launcher.env").read_text(), text)
         for key in ("CAIRN_PYTHON=", "CAIRN_CONFIG=", "CAIRN_PATH="):
             self.assertIn(key, text)
         probe = subprocess.run(
@@ -361,6 +362,13 @@ class TestLauncher(StoreFixture):
             text=True,
         )
         self.assertEqual(probe.stdout.strip(), str(self.config.resolve()))
+
+    def test_uninstall_removes_both_launcher_copies(self):
+        self.run_cli("hook", "install")
+        paths = hooks.launcher_paths()
+        self.assertEqual(len(paths), 2)
+        self.run_cli("hook", "uninstall")
+        self.assertTrue(all(not path.exists() for path in paths))
 
 
 class TestRetentionAndStatus(StoreFixture):

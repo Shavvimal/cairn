@@ -101,6 +101,39 @@ temporary-profile method above before the PR leaves draft.
 
 ## Acceptance still requiring evidence
 
+### Second review fixes (2026-10-17)
+
+The six additional review findings are fixed. `make check` passes lint, mypy and
+193 tests; explicit formatting and `git diff --check` also pass. New regression
+coverage exercises both installed hook paths under a different host environment,
+cross-process contention on shared QMD configuration/database paths, collection
+timeouts followed by successful retry, legacy Claude sidechain skips, date-only
+recall in four timezones, malformed cache structures, and annotation-preserving
+upgrades with unavailable native history left intact.
+
+A separate real-QMD check in temporary directories installed the launcher with a
+selected configuration/cache, then invoked it from a different environment. The
+detached worker completed; the new `marigold` text returned one hit from the selected
+index and zero from the host's alternate index. A subsequent metadata upgrade and
+`qmd update` kept the annotation and searchable result in the existing database.
+This check did not run embedding or a real host shutdown; it does not close the
+live-host acceptance gaps above or below. The user's existing store was inspected
+read-only, with no exports or index updates against it.
+
+### Open host and platform checks
+
+- **Remaining code review findings:** failed hook requests have no attempt cap or
+  terminal failure retention policy. Document/collection locks still live inside
+  the Markdown corpus, and QMD locks live beside its config/database. These are
+  separate medium findings and are not resolved by the six fixes above.
+- **Catalog rejection diagnostics:** `Catalog.stats["rejected"]` counts invalid or
+  unreadable cache loads; a missing cache is an ordinary cold load and is not counted.
+- **Bundled launcher environment follow-up:** installation now records identical
+  environments under the selected XDG config home and `~/.config/cairn`; the shell
+  launcher falls back to the latter when discovery misses. Regression coverage
+  exercises both wrong and absent host `XDG_CONFIG_HOME`, plus removal of both copies.
+  The follow-up `make check` passes all 194 tests.
+
 - **Codex desktop:** no Codex desktop application is installed in this environment. Desktop
   package loading, onboarding, hook trust, lifecycle and resume UI remain unverified.
 - **Real hourly scheduling:** setup's crontab read/write flow was exercised through an

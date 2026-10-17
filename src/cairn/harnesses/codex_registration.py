@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from ..config import CairnConfig, user_config_path
+from ..runtime import background_environment
 from ..storage import atomic_write, locked
 from .codex import Codex
 
@@ -42,8 +43,7 @@ def configure(config: CairnConfig | None, *, remove: bool = False) -> str:
         command = shlex.join(
             [
                 "/usr/bin/env",
-                f"CAIRN_CONFIG={config.config_path.resolve()}",
-                f"PATH={os.environ.get('PATH', '')}",
+                *[f"{key}={value}" for key, value in background_environment(config).items()],
                 sys.executable,
                 "-m",
                 "cairn",

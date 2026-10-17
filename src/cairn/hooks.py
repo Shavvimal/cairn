@@ -24,8 +24,9 @@ from pathlib import Path
 
 from .config import CairnConfig, ConfigError, get_config, user_config_path
 from .harnesses import SessionEvent, get_harness
-from .qmd import ensure_collection, list_collections
+from .qmd import ensure_collection, list_collections, locked_index
 from .registry import BY_NAME
+from .runtime import background_environment
 from .storage import atomic_write, locked
 
 # Terminal requests (completed/disabled) are evidence, not work; keep a week of them.
@@ -35,16 +36,6 @@ RECENT_COMPLETED = 10  # completed requests shown by `hook status` without --all
 
 def job_dir(config: CairnConfig) -> Path:
     return config.data_root / "sync-jobs"
-
-
-def index_lock(config: CairnConfig) -> Path:
-    # QMD can be shared by several Cairn configurations. Lock by the actual QMD
-    # environment, rather than a collection/data_root, across hook/cron/manual.
-    cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
-    identity = os.environ.get(
-        "QMD_CONFIG_DIR", os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-    )
-    return cache / "cairn" / ("qmd-" + hashlib.sha256(identity.encode()).hexdigest()[:16] + ".lock")
 
 
 def allowed(config: CairnConfig, event: SessionEvent) -> bool:
@@ -129,7 +120,7 @@ def _process(config: CairnConfig, event: SessionEvent) -> None:
     )
     if result.returncode:
         raise RuntimeError(f"target export failed: {(result.stderr or result.stdout)[-2000:]}")
-    with locked(index_lock(config)):
+    with locked_index():
         known = list_collections(config.qmd_binary)
         status = ensure_collection(
             source.collection, config.output_dir(source.collection), config.qmd_binary, known
@@ -229,20 +220,27 @@ def launcher_path() -> Path:
     return user_config_path().parent / "hook-launcher.env"
 
 
+def launcher_paths() -> tuple[Path, ...]:
+    """Keep a stable discovery copy for hosts that omit the setup shell's XDG home."""
+    return tuple(dict.fromkeys((launcher_path(), Path.home() / ".config/cairn/hook-launcher.env")))
+
+
 def install_launcher(config: CairnConfig) -> Path:
-    """Record the engine's interpreter, config and PATH for ``hooks/launch.sh``.
+    """Record the engine and background environment for ``hooks/launch.sh``.
 
     The file is POSIX ``sh`` assignments (values quoted with :func:`shlex.quote`), so
     the bundled launcher can source it without needing any Python to bootstrap.
     """
-    path = launcher_path()
+    environment = background_environment(config)
     values = {
         "CAIRN_PYTHON": sys.executable,
-        "CAIRN_CONFIG": str(config.config_path.resolve()),
-        "CAIRN_PATH": os.environ.get("PATH", ""),
+        "CAIRN_PATH": environment.pop("PATH"),
+        **environment,
     }
-    atomic_write(path, "".join(f"{k}={shlex.quote(v)}\n" for k, v in values.items()))
-    return path
+    content = "".join(f"export {k}={shlex.quote(v)}\n" for k, v in values.items())
+    for path in launcher_paths():
+        atomic_write(path, content)
+    return launcher_path()
 
 
 def compact_status(report: dict, show_all: bool) -> dict:
@@ -303,7 +301,8 @@ def main(argv: list[str] | None = None) -> int:
                 from .harnesses.codex_registration import configure
 
                 print(configure(None, remove=True))
-                launcher_path().unlink(missing_ok=True)
+                for path in launcher_paths():
+                    path.unlink(missing_ok=True)
             return 0
         config = get_config()
         if args.command == "install":

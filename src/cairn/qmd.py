@@ -11,9 +11,30 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from .config import get_config
+from .runtime import qmd_resources
+from .storage import locked
+
+COLLECTION_TIMEOUT = 30  # discovery/registration must not hold sync locks indefinitely
+
+
+@contextmanager
+def locked_index(*, blocking: bool = True) -> Iterator[None]:
+    """Serialize writers sharing either QMD's config or its database.
+
+    Lock beside each canonical resource so aliases, differing cache homes, and
+    explicit/default environment settings all coordinate. Acquire in path order
+    to avoid deadlocks when only one resource is shared by two configurations.
+    """
+    paths = sorted({path.with_name(f".{path.name}.cairn.lock") for path in qmd_resources()})
+    with ExitStack() as stack:
+        for path in paths:
+            stack.enter_context(locked(path, blocking=blocking))
+        yield
 
 
 def add_context(path: str, description: str, qmd_binary: str | None = None) -> bool:
@@ -101,11 +122,15 @@ def list_collections(qmd_binary: str | None = None) -> set[str]:
     caller re-add collections forever.
     """
     qmd_binary = qmd_binary or get_config().qmd_binary
-    result = subprocess.run(
-        [qmd_binary, "collection", "list"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [qmd_binary, "collection", "list"],
+            capture_output=True,
+            text=True,
+            timeout=COLLECTION_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"qmd collection list timed out after {COLLECTION_TIMEOUT}s") from exc
     if result.returncode != 0:
         raise RuntimeError(
             f"`qmd collection list` failed (exit {result.returncode}): "
@@ -147,11 +172,15 @@ def ensure_collection(
         known = list_collections(qmd_binary)
     if name in known:
         return "exists"
-    result = subprocess.run(
-        [qmd_binary, "collection", "add", str(path), "--name", name],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [qmd_binary, "collection", "add", str(path), "--name", name],
+            capture_output=True,
+            text=True,
+            timeout=COLLECTION_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"qmd collection add timed out after {COLLECTION_TIMEOUT}s") from exc
     if result.returncode != 0:
         if result.stderr.strip():
             print(f"      {result.stderr.strip()}", file=sys.stderr)

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+from copy import deepcopy
 from pathlib import Path
 
 from cairn import config, mutations
@@ -46,6 +47,7 @@ class TestCatalog(CatalogFixture):
             self.native("codex", sid)
         self.run_cli("codex", "export", "--all")
         catalog_path(self.output_dir()).unlink()
+        self.assertEqual(load_catalog(self.output_dir()).stats["rejected"], 0)
         self.assertEqual(self.records(), self.full_scan())
         saved = json.loads(catalog_path(self.output_dir()).read_text())
         self.assertEqual(len(saved["entries"]), 2)
@@ -60,6 +62,7 @@ class TestCatalog(CatalogFixture):
         first.save()
         second = load_catalog(self.output_dir())
         self.assertEqual((second.stats["parsed"], second.stats["reused"]), (0, 2))
+        self.assertEqual(second.stats["rejected"], 0)
         self.assertFalse(second.dirty)
 
     def test_changed_file_is_reparsed(self):
@@ -156,6 +159,40 @@ class TestCatalog(CatalogFixture):
             saved_path.write_text(content)
             self.assertEqual([r.session_id for r in self.records()], ["rebuild"])
             self.assertEqual(json.loads(saved_path.read_text())["version"], 1)
+
+    def test_valid_json_with_invalid_cache_shapes_rebuilds(self):
+        self.native("codex", "rebuild-shapes")
+        self.run_cli("codex", "export", "--all")
+        saved_path = catalog_path(self.output_dir())
+        valid = json.loads(saved_path.read_text())
+        rel = next(iter(valid["entries"]))
+        malformed: list[object] = [
+            [],
+            None,
+            1,
+            "cache",
+            {**valid, "entries": []},
+            {**valid, "snapshot_ns": []},
+        ]
+        replacement: object
+        for replacement in (None, [], {"unknown": True}):
+            malformed.append({**valid, "entries": {rel: replacement}})
+        for field, value in (
+            ("mtime_ns", []),
+            ("size", "123"),
+            ("frontmatter", []),
+            ("frontmatter", {"type": {"nested": "mapping"}}),
+            ("frontmatter", {"activity_dates": [123]}),
+        ):
+            bad = deepcopy(valid)
+            bad["entries"][rel][field] = value
+            malformed.append(bad)
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                saved_path.write_text(json.dumps(payload))
+                self.assertEqual(load_catalog(self.output_dir()).stats["rejected"], 1)
+                self.assertEqual([r.session_id for r in self.records()], ["rebuild-shapes"])
+                self.assertEqual(json.loads(saved_path.read_text())["version"], 1)
 
     def test_export_write_through_without_rewalk(self):
         paths = {sid: self.native("codex", sid) for sid in ("one", "two")}

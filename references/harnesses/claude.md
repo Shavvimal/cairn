@@ -36,8 +36,8 @@ A foreground `Bash` call dies long before a ten-minute model download finishes, 
 
 3. Decide from evidence, then stop the monitor (the `tail -f` never exits on its own):
    - **Success:** the log ends with `=== done ===` and the background task exits 0.
-     Note N/M; `Embedded 0 chunks` means search will be empty, so investigate before
-     continuing.
+     Note N/M. Zero newly embedded chunks can mean the existing index is already
+     current; check total documents/vectors and a real query before declaring success.
    - **Failure:** the log shows `=== FAILED ===` or an error line, or the task exits
      non-zero. `Read` the full log and stop and report; do not verify a broken index.
    - **Silence or timeout:** `Read` the tail of the log. Download or percentage lines

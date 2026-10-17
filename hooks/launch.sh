@@ -2,7 +2,8 @@
 # Cairn SessionEnd launcher. POSIX sh only: nothing here needs Python to bootstrap.
 #
 # Resolution order (first match wins):
-#   1. The engine recorded by `cairn hook install` (hook-launcher.env).
+#   1. The engine and QMD environment recorded by `cairn hook install`
+#      (hook-launcher.env).
 #   2. `cairn` on the inherited PATH. An engine too old for `cairn hook` (2.3.x)
 #      is detected and the legacy `cairn sync --hook` runs detached instead.
 #   3. A python3 that can import cairn. /usr/bin/python3 is only tried when the
@@ -15,6 +16,11 @@
 # Plugins auto-update, so step 2 keeps a violated order working, degraded.
 
 launcher="${XDG_CONFIG_HOME:-$HOME/.config}/cairn/hook-launcher.env"
+# A GUI host may omit or replace the XDG home used at installation. The installer
+# keeps a discovery copy at this stable location; an existing host-specific file wins.
+if [ ! -f "$launcher" ]; then
+    launcher="$HOME/.config/cairn/hook-launcher.env"
+fi
 hint="run: uv tool upgrade cairn && cairn hook install"
 
 if [ -f "$launcher" ]; then

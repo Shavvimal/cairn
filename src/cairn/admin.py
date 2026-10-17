@@ -409,20 +409,10 @@ def _without_cairn_lines(lines: list[str]) -> list[str]:
 
 
 def _cron_install() -> int:
+    from .runtime import background_environment
+
     config = get_config()
-    environment = {
-        "CAIRN_CONFIG": str(config.config_path.resolve()),
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-    }
-    for name in (
-        "XDG_CONFIG_HOME",
-        "XDG_CACHE_HOME",
-        "QMD_CONFIG_DIR",
-        "CODEX_HOME",
-        "CLAUDE_CONFIG_DIR",
-    ):
-        if name in os.environ:
-            environment[name] = os.environ[name]
+    environment = background_environment(config)
     argv = [
         "/usr/bin/env",
         *[f"{k}={v}" for k, v in environment.items()],

@@ -48,9 +48,12 @@ class StoreFixture(unittest.TestCase):
         )
         self.env = dict(
             os.environ,
+            HOME=str(self.root / "home"),
             CAIRN_CONFIG=str(self.config),
             XDG_CACHE_HOME=str(self.root / "cache"),
             XDG_CONFIG_HOME=str(self.root / "xdg"),
+            QMD_CONFIG_DIR=str(self.root / "xdg/qmd"),
+            INDEX_PATH=str(self.root / "cache/qmd/index.sqlite"),
         )
         self.patch = patch.dict(os.environ, self.env)
         self.patch.start()
@@ -112,6 +115,85 @@ class StoreFixture(unittest.TestCase):
 
 
 class TestSharedStore(StoreFixture):
+    def test_legacy_date_is_the_same_utc_day_in_every_timezone(self):
+        folder = self.root / "data/claude-code-sessions"
+        folder.mkdir(parents=True)
+        (folder / "legacy.md").write_text(
+            "---\ntype: claude-session\nsession_id: summer\ndate: 2026-07-01\n---\nNotes\n"
+        )
+        for zone in ("UTC", "Europe/London", "Asia/Kolkata", "America/Los_Angeles"):
+            for day, expected in (("2026-06-30", []), ("2026-07-01", ["summer"])):
+                with self.subTest(zone=zone, day=day):
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "cairn",
+                            "recall",
+                            "list",
+                            day,
+                            "--all-projects",
+                            "--json",
+                        ],
+                        env={**self.env, "TZ": zone},
+                        text=True,
+                        capture_output=True,
+                        check=True,
+                    )
+                    self.assertEqual([r["session_id"] for r in json.loads(result.stdout)], expected)
+
+    def test_claude_sidechains_are_skipped_without_failing_refresh(self):
+        self.native("claude", "main-session")
+        self.native("claude", "agent-legacy")
+        self.run_cli("claude", "export", "--all")
+        result = self.run_cli(
+            "recall",
+            "list",
+            "2026-03-28",
+            "--source",
+            "claude",
+            "--all-projects",
+            "--min-msgs",
+            "1",
+            "--refresh",
+            "--json",
+        )
+        self.assertEqual([r["session_id"] for r in json.loads(result.stdout)], ["main-session"])
+        (self.claude / "-demo/broken.jsonl").write_text('{"incomplete":')
+        self.assertNotEqual(self.run_cli("claude", "export", "--all", check=False).returncode, 0)
+
+    def test_legacy_upgrade_preserves_annotations_and_unavailable_history(self):
+        for source, collection in (("claude", "claude-code-sessions"), ("codex", "codex-sessions")):
+            self.native(source, "upgrade")
+            folder = self.root / "data" / collection
+            folder.mkdir(parents=True)
+            legacy = (
+                f"---\ntype: {source}-session\nsession_id: upgrade\ndate: 2026-03-28\n"
+                'title: "My chosen title"\nstatus: done\ntags:\n  - important\nrating: 8\n'
+                "comments: |\n  Keep this comment\n---\n# My chosen title\n"
+                "## My Notes\nKeep my handwritten notes\n\n## Conversation\nOld text\n"
+            )
+            path = folder / "existing-name.md"
+            path.write_text(legacy)
+            missing = folder / "native-no-longer-exists.md"
+            missing.write_text(legacy.replace("session_id: upgrade", "session_id: unavailable"))
+            self.run_cli(source, "export", "--all")
+            content = path.read_text()
+            fm = parse_frontmatter(content)
+            self.assertEqual(fm["cairn_schema"], "1")
+            self.assertEqual(fm["status"], "done")
+            self.assertEqual(fm["title"], "My chosen title")
+            self.assertEqual(fm["tags"], ["important"])
+            self.assertEqual(fm["rating"], "8")
+            self.assertIn("Keep this comment", fm["comments"])
+            self.assertIn("Keep my handwritten notes", content)
+            self.assertEqual(
+                missing.read_text(),
+                legacy.replace("session_id: upgrade", "session_id: unavailable"),
+            )
+            self.run_cli(source, "export", "--all")
+            self.assertEqual(path.read_text(), content)
+
     def test_cross_source_activity_gaps_and_utc_boundaries(self):
         for source in ("claude", "codex"):
             self.native(source, "same-id")

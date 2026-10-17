@@ -27,8 +27,9 @@ A single shell call cannot wait out a ten-minute model download, so run
    `=== done ===`; progress prints percentages, "model" or "download"; failures show
    `Error`/`Traceback`/`failed`/`Killed`/`OOM` or `=== FAILED ===`.
 
-3. Decide from evidence: exit 0 plus `=== done ===` is success (note N/M; zero chunks
-   means an empty index). A non-zero exit or `=== FAILED ===` means stop and report with
+3. Decide from evidence: exit 0 plus `=== done ===` is sync success. Note N/M; zero new
+   chunks can mean the index is already current, so verify total documents/vectors and
+   a real query. A non-zero exit or `=== FAILED ===` means stop and report with
    the log. Silence with download lines means keep polling; silence without them means
    report it as wedged. Elapsed time is never completion.
 

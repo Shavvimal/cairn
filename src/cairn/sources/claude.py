@@ -407,6 +407,8 @@ class ClaudeSource(ConversationSource):
         failed = False
         for session_file in sessions:
             session_id = session_file.stem
+            if session_id.startswith("agent-"):
+                continue  # intentionally excluded side-thread, not a failed export
             try:
                 if self.sync_session(session_id, str(session_file), quiet=args.quiet) is None:
                     failed = True

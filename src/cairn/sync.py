@@ -16,10 +16,9 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import CairnConfig, get_config
-from .qmd import ensure_collection, list_collections
+from .qmd import ensure_collection, list_collections, locked_index
 from .registry import SOURCE_COLLECTIONS as SOURCE_COLLECTIONS
 from .registry import SOURCES as _BINDINGS
-from .storage import locked
 
 
 def _log_file() -> Path:
@@ -184,7 +183,11 @@ def main(argv: list[str] | None = None):
     parser.add_argument(
         "--cron", action="store_true", help="Full mode for the cron job (all sources)"
     )
-    parser.add_argument("--all", action="store_true", help="Everything including a full re-embed")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Sync all enabled sources and embed incrementally (same as --cron)",
+    )
     args = parser.parse_args(argv)
 
     config = get_config()
@@ -193,7 +196,7 @@ def main(argv: list[str] | None = None):
     rotate_log()
     log(f"\n=== context-sync ({mode}) {datetime.now().isoformat()} ===")
 
-    from .hooks import index_lock, worker
+    from .hooks import worker
 
     success = True
     try:
@@ -206,7 +209,7 @@ def main(argv: list[str] | None = None):
         for name, command in steps:
             success = run_step(name, command) and success
 
-        with locked(index_lock(config)):
+        with locked_index():
             success = run_inproc("qmd-collections", lambda: _ensure_collections(config)) and success
             success = run_step("qmd-update", [qmd, "update"]) and success
             if mode in ("cron", "all"):
