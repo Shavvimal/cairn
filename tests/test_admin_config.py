@@ -56,8 +56,12 @@ class TestConfigShow(_ConfigFixture):
         data = self._show_json()
         self.assertEqual(data["data_root"], "/tmp/ctx")
         self.assertEqual(
-            set(data), {"config_path", "data_root", "qmd_binary", "cron_schedule", "collections"}
+            set(data),
+            {"config_path", "data_root", "qmd_binary", "cron_schedule", "collections", "invoke"},
         )
+        self.assertEqual(data["invoke"]["codex"]["model"], "gpt-6-astra")
+        self.assertIsNone(data["invoke"]["claude"]["effort"])
+        self.assertEqual(data["invoke"]["claude"]["profile"], "review")
         enabled = {c["name"]: c["enabled"] for c in data["collections"]}
         self.assertTrue(enabled["claude-code-sessions"])
         self.assertTrue(enabled["codex-sessions"])
@@ -93,6 +97,53 @@ class TestConfigSet(_ConfigFixture):
         with mock.patch.object(admin, "load_config_from", side_effect=config.ConfigError("boom")):
             self.assertEqual(admin._config_set("qmd_binary", "/opt/qmd"), 1)
         self.assertEqual(self.cfg_path.read_text(encoding="utf-8"), before)
+
+
+class TestConfigSetInvoke(_ConfigFixture):
+    def test_set_invoke_effort_round_trips(self):
+        self.assertEqual(admin._config_set("invoke.codex.effort", "medium"), 0)
+        config.get_config.cache_clear()
+        self.assertEqual(self._show_json()["invoke"]["codex"]["effort"], "medium")
+
+    def test_set_invoke_int_and_null(self):
+        self.assertEqual(admin._config_set("invoke.claude.timeout_s", "600"), 0)
+        self.assertEqual(admin._config_set("invoke.codex.model", "null"), 0)
+        config.get_config.cache_clear()
+        invoke = self._show_json()["invoke"]
+        self.assertEqual(invoke["claude"]["timeout_s"], 600)
+        self.assertIsNone(invoke["codex"]["model"])
+
+    def test_bad_invoke_keys_are_rejected(self):
+        before = self.cfg_path.read_text(encoding="utf-8")
+        self.assertEqual(admin._config_set("invoke.bogus.x", "1"), 1)
+        self.assertEqual(admin._config_set("invoke.codex.bogus", "1"), 1)
+        self.assertEqual(admin._config_set("invoke.codex.timeout_s", "soon"), 1)
+        self.assertEqual(admin._config_set("invoke.codex.timeout_s", "-5"), 1)
+        self.assertEqual(admin._config_set("invoke.codex.profile", "yolo"), 1)
+        self.assertEqual(self.cfg_path.read_text(encoding="utf-8"), before)
+
+    def test_show_text_lists_invoke(self):
+        rc, out = _capture(admin._config_show, False)
+        self.assertEqual(rc, 0)
+        self.assertIn("invoke      :", out)
+        self.assertIn("model=gpt-6-astra effort=high profile=review", out)
+        self.assertIn("model=(peer default)", out)
+
+
+class TestDoctorInvoke(_ConfigFixture):
+    def test_reports_defaults_and_missing_codex_cache(self):
+        with (
+            TemporaryDirectory() as codex_home,
+            mock.patch.dict(os.environ, {"CODEX_HOME": codex_home}),
+        ):
+            with mock.patch.object(admin.shutil, "which", return_value="/bin/codex"):
+                _, out = _capture(admin._check_invoke, config.get_config())
+            self.assertIn("ok   invoke defaults - codex: model=gpt-6-astra", out)
+            self.assertIn("warn codex model cache", out)
+            Path(codex_home, "models_cache.json").write_text("{}")
+            with mock.patch.object(admin.shutil, "which", return_value="/bin/codex"):
+                _, out = _capture(admin._check_invoke, config.get_config())
+            self.assertNotIn("warn", out)
 
 
 class TestServiceDocs(_ConfigFixture):

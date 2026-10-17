@@ -5,6 +5,91 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0]
+
+### Upgrading from 2.4.0
+
+Upgrade the engine (`uv tool upgrade cairn`) and the plugin, then run
+`cairn claude export --all` and `cairn codex export --all` once. The export schema is now 2:
+the full run re-renders every session document with the new head fields and, for the first
+time, exports subagent transcripts as child documents. On a machine with a year of history
+this is a one-time cost of a few minutes plus the embedding of the new child documents on
+the next `cairn sync --cron`. Windowed cron runs never re-export old documents.
+
+### Added
+- `cairn invoke codex|claude`: run the other agent headlessly from either host, stream its
+  events to a per-thread log, capture the real thread id, continue the same thread later
+  with `--resume`, read progress mid-run with `cairn invoke status`, cancel with
+  `cairn invoke cancel`, and finish pending publishing with `cairn invoke publish`. Defaults
+  per peer (model, effort, profile, timeouts) live in the config `invoke` block.
+- Every peer run exports the peer session at once, writes `links:` on both session
+  documents, and records an exchange document (prompt, progress, answer and result per
+  round) in the calling session's folder, so `/search` and `rg` find it (session recall
+  lists the peer session; exchange documents stay out of the session timeline by design).
+- Health for long-running work: execution state, activity with age, and outcome are
+  reported separately; an idle watchdog kills a hung run; one invocation per thread is
+  enforced; a runner killed mid-run leaves an orphaned round that `status` adopts.
+- `cairn agents list|wait`: one view over the peer runs and the Claude and Codex subagents
+  a session spawned, and a blocking wait for a whole fan-out.
+- Claude Code subagent transcripts (`<session>/subagents/agent-*.jsonl`, including
+  workflow agents) export as `claude-subagent` documents in the parent's folder with the
+  agent's type, description, tool use id, spawn depth, request shape, model and lineage;
+  parents gain a `## Subagents` index; child-to-parent messages render as Agent turns.
+- Codex subagent rollouts export as `codex-subagent` documents with parent thread, role,
+  nickname, path and depth; rollouts carry `originator`, `thread_source`, `effort`,
+  `sandbox` and `approval_policy`; `custom_tool_call` records render like function calls;
+  inter-agent messages render as Agent turns marked encrypted.
+- `cairn recall list --include-subagents`; JSON rows carry `type` and `parent`.
+- Skills `invoke-codex` and `invoke-claude` for both hosts, `references/peer-review.md`
+  (gate prompts, critical evaluation, the bounded convergence loop), and peer-run recipes
+  in the harness references.
+- `links` is a preserved frontmatter field.
+- `cairn doctor` probes the configured QMD: `qmd --version` (warns below the tested 2.5.3
+  or on a prerelease) and `qmd status` as a runtime check (a binary that crashes opening
+  its index is now a critical failure). The embeddings line reports documents, vectors and
+  pending documents. `cairn doctor --strict-index` fails unless the index is readable and
+  fully embedded; an empty index passes but says nothing can be verified.
+- Full sync logs a `[qmd-verify]` line with the index-wide counts after `qmd embed`, and
+  a `failed steps:` line naming every failed step before `=== FAILED ===`.
+
+### Fixed
+- Sync reported `[qmd-embed] ok` when QMD exited 0 with failed chunks (seen: 48,219 of
+  131,291 chunks after QMD's 30-minute embed session expired). The whole embed output is
+  now checked for failed-chunk reports and chunk errors, and the run fails. A clean exit
+  logs `[qmd-embed] exited 0`; `[qmd-verify]` gives the verdict. Pending documents after
+  the embed fail the run as `INCOMPLETE` (`failed steps: qmd-verify (incomplete)`), and a
+  non-empty index with no vectors, an unreadable `qmd status`, or a `Pending` line in an
+  unknown shape also fails it.
+- Two `cairn sync` runs could overlap (an hourly cron run during a manual one) and
+  interleave their log blocks. A per-data-root sync lock now lets one run at a time. The
+  other records its mode under `<data_root>/sync-requests/`, logs one `skipped` line and
+  exits 0; the running sync then runs, once, the stages the request needs that it did not
+  run (a `--cron` request after a legacy `--hook` run gets the worker retry, the other
+  exports, update, embed and verify; a full request after a full run gets a hook-worker
+  retry). Requests that arrive during that pass wait for the next invocation.
+- A timed-out sync step, hook export or `qmd update` killed only its direct child, so the
+  Node grandchild behind the `qmd` launcher could keep running outside the index lock. The
+  whole process group is now killed (also on Ctrl-C). A timeout keeps the partial stdout
+  and stderr even when a descendant escaped the group, and process cleanup is bounded
+  (`cleanup incomplete` is reported instead of an unbounded wait).
+- Full sync no longer runs `qmd embed` after `qmd update` failed.
+- The test suite wrote catalogs and lock files into the real home (`~/.cache/cairn`,
+  `~/.local/state/cairn`); CI now fails if it does.
+- Codex: a forked subagent rollout carries two `session_meta` records; the parser let the
+  last one win, so the child was parsed as its parent and dropped by the fragment dedupe.
+  The first record now wins and the replayed parent history is cut. On the author's
+  machine this recovers 100 of 108 subagent rollouts.
+- Codex: `custom_tool_call` and `custom_tool_call_output` records were silently skipped.
+- Claude: messages a subagent sent to its parent were dropped as meta records.
+
+### Changed
+- Export schema 2; see Upgrading.
+- `cairn doctor` no longer says "All critical checks passed." without a qualifier when the
+  semantic index is empty, unreadable or has pending documents.
+- Setup verifies keyword, vector and hybrid search separately and documents QMD
+  compatibility and recovery without touching QMD's database.
+- `cairn resume` refuses a subagent transcript and names the parent to resume instead.
+
 ## [2.4.0]
 
 ### Upgrading from 2.3.0

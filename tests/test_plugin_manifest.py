@@ -83,6 +83,23 @@ class TestPortablePackage(unittest.TestCase):
             self.assertIn(
                 "disable-model-invocation: true", (cache / "skills/setup/SKILL.md").read_text()
             )
+            self.assertTrue((cache / "references/peer-review.md").is_file())
+            for name in ("invoke-codex", "invoke-claude"):
+                skill = cache / "skills" / name
+                policy = (skill / "agents/openai.yaml").read_text()
+                self.assertIn("allow_implicit_invocation: true", policy)
+                text = (skill / "SKILL.md").read_text()
+                self.assertTrue((skill / "../../references/peer-review.md").is_file())
+                self.assertIn("references/peer-review.md", text)
+                # Host-agnostic: no Claude-only skill syntax that Codex would not honour.
+                for forbidden in (
+                    "disable-model-invocation",
+                    "$ARGUMENTS",
+                    "CLAUDE_SKILL_DIR",
+                    "```!",
+                    "when_to_use",
+                ):
+                    self.assertNotIn(forbidden, text, f"{name} uses {forbidden}")
 
     def test_catalog_and_separate_hooks(self):
         market = json.loads((_REPO_ROOT / ".agents/plugins/marketplace.json").read_text())

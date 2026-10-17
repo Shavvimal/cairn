@@ -68,6 +68,20 @@ only what's actually installable on this machine:
 After any install, **re-run the preflight block** and confirm the tool resolves. Do not
 proceed until `qmd` resolves **and** at least one of `uv`/`pipx` resolves.
 
+A resolving `qmd` can still be too old or unable to run. Record its version and prove it
+opens its index (a binary that prints a version but crashes on `status` is not usable):
+
+```bash
+qmd --version   # cairn is tested with 2.5.3; record what you see
+qmd status      # must exit 0 and print a Documents block
+node --version  # context only: the qmd wrapper can use a different runtime
+```
+
+If `qmd status` crashes, stop and report it with the version and the output. On macOS Apple
+Silicon with Node 22.12.0, QMD 2.8.3 crashed in its native SQLite module and 2.5.3 worked
+(one machine, not a support matrix); `npm install -g @tobilu/qmd@2.5.3` is the known-good
+recovery there. Do not recommend "latest" as a guaranteed fix.
+
 ## 2. Ask the user what to set up
 
 Collect missing choices through the harness input mechanism. Keep the **session sources** and **service docs** as *separate*
@@ -204,8 +218,20 @@ look like.
   `cairn SOURCE export --since 30d` if the user wants older history, then sync again.
   Do not invent a search result or claim a populated index.
 
-Do not start a second embedding process while sync is still running. If embedding failed,
-retry `cairn sync --cron` after resolving the error; its index lock coordinates workers.
+Do not start a second embedding process while sync is still running. A second
+`cairn sync` for the same data root logs one `skipped: another cairn sync is running` line
+and exits 0; the running sync runs that request's missing stages before it exits. If embedding failed, retry `cairn sync --cron` after the
+running job ends and the error is resolved.
+
+QMD exits 0 even when chunks fail, so cairn checks the embed output and then `qmd status`:
+`[qmd-embed] FAILED - qmd exited 0 but reported: N chunks failed` fails the sync. The
+embed step logs `exited 0` on a clean exit; the `[qmd-verify]` line gives the verdict with
+the index-wide documents, vectors and pending documents, and `INCOMPLETE` (pending > 0)
+also fails the sync. A first embed of a large history can pass QMD's 30-minute session
+limit (1.1.5 and 2.5.3). Completed documents keep their vectors, but QMD 2.5.3 removes the
+vectors of a partly embedded document, so it restarts on the next run. Rerun
+`cairn sync --cron` while the pending count in `cairn doctor` falls; if it stops falling,
+stop and report it (a document may never fit in one session).
 
 ## 6. Configure automatic sync and periodic maintenance
 
@@ -226,42 +252,49 @@ replacement for the session hook.
 A green `cairn doctor` once told a user "all good" while search was completely broken. Verify
 in layers; declare success only when a **real query returns hits**.
 
-**7a. Plumbing + the new index checks.** `cairn doctor` now also checks collections-registered
-and embeddings-present:
+**7a. Plumbing + the strict index check.**
 
 ```bash
-cairn doctor           # install, config, qmd, rg, data_root, stores, collections, embeddings, cron
-crontab -l             # the hourly 'cairn sync --cron' line is present
+cairn doctor --strict-index   # install, config, qmd version + runtime, collections, index, cron
+crontab -l                    # the hourly 'cairn sync --cron' line is present
 ```
 
-The collections/embeddings lines are warnings, not failures - but after step 5 they should be
-green. If they aren't, fix that before continuing.
+`--strict-index` fails unless QMD runs, its status is readable, and a nonempty index has
+vectors with zero pending documents. An empty index passes but says no search can be
+verified. Plain `cairn doctor` only warns about these and says so in its summary line.
 
-**7b. The index has content.** An empty index is the exact failure mode we're guarding against:
+**7b. The index has content.**
 
 ```bash
-qmd status             # expect documents > 0 AND vectors > 0
+qmd status             # documents > 0, vectors > 0, no Pending line
 qmd collection list    # expect the enabled collections, each with a non-zero file count
 ```
 
-If `qmd status` shows 0 documents or 0 vectors, search cannot work: 0 documents or documents without vectors → revisit step 5. **Stop and report** - do not call setup done.
+Zero documents means nothing can be found: revisit step 5. Documents without vectors (or a
+Pending line) leave BM25 keyword search working but semantic search incomplete: rerun
+`cairn sync --cron` and report it; do not call semantic search ready. **Stop and report**
+if it stays that way.
 
-**7c. A real query returns results (the finish line).** Pick a term you expect to exist (a
-title/filename you saw under `$DATA_ROOT` in step 5, or the user's project name) and search:
+**7c. Real queries return results (the finish line).** Pick a distinctive phrase from a
+known exported conversation (a title/filename you saw under `$DATA_ROOT` in step 5) and run
+all three:
 
 ```bash
-qmd search "<term-you-expect>" -n 5
+qmd search "<exact term>" -n 5          # keyword (BM25)
+qmd vsearch "<paraphrase of it>" -n 5   # vector only
+qmd query "<paraphrase of it>" -n 5     # hybrid
 ```
 
-Expect ranked hits with titles, scores, and snippets. If nothing, try another term and one
-`qmd query "<term>"` (hybrid) to rule out a BM25-only miss. If real queries consistently
-return nothing despite `qmd status` showing documents and vectors, **stop and report** with
-the `qmd status` output and the queries you tried.
+Each must return the expected document. A hybrid hit alone can come from the keyword half,
+so it does not prove vector retrieval. If keyword works and vector does not, report
+semantic search as not ready with the `qmd status` output and the queries you tried.
 
 Only when 7a-7c and the live lifecycle check all pass: tell the user setup is complete. Summarize what's enabled
 (`cairn config show`), how many chunks/documents were embedded (from step 5), and that `/recall`
-and `/search` now work. Mention the hourly cron and the SessionEnd hook keep it fresh, and
-that subsequent embeds are incremental (seconds, not minutes).
+and `/search` now work. Mention the hourly cron and the SessionEnd hook keep it fresh: a
+finished session is exported and keyword-indexed at once, and its embeddings follow on the
+next full sync. Incremental embeds are usually short but can take a long time after a large
+backfill.
 
 ## Troubleshooting
 

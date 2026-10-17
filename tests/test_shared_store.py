@@ -17,7 +17,7 @@ from unittest.mock import patch
 from cairn import config, recall
 from cairn.frontmatter import extract_my_notes_section, parse_frontmatter
 from cairn.harnesses import get_harness
-from cairn.store import SessionStore, bounded_content
+from cairn.store import SCHEMA_VERSION, SessionStore, bounded_content
 
 
 class StoreFixture(unittest.TestCase):
@@ -46,12 +46,16 @@ class StoreFixture(unittest.TestCase):
                 }
             )
         )
+        # Every home-derived location points into the temp root, so neither this
+        # process nor a spawned `python -m cairn` touches the developer's real home.
         self.env = dict(
             os.environ,
             HOME=str(self.root / "home"),
             CAIRN_CONFIG=str(self.config),
             XDG_CACHE_HOME=str(self.root / "cache"),
             XDG_CONFIG_HOME=str(self.root / "xdg"),
+            CODEX_HOME=str(self.root / "codex-home"),
+            CLAUDE_CONFIG_DIR=str(self.root / "claude-home"),
             QMD_CONFIG_DIR=str(self.root / "xdg/qmd"),
             INDEX_PATH=str(self.root / "cache/qmd/index.sqlite"),
         )
@@ -60,6 +64,27 @@ class StoreFixture(unittest.TestCase):
         config.get_config.cache_clear()
         self.addCleanup(self.patch.stop)
         self.addCleanup(config.get_config.cache_clear)
+
+    # Lists the two collections for any subcommand; `status` reports a complete index.
+    FAKE_QMD_BODY = (
+        "import sys,time\ntime.sleep(0.04)\n"
+        'if sys.argv[1:2] == ["status"]:\n'
+        '    print("Documents\\n  Total:    2 files indexed\\n  Vectors:  2 embedded")\n'
+        "else:\n"
+        '    print("qmd://codex-sessions/\\nqmd://claude-code-sessions/")\n'
+    )
+
+    def fake_qmd(self, body: str | None = None) -> Path:
+        """Point ``qmd_binary`` at a ``#!python`` stub running ``body`` (default
+        :attr:`FAKE_QMD_BODY`) and return its path."""
+        path = self.root / "qmd"
+        path.write_text(f"#!{sys.executable}\n" + (body or self.FAKE_QMD_BODY))
+        path.chmod(0o755)
+        data = json.loads(self.config.read_text())
+        data["qmd_binary"] = str(path)
+        self.config.write_text(json.dumps(data))
+        config.get_config.cache_clear()
+        return path
 
     def run_cli(self, *args, check=True):
         return subprocess.run(
@@ -180,7 +205,7 @@ class TestSharedStore(StoreFixture):
             self.run_cli(source, "export", "--all")
             content = path.read_text()
             fm = parse_frontmatter(content)
-            self.assertEqual(fm["cairn_schema"], "1")
+            self.assertEqual(fm["cairn_schema"], str(SCHEMA_VERSION))
             self.assertEqual(fm["status"], "done")
             self.assertEqual(fm["title"], "My chosen title")
             self.assertEqual(fm["tags"], ["important"])
@@ -242,7 +267,7 @@ class TestSharedStore(StoreFixture):
         self.run_cli("codex", "note", "Keep this note", "--session-id", "migrate")
         old = (
             record.path.read_text()
-            .replace('cairn_schema: "1"', 'cairn_schema: "0"')
+            .replace('cairn_schema: "2"', 'cairn_schema: "0"')
             .replace(
                 "<!-- Add your notes here. This section is preserved across exports. -->",
                 "My handwritten note",
@@ -251,7 +276,7 @@ class TestSharedStore(StoreFixture):
         record.path.write_text(old)
         self.run_cli("codex", "export", "--all")
         content = record.path.read_text()
-        self.assertIn('cairn_schema: "1"', content)
+        self.assertIn('cairn_schema: "2"', content)
         self.assertIn("Keep this note", content)
         self.assertIn("My handwritten note", content)
 

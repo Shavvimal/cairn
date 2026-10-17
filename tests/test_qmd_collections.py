@@ -36,14 +36,14 @@ codex-sessions (qmd://codex-sessions/)
 
 class TestListCollections(unittest.TestCase):
     def test_parses_names_from_uris(self):
-        with mock.patch.object(qmd.subprocess, "run", return_value=_completed(stdout=_LIST_OUTPUT)):
+        with mock.patch.object(qmd, "run_capped", return_value=_completed(stdout=_LIST_OUTPUT)):
             self.assertEqual(
                 qmd.list_collections("qmd"), {"claude-code-sessions", "codex-sessions"}
             )
 
     def test_empty_when_no_collections(self):
         with mock.patch.object(
-            qmd.subprocess, "run", return_value=_completed(stdout="No collections.\n")
+            qmd, "run_capped", return_value=_completed(stdout="No collections.\n")
         ):
             self.assertEqual(qmd.list_collections("qmd"), set())
 
@@ -51,7 +51,7 @@ class TestListCollections(unittest.TestCase):
         # A broken qmd must not be read as "nothing registered" (that would re-add forever).
         with (
             mock.patch.object(
-                qmd.subprocess, "run", return_value=_completed(returncode=1, stderr="boom")
+                qmd, "run_capped", return_value=_completed(returncode=1, stderr="boom")
             ),
             self.assertRaises(RuntimeError),
         ):
@@ -71,7 +71,7 @@ class TestEnsureCollection(unittest.TestCase):
         return self.dir
 
     def test_skipped_when_dir_missing(self):
-        with mock.patch.object(qmd.subprocess, "run") as run:
+        with mock.patch.object(qmd, "run_capped") as run:
             self.assertEqual(
                 qmd.ensure_collection("c", self.dir / "nope", "qmd", known=set()), "skipped"
             )
@@ -79,19 +79,19 @@ class TestEnsureCollection(unittest.TestCase):
 
     def test_skipped_when_dir_has_no_markdown(self):
         (self.dir / "note.txt").write_text("x", encoding="utf-8")
-        with mock.patch.object(qmd.subprocess, "run") as run:
+        with mock.patch.object(qmd, "run_capped") as run:
             self.assertEqual(qmd.ensure_collection("c", self.dir, "qmd", known=set()), "skipped")
             run.assert_not_called()
 
     def test_exists_is_idempotent_noop(self):
         self._with_markdown()
-        with mock.patch.object(qmd.subprocess, "run") as run:
+        with mock.patch.object(qmd, "run_capped") as run:
             self.assertEqual(qmd.ensure_collection("c", self.dir, "qmd", known={"c"}), "exists")
             run.assert_not_called()
 
     def test_added_invokes_collection_add(self):
         self._with_markdown()
-        with mock.patch.object(qmd.subprocess, "run", return_value=_completed(0)) as run:
+        with mock.patch.object(qmd, "run_capped", return_value=_completed(0)) as run:
             self.assertEqual(qmd.ensure_collection("c", self.dir, "qmd", known=set()), "added")
         argv = run.call_args.args[0]
         self.assertEqual(argv[:3], ["qmd", "collection", "add"])
@@ -100,14 +100,14 @@ class TestEnsureCollection(unittest.TestCase):
 
     def test_failed_on_nonzero_add(self):
         self._with_markdown()
-        with mock.patch.object(qmd.subprocess, "run", return_value=_completed(1, stderr="nope")):
+        with mock.patch.object(qmd, "run_capped", return_value=_completed(1, stderr="nope")):
             self.assertEqual(qmd.ensure_collection("c", self.dir, "qmd", known=set()), "FAILED")
 
     def test_fetches_known_when_not_supplied(self):
         self._with_markdown()
         # First call = `collection list` (empty), second = `collection add` (ok).
         with mock.patch.object(
-            qmd.subprocess, "run", side_effect=[_completed(0, stdout=""), _completed(0)]
+            qmd, "run_capped", side_effect=[_completed(0, stdout=""), _completed(0)]
         ) as run:
             self.assertEqual(qmd.ensure_collection("c", self.dir, "qmd"), "added")
         self.assertEqual(run.call_count, 2)
@@ -191,23 +191,6 @@ class TestEnsureCollectionsWiring(_SyncConfigFixture):
         with mock.patch.object(sync, "log"), mock.patch.object(sync, "_log_output"):
             self.assertFalse(sync.run_inproc("qmd-collections", boom))
             self.assertTrue(sync.run_inproc("qmd-collections", lambda: "ok"))
-
-
-class TestDoctorVectorCount(unittest.TestCase):
-    def test_parses_vectors(self):
-        status = "Documents\n  Total:    9 files indexed\n  Vectors:  2,364 embedded\n"
-        with mock.patch.object(admin.subprocess, "run", return_value=_completed(stdout=status)):
-            self.assertEqual(admin._qmd_vector_count("qmd"), 2364)
-
-    def test_zero_vectors(self):
-        with mock.patch.object(
-            admin.subprocess, "run", return_value=_completed(stdout="  Vectors:  0 embedded")
-        ):
-            self.assertEqual(admin._qmd_vector_count("qmd"), 0)
-
-    def test_none_when_unreadable(self):
-        with mock.patch.object(admin.subprocess, "run", return_value=_completed(returncode=1)):
-            self.assertIsNone(admin._qmd_vector_count("qmd"))
 
 
 if __name__ == "__main__":

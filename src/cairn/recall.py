@@ -60,6 +60,11 @@ def main(argv: list[str] | None = None) -> int:
     listing.add_argument(
         "--refresh", action="store_true", help="refresh exports first, without embedding"
     )
+    listing.add_argument(
+        "--include-subagents",
+        action="store_true",
+        help="also list subagent transcripts (hidden by default; --min-msgs skips them)",
+    )
     expand = sub.add_parser("expand", help="read an exported session, including annotations")
     expand.add_argument("session_id", help="source:full-id or unique prefix")
     expand.add_argument("--max-msgs", type=int, default=DEFAULT_MAX_MSGS)
@@ -97,11 +102,15 @@ def main(argv: list[str] | None = None) -> int:
             if record.user_messages is not None:
                 print(f"\n{record.user_messages} user messages total")
             return 0
+        if not args.include_subagents:
+            records = [r for r in records if not r.is_subagent]
+        # A subagent has one user message (its prompt), so --min-msgs, a filter for
+        # conversations, would hide every child the caller asked to see.
         selected = [
             r
             for r in records
             if r.in_window(start, end)
-            and (r.user_messages is None or r.user_messages >= args.min_msgs)
+            and (r.is_subagent or r.user_messages is None or r.user_messages >= args.min_msgs)
         ]
         selected.sort(key=lambda r: r.started_at or datetime.min.replace(tzinfo=UTC))
         output = [
@@ -117,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
                 "cwd": r.cwd,
                 "precision": r.precision,
                 "path": str(r.path),
+                "type": r.session_type,
+                "parent": r.parent_id,
             }
             for r in selected
         ]
@@ -127,7 +138,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"Sessions with recorded activity: {start.date()} to {end.date()} (exclusive), UTC"
             )
             for row in output:
-                print(f"{row['reference']}  {row['time']}  {row['title']}  [{row['precision']}]")
+                parent = row["parent"]
+                lineage = f" (subagent of {str(parent)[:8]})" if parent else ""
+                print(
+                    f"{row['reference']}  {row['time']}  {row['title']}  "
+                    f"[{row['precision']}]{lineage}"
+                )
             print(f"{len(output)} sessions")
         limited = sum(r.precision != "messages" or r.user_messages is None for r in selected)
         if limited:

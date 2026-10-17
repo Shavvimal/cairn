@@ -49,8 +49,8 @@ Six collections and one search index:
 
 | Collection             | Source                                           |
 | ---------------------- | ------------------------------------------------ |
-| `claude-code-sessions` | `~/.claude/projects` JSONL transcripts           |
-| `codex-sessions`       | `~/.codex/sessions` rollout JSONL                |
+| `claude-code-sessions` | `~/.claude/projects` JSONL transcripts, subagent transcripts, peer exchanges |
+| `codex-sessions`       | `~/.codex/sessions` rollout JSONL, subagent rollouts, peer exchanges |
 | `cursor-sessions`      | Cursor `state.vscdb` SQLite databases            |
 | `granola-sessions`     | Granola meeting API (transcripts + AI summaries) |
 | `service-docs`         | Markdown docs mirrored from your repos           |
@@ -189,6 +189,29 @@ cairn codex note "progress"      # add a timestamped note
 Service docs is a verbatim mirror with no `--since`/`--all`:
 `cairn service-docs export [--clean]`.
 
+### `/invoke-codex` and `/invoke-claude` — ask the other agent
+
+Run the other agent headlessly from either host, for an adversarial review, a plan review or
+an independent pass, and keep the whole exchange searchable:
+
+```bash
+cairn invoke codex --json --prompt-file brief.md --effort high   # background it; --json gives one result line
+cairn invoke status <thread-id>                             # health line, progress, answer so far
+cairn invoke codex --resume <thread-id> --prompt "…"         # continue the same thread, days later too
+cairn invoke claude --prompt "…" --profile review            # the mirror direction
+cairn agents list                                           # peer runs and subagents of this session, with health
+cairn agents wait --session claude:<id>                     # one completion notice for a whole fan-out
+```
+
+Each run captures the peer's real thread id, streams its events to a per-thread log under
+`<data_root>/logs/invoke/`, exports the peer session at once, writes `links:` on both
+session documents, and records an exchange document (prompt, progress, answer and result
+per round) in the calling session's folder. Profiles `review` (read-only), `edit` and
+`full` map to each host's native sandbox or permission flags, and the record stores the
+exact flags that ran. The doctrine for adversarial review and the bounded debate loop is
+in [references/peer-review.md](references/peer-review.md); the design is in
+[docs/agent-exchange-plan.md](docs/agent-exchange-plan.md).
+
 ## Configuration
 
 Config is data, not code. `cairn config init` writes `~/.config/cairn/config.json` (XDG) —
@@ -258,6 +281,31 @@ cairn sync --hook    # fast: claude-sessions only + qmd update
 cairn sync --cron    # full: all exports + qmd update + qmd embed
 ```
 
+One `cairn sync` runs per data root at a time. A second one (an hourly cron run that
+overlaps a manual run, say) records its mode under `<data_root>/sync-requests/`, logs one
+`skipped: another cairn sync is running` line and exits 0. Before the running sync exits,
+it runs once the stages the skipped request needs that it did not run itself (for example
+the embed a `--cron` request needs after a legacy `--hook` run). A step that times out takes its whole process group with it, so a `qmd` wrapper's
+Node child cannot keep running outside the index lock. When a run fails, the log names the
+failed steps on a `failed steps:` line just before `=== FAILED ===`.
+
+QMD exits 0 even when embedding chunks fail. Full sync reads the whole `qmd embed` output
+and fails on reported chunk failures, then logs a `[qmd-verify]` line with the index-wide
+documents, vectors and pending documents from `qmd status`. Pending documents left after
+the embed fail the run as `INCOMPLETE` (`failed steps: qmd-verify (incomplete)`), which is
+unfinished work, not corruption. The embed step logs `exited 0`; `[qmd-verify]` gives the
+verdict. QMD 1.1.5 and 2.5.3 cap one embed session at 30 minutes, so a large backlog takes
+several runs. Completed documents keep their vectors, but QMD 2.5.3 removes the vectors of
+a partly embedded document, so that document restarts on the next run. Check progress with
+the pending count in `cairn doctor`: if it does not fall across runs, a document may never
+fit in one session, so investigate instead of retrying. BM25 keyword search works as soon as a session is exported and `qmd update`
+runs (the SessionEnd hook does both); semantic search waits for the next full sync.
+
+`cairn doctor` probes the configured QMD (`--version`, then `status` as a runtime check)
+and reports pending embeddings. `cairn doctor --strict-index` fails unless the index is
+readable and fully embedded; setup uses it. cairn is tested with QMD 2.5.3; a newer
+version is judged by the same runtime and output checks, not by its number.
+
 Recall uses the shared exported Markdown store, independent of the active harness:
 
 ```sh
@@ -274,6 +322,15 @@ without QMD and returns failure if refresh failed. Schema upgrades preserve anno
 even when native mtime is unchanged; unavailable native data leaves old exports intact.
 
 Every export checks whether its source actually changed (mtime/timestamp/hash) before doing work, so a "nothing changed" run is nearly instant. Steps are timed and logged to `.context/logs/context-sync.log`.
+
+Everything a session spawned lives in one folder named after its document,
+`<collection>/<project>/<date>-<shortid>/`: subagent transcripts as `agent-<id>.md`
+(`type: claude-subagent` or `codex-subagent`, hidden from `list`, shown by
+`cairn recall list --include-subagents`) and peer exchanges as `exchange-<peer>-<short>.md`.
+The parent document carries a `## Subagents` index. Export windows use the newest mtime
+across a parent and its children, so a background agent that finishes after the parent's
+SessionEnd is still picked up. After upgrading to 2.5.0, run `cairn claude export --all` and
+`cairn codex export --all` once to render the new schema and the child documents.
 
 Session lookup, `list` and `recall` read a per-collection catalog under
 `$XDG_CACHE_HOME/cairn/catalogs/` rather than parsing every exported file. The markdown
@@ -293,12 +350,14 @@ on the same inode.
 ```
 src/cairn/                 # the engine (config, schema, renderer, sources, CLI, sync)
 src/cairn/__main__.py      # the `cairn` dispatcher
-skills/                    # plugin skills (setup, cairn, recall, search)
+skills/                    # plugin skills (setup, cairn, recall, search, invoke-codex, invoke-claude)
 .claude-plugin/            # plugin.json + marketplace.json (this repo is both)
 plugin.json                # portable manifest (authoritative OpenAI settings)
 .agents/plugins/           # Codex GitHub marketplace
 .codex-plugin/             # generated compatibility manifest
 references/harnesses/      # shared skill execution contract + host tool references
+references/peer-review.md  # adversarial review doctrine shared by the invoke skills
+docs/                      # design plans, research and acceptance evidence
 hooks/hooks.json           # Claude SessionEnd
 hooks/codex.json           # Codex SessionEnd (explicit selection)
 tests/                     # stdlib unittest suite

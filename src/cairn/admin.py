@@ -16,19 +16,31 @@ import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import asdict, fields
 from pathlib import Path
 
 from . import __version__
 from .config import (
+    INVOKE_PEERS,
+    CairnConfig,
     Collection,
     ConfigError,
+    PeerPolicy,
     example_template_text,
     expand,
     get_config,
     load_config_from,
     user_config_path,
 )
-from .qmd import list_collections
+from .qmd import (
+    TESTED_QMD_VERSION,
+    IndexStatus,
+    StatusFormatError,
+    index_status,
+    list_collections,
+    parse_version,
+    qmd_version,
+)
 from .sync import SOURCE_COLLECTIONS
 
 _CRON_TAG = "cairn sync"  # substring used to find/replace our line idempotently
@@ -117,6 +129,20 @@ def _collection_view(name: str, coll: Collection) -> dict:
     return view
 
 
+def _invoke_view(cfg: CairnConfig) -> dict:
+    """Machine-readable ``invoke`` block: one policy dict per peer."""
+    return {peer: asdict(cfg.invoke.for_peer(peer)) for peer in INVOKE_PEERS}
+
+
+def _peer_summary(policy: PeerPolicy) -> str:
+    """One-line human summary of a peer's invoke defaults."""
+    return (
+        f"model={policy.model or '(peer default)'} effort={policy.effort or '(peer default)'} "
+        f"profile={policy.profile} timeout={policy.timeout_s}s idle={policy.idle_timeout_s}s "
+        f"quiet={policy.quiet_after_s}s stall={policy.stall_after_s}s"
+    )
+
+
 def _config_show(as_json: bool) -> int:
     """Print the resolved config - the read surface skills/setup query."""
     try:
@@ -136,6 +162,7 @@ def _config_show(as_json: bool) -> int:
                     "qmd_binary": cfg.qmd_binary,
                     "cron_schedule": cfg.cron_schedule,
                     "collections": collections,
+                    "invoke": _invoke_view(cfg),
                 },
                 indent=2,
             )
@@ -154,6 +181,9 @@ def _config_show(as_json: bool) -> int:
         print(f"  {c['name']:22} [{state}] since={c['since']}{hook}{store}")
         for src_name, src_path in (c.get("service_sources") or {}).items():
             print(f"      docs[{src_name}] = {src_path}")
+    print("invoke      :")
+    for peer in INVOKE_PEERS:
+        print(f"  {peer:22} {_peer_summary(cfg.invoke.for_peer(peer))}")
     return 0
 
 
@@ -162,6 +192,23 @@ def _config_show(as_json: bool) -> int:
 _TOP_LEVEL_KEYS = {"data_root", "qmd_binary"}
 _COLLECTION_SYNC_FIELDS = {"enabled", "since", "on_hook"}
 _BOOL_FIELDS = {"enabled", "on_hook"}
+_INVOKE_FIELDS = {f.name for f in fields(PeerPolicy)}
+_INVOKE_INT_FIELDS = {"timeout_s", "idle_timeout_s", "quiet_after_s", "stall_after_s"}
+_INVOKE_NULLABLE = {"model", "effort"}
+
+
+def _coerce_invoke(field: str, value: str) -> object:
+    """Coerce a CLI string for ``invoke.<peer>.<field>``: ints for clocks, null for defaults."""
+    if field in _INVOKE_INT_FIELDS:
+        try:
+            return int(value)
+        except ValueError:
+            raise ValueError(
+                f"{field} expects an integer number of seconds, got {value!r}"
+            ) from None
+    if field in _INVOKE_NULLABLE and value.strip().lower() in ("null", "none"):
+        return None
+    return value
 
 
 def _coerce(field: str, value: str) -> object:
@@ -184,6 +231,16 @@ def _set_dotted(data: dict, key: str, value: str) -> None:
         return
 
     parts = key.split(".")
+    if len(parts) == 3 and parts[0] == "invoke":
+        _, peer, field = parts
+        if peer not in INVOKE_PEERS:
+            raise ValueError(f"unknown invoke peer {peer!r}; known: {', '.join(INVOKE_PEERS)}")
+        if field not in _INVOKE_FIELDS:
+            known = ", ".join(sorted(_INVOKE_FIELDS))
+            raise ValueError(f"unknown invoke field {field!r}; known: {known}")
+        invoke = data.setdefault("invoke", {})
+        invoke.setdefault(peer, {})[field] = _coerce_invoke(field, value)
+        return
     if len(parts) == 2:
         prefix, field = parts
         collection = SOURCE_COLLECTIONS.get(prefix, prefix)
@@ -200,8 +257,9 @@ def _set_dotted(data: dict, key: str, value: str) -> None:
             return
 
     raise ValueError(
-        f"unsupported key {key!r}. Use data_root, qmd_binary, cron.schedule, or "
-        "<collection>.store|enabled|since|on_hook"
+        f"unsupported key {key!r}. Use data_root, qmd_binary, cron.schedule, "
+        "<collection>.store|enabled|since|on_hook, or invoke.<codex|claude>."
+        "model|effort|profile|timeout_s|idle_timeout_s|quiet_after_s|stall_after_s"
     )
 
 
@@ -340,7 +398,10 @@ def config_main(argv: list[str] | None = None) -> int:
     p_set.add_argument(
         "key",
         metavar="KEY",
-        help="data_root | qmd_binary | cron.schedule | <collection>.store|enabled|since|on_hook",
+        help=(
+            "data_root | qmd_binary | cron.schedule | <collection>.store|enabled|since|on_hook"
+            " | invoke.<codex|claude>.<field>"
+        ),
     )
     p_set.add_argument("value", metavar="VALUE")
     p_add = sub.add_parser(
@@ -473,20 +534,75 @@ def _fail(label: str, detail: str = "") -> None:
     print(f"  FAIL {label}" + (f" - {detail}" if detail else ""))
 
 
-def _qmd_vector_count(qmd_binary: str) -> int | None:
-    """The global embedded-vector count from ``qmd status`` (``None`` if unreadable).
+def _check_qmd_runtime(qmd_binary: str) -> tuple[int, IndexStatus | None, str | None]:
+    """Probe the configured QMD: version (diagnostic) and ``qmd status`` (runtime).
 
-    ``qmd status`` reports a single global ``Vectors: N embedded`` line (there is no
-    per-collection vector count), so this is necessarily an index-wide health check.
+    Returns ``(critical_failures, status, reason)``; ``reason`` says why ``status``
+    is ``None``. The embeddings check reuses this one status result. Doctor never
+    embeds, installs or upgrades anything.
     """
+    tested = ".".join(map(str, TESTED_QMD_VERSION))
     try:
-        result = subprocess.run([qmd_binary, "status"], capture_output=True, text=True)
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
-    m = re.search(r"Vectors:\s*([\d,]+)", result.stdout)
-    return int(m.group(1).replace(",", "")) if m else None
+        raw = qmd_version(qmd_binary)
+    except RuntimeError as e:
+        _warn("qmd version", str(e))
+    else:
+        version = parse_version(raw)
+        if version is None:
+            _warn("qmd version", f"{raw!r} is not a release version; cairn is tested with {tested}")
+        elif version < TESTED_QMD_VERSION:
+            _warn(
+                "qmd version",
+                f"{raw}: older than {tested}, the release cairn's embedding checks were "
+                "tested with; keyword search can still work. Read the QMD compatibility "
+                "notes in the setup skill before changing it",
+            )
+        else:
+            _ok("qmd version", raw)
+    try:
+        status = index_status(qmd_binary)
+    except StatusFormatError as e:
+        _warn("qmd runtime", f"ran, but {e}")
+        return 0, None, str(e)
+    except RuntimeError as e:
+        _fail("qmd runtime", f"{e} - QMD cannot open its index, so search cannot work")
+        return 1, None, "the QMD runtime probe failed"
+    _ok("qmd runtime", "'qmd status' succeeded")
+    return 0, status, None
+
+
+def _check_embeddings(
+    status: IndexStatus | None, reason: str | None, strict: bool
+) -> tuple[int, str | None]:
+    """Report index/embedding state; return ``(critical_failures, caveat)``.
+
+    Default mode only warns about incomplete or unverified indexing, and returns a
+    caveat for the summary line. ``--strict-index`` turns those into failures,
+    except an empty index, which cannot be verified either way.
+    """
+    if status is None:
+        caveat = f"could not read 'qmd status': {reason}"
+        (_fail if strict else _warn)("embeddings", caveat)
+        return int(strict), caveat
+    counts = status.describe()
+    if status.state == "empty":
+        caveat = "the index is empty, so no search can be verified yet"
+        _warn("embeddings", f"{caveat}; run 'cairn sync --cron'")
+        return 0, caveat
+    if status.state == "no-vectors":
+        caveat = f"{counts}: keyword search can work, semantic search is not ready"
+        (_fail if strict else _warn)("embeddings", f"{caveat}; run 'cairn sync --cron'")
+        return int(strict), caveat
+    if status.state == "pending":
+        caveat = f"{counts}: semantic search misses the pending documents"
+        (_fail if strict else _warn)(
+            "embeddings",
+            f"{caveat}; the next 'cairn sync --cron' continues. If this count does not fall "
+            "across runs, investigate instead of retrying",
+        )
+        return int(strict), caveat
+    _ok("embeddings", counts)
+    return 0, None
 
 
 def _parse_semver(value: str) -> tuple[int, int, int] | None:
@@ -564,6 +680,26 @@ def _check_rg() -> None:
         )
 
 
+def _check_invoke(config: CairnConfig) -> None:
+    """Report the ``cairn invoke`` defaults and whether Codex's live model catalogue exists.
+
+    Warn-only: invoke is optional. Without ``$CODEX_HOME/models_cache.json`` the
+    Codex self-check refuses to run (no static model list to fall back on).
+    """
+    from .harnesses.codex_models import models_cache_path
+
+    summary = "; ".join(
+        f"{peer}: {_peer_summary(config.invoke.for_peer(peer))}" for peer in INVOKE_PEERS
+    )
+    _ok("invoke defaults", summary)
+    if shutil.which("codex") and not models_cache_path().is_file():
+        _warn(
+            "codex model cache",
+            f"{models_cache_path()} not found - run 'codex' once so 'cairn invoke codex' "
+            "can check models (or pass --skip-self-check)",
+        )
+
+
 def doctor_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cairn doctor", description="Check the cairn install")
     parser.add_argument(
@@ -572,9 +708,17 @@ def doctor_main(argv: list[str] | None = None) -> int:
         help="path to the plugin's plugin.json (else $CLAUDE_PLUGIN_ROOT) for a drift check",
     )
     parser.add_argument("--harness", choices=("claude", "codex"))
+    parser.add_argument(
+        "--strict-index",
+        action="store_true",
+        help="fail unless the QMD index is readable and fully embedded (setup/acceptance)",
+    )
     args = parser.parse_args(argv)
     print(f"cairn {__version__} - health check\n")
     critical_failures = 0
+    index_caveat: str | None = None
+    qmd_status: IndexStatus | None = None
+    status_reason: str | None = "QMD was not probed"
 
     cairn_bin = shutil.which("cairn")
     if cairn_bin:
@@ -603,6 +747,8 @@ def doctor_main(argv: list[str] | None = None) -> int:
         qmd_path = shutil.which(qmd) or (qmd if Path(qmd).is_file() else None)
         if qmd_path:
             _ok("qmd", qmd_path)
+            failures, qmd_status, status_reason = _check_qmd_runtime(qmd)
+            critical_failures += failures
         else:
             _fail("qmd", f"{qmd!r} not found - install it (e.g. npm install -g @tobilu/qmd)")
             critical_failures += 1
@@ -657,16 +803,14 @@ def doctor_main(argv: list[str] | None = None) -> int:
                         "has markdown but is not a qmd collection; run 'cairn sync'",
                     )
 
-    # embeddings present (an index with 0 vectors returns no search results).
-    # warn, never fail: zero is the expected state before the first embed.
     if config is not None:
-        vectors = _qmd_vector_count(config.qmd_binary)
-        if vectors is None:
-            _warn("embeddings", "could not read 'qmd status'")
-        elif vectors > 0:
-            _ok("embeddings", f"{vectors} vectors embedded")
-        else:
-            _warn("embeddings", "0 vectors - run 'cairn sync --cron' to embed")
+        _check_invoke(config)
+
+    # embeddings: index-wide counts from the single 'qmd status' probe above.
+    # Zero vectors leaves keyword (BM25) search working; only semantic search waits.
+    if config is not None:
+        failures, index_caveat = _check_embeddings(qmd_status, status_reason, args.strict_index)
+        critical_failures += failures
 
     if config is not None:
         from .hooks import iso, launcher_path, status
@@ -736,7 +880,12 @@ def doctor_main(argv: list[str] | None = None) -> int:
     if critical_failures:
         print(f"{critical_failures} critical check(s) failed.")
         return 1
-    print("All critical checks passed.")
+    if index_caveat:
+        print(
+            f"All critical checks passed, but the semantic index is not verified: {index_caveat}."
+        )
+    else:
+        print("All critical checks passed.")
     return 0
 
 

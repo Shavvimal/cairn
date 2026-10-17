@@ -321,3 +321,46 @@ class TestCatalog(CatalogFixture):
         self.assertEqual(json.loads(result.stdout), [])
         self.assertFalse(missing.exists())
         self.assertFalse(catalog_path(missing).exists())
+
+
+class TestWriteGuards(CatalogFixture):
+    def test_export_one_refuses_unparseable_render_and_keeps_the_file(self):
+        from unittest import mock
+
+        self.native("codex", "guard")
+        self.run_cli("codex", "export", "--all")
+        source = self.source()
+        path = source.find_file("guard")
+        assert path is not None
+        before = path.read_text()
+        bad = before.replace("title:", "title: {flow}\ntitle:", 1)
+        data = {"date": "2026-03-28", "session_id": "guard", "messages": []}
+        with mock.patch.object(type(source), "render_document", return_value=bad):
+            result = source.export_one("guard", data, path)
+        self.assertIsNone(result)
+        self.assertEqual(path.read_text(), before)
+        wrong_id = before.replace("session_id: guard", "session_id: other", 1)
+        with mock.patch.object(type(source), "render_document", return_value=wrong_id):
+            result = source.export_one("guard", data, path)
+        self.assertIsNone(result)
+        self.assertEqual(path.read_text(), before)
+
+    def test_vanished_file_is_dropped_without_an_error(self):
+        from unittest import mock
+
+        from cairn import catalog as catalog_mod
+
+        self.native("codex", "gone")
+        self.run_cli("codex", "export", "--all")
+        catalog_path(self.output_dir()).unlink()
+        real = catalog_mod.read_frontmatter_head
+
+        def vanish(path, *args, **kwargs):
+            if path.name.endswith("gone.md") or "gone" in path.name:
+                raise FileNotFoundError(path)
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(catalog_mod, "read_frontmatter_head", side_effect=vanish):
+            loaded = load_catalog(self.output_dir())
+        self.assertEqual(loaded.errors, {})
+        self.assertFalse(any("gone" in rel for rel in loaded.entries))

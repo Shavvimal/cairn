@@ -17,7 +17,12 @@ import re
 
 from .schema import CodeBlockData, Message, ToolCallData
 
-_ROLE_HEADERS = {"user": "### User", "assistant": "### Assistant", "tool": "### Tool"}
+_ROLE_HEADERS = {
+    "user": "### User",
+    "assistant": "### Assistant",
+    "tool": "### Tool",
+    "agent": "### Agent",  # a message between agents (subagent -> parent, Codex collab)
+}
 
 # Unpaired UTF-16 surrogate code points. A correctly-paired emoji is a single
 # non-surrogate code point in a Python str, so anything left in this range is a lone

@@ -12,6 +12,7 @@ from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from cairn import config, recall
 from cairn.timeutil import parse_date_range
@@ -88,8 +89,20 @@ class _RecallFixture(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        self._prev = os.environ.get("CAIRN_CONFIG")
-        os.environ["CAIRN_CONFIG"] = str(cfg_path)
+        # HOME and the XDG homes go under the temp root too: catalogs and lock files
+        # (in this process and in the export subprocess) must not land in the real home.
+        env = patch.dict(
+            os.environ,
+            {
+                "CAIRN_CONFIG": str(cfg_path),
+                "HOME": str(root / "home"),
+                "XDG_CACHE_HOME": str(root / "cache"),
+                "XDG_CONFIG_HOME": str(root / "xdg"),
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self.addCleanup(config.get_config.cache_clear)
         config.get_config.cache_clear()
         subprocess.run(
             [sys.executable, "-m", "cairn", "claude", "export", "--all", "--quiet"],
@@ -98,11 +111,6 @@ class _RecallFixture(unittest.TestCase):
         )
 
     def tearDown(self):
-        if self._prev is None:
-            os.environ.pop("CAIRN_CONFIG", None)
-        else:
-            os.environ["CAIRN_CONFIG"] = self._prev
-        config.get_config.cache_clear()
         self._tmp.cleanup()
 
     def _run(self, argv: list[str]) -> tuple[int, str]:
@@ -130,6 +138,56 @@ class TestRecallList(_RecallFixture):
     def test_bad_date_fails_loud(self):
         code, _ = self._run(["list", "whenever", "--all-projects"])
         self.assertEqual(code, 1)
+
+
+class TestRecallSubagents(_RecallFixture):
+    """Children are hidden from ``list`` unless ``--include-subagents`` is given."""
+
+    def setUp(self):
+        super().setUp()
+        cfg = json.loads(Path(os.environ["CAIRN_CONFIG"]).read_text(encoding="utf-8"))
+        store = Path(cfg["collections"]["claude-code-sessions"]["store"])
+        parent_id = "abc12345-feed-0000-0000-000000000000"
+        folder = store / "-proj-demo" / parent_id / "subagents"
+        folder.mkdir(parents=True)
+        stamp = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        child = {
+            "isSidechain": True,
+            "agentId": "c0ffee",
+            "sessionId": parent_id,
+            "timestamp": stamp,
+            "type": "user",
+            "message": {"role": "user", "content": "Survey the widget tests"},
+        }
+        (folder / "agent-c0ffee.jsonl").write_text(json.dumps(child) + "\n", encoding="utf-8")
+        (folder / "agent-c0ffee.meta.json").write_text(
+            json.dumps({"agentType": "Explore", "description": "Survey widgets"}),
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [sys.executable, "-m", "cairn", "claude", "export", "--all", "--quiet"],
+            check=True,
+            capture_output=True,
+        )
+
+    def test_children_hidden_by_default(self):
+        code, out = self._run(["list", "today", "--all-projects", "--json"])
+        self.assertEqual(code, 0)
+        rows = json.loads(out)
+        self.assertEqual([r["type"] for r in rows], ["claude-session"])
+        self.assertIsNone(rows[0]["parent"])
+
+    def test_include_subagents_lists_children_with_their_parent(self):
+        code, out = self._run(["list", "today", "--all-projects", "--include-subagents", "--json"])
+        self.assertEqual(code, 0)
+        rows = {r["session_id"]: r for r in json.loads(out)}
+        child = rows["agent-c0ffee"]
+        self.assertEqual(child["type"], "claude-subagent")
+        self.assertEqual(child["parent"], "abc12345-feed-0000-0000-000000000000")
+        self.assertEqual(child["title"], "Survey widgets")
+        code, out = self._run(["list", "today", "--all-projects", "--include-subagents"])
+        self.assertIn("agent-c0ffee", out)
+        self.assertIn("(subagent of abc12345)", out)
 
 
 class TestRecallExpand(_RecallFixture):

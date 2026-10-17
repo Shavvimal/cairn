@@ -13,6 +13,7 @@ mutated file is byte-for-byte what a fresh export would produce.
 
 from __future__ import annotations
 
+import re
 import sys
 from collections.abc import Callable
 from datetime import datetime
@@ -27,6 +28,11 @@ from .storage import atomic_write, document_lock, locked
 VALID_STATUSES: Final[frozenset[str]] = frozenset({"active", "done", "blocked", "handoff"})
 
 FindFile = Callable[[str], "Path | None"]
+
+# Lineage roles a ``links:`` entry can carry, and the ``<source>:<id>`` reference
+# shape it points at. Declared here so every writer validates links identically.
+LINK_ROLES: Final[frozenset[str]] = frozenset({"parent", "child", "peer"})
+_LINK_REF: Final[re.Pattern[str]] = re.compile(r"^(claude|codex|cursor|granola):\S+$")
 
 
 def is_valid_status(status: str) -> bool:
@@ -132,9 +138,60 @@ def set_session_tags(find_file: FindFile, session_id: str, tags: list[str]) -> b
     return _mutate_file(find_file, session_id, mutate)
 
 
+def _bare_link(item: object) -> str:
+    """One ``links:`` entry without surrounding quotes or stray whitespace."""
+    text = str(item).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1]
+    return text.strip()
+
+
+def add_link(find_file: FindFile, session_id: str, role: str, ref: str) -> bool:
+    """Append a ``"<role> <source>:<id>"`` entry to a session's ``links:`` list.
+
+    ``role`` must be one of LINK_ROLES and ``ref`` must match ``<source>:<id>``
+    for a known source. Newlines are stripped so a link can never inject a new
+    frontmatter key. Idempotent: an entry that is already present returns True
+    without a message.
+    """
+    role = role.replace("\n", " ").strip()
+    ref = ref.replace("\n", "").replace("\r", "").strip()
+    if role not in LINK_ROLES:
+        valid = ", ".join(sorted(LINK_ROLES))
+        print(f"Error: invalid link role {role!r}. Must be one of: {valid}", file=sys.stderr)
+        return False
+    if not _LINK_REF.match(ref):
+        print(
+            f"Error: invalid link reference {ref!r}. Expected <claude|codex|cursor|granola>:<id>",
+            file=sys.stderr,
+        )
+        return False
+    entry = f"{role} {ref}"
+    added = False
+
+    def mutate(fm: dict) -> None:
+        nonlocal added
+        existing = fm.get("links")
+        # A hand-edited quoted entry ("peer claude:x") parses with its quotes; compare
+        # and store the bare form so one relationship can never appear twice.
+        links = [_bare_link(item) for item in existing] if isinstance(existing, list) else []
+        if entry not in links:
+            links.append(entry)
+            added = True
+        fm["links"] = links
+
+    if not _mutate_file(find_file, session_id, mutate):
+        return False
+    if added:
+        print(f"Added link: {entry}")
+    return True
+
+
 __all__ = [
+    "LINK_ROLES",
     "VALID_STATUSES",
     "add_comment",
+    "add_link",
     "invalid_status_message",
     "is_valid_status",
     "set_session_rating",

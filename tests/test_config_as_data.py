@@ -63,6 +63,68 @@ class TestSyncPolicyParsing(unittest.TestCase):
         )
 
 
+class TestInvokePolicyParsing(unittest.TestCase):
+    def test_defaults_when_block_omitted(self):
+        policy = _build({}).invoke
+        self.assertEqual(policy.codex, config.PeerPolicy())
+        self.assertEqual(policy.for_peer("claude"), config.PeerPolicy())
+        self.assertEqual(policy.codex.profile, "review")
+        self.assertEqual(policy.codex.timeout_s, 1800)
+        self.assertIsNone(policy.codex.model)
+
+    def test_explicit_values_parsed(self):
+        policy = _build(
+            {},
+            {
+                "invoke": {
+                    "//": "comment",
+                    "codex": {
+                        "model": "gpt-6-astra",
+                        "effort": "high",
+                        "profile": "edit",
+                        "timeout_s": 60,
+                        "idle_timeout_s": 30,
+                        "quiet_after_s": 5,
+                        "stall_after_s": 10,
+                    },
+                    "claude": {"model": None, "effort": None},
+                }
+            },
+        ).invoke
+        self.assertEqual(
+            policy.for_peer("codex"),
+            config.PeerPolicy("gpt-6-astra", "high", "edit", 60, 30, 5, 10),
+        )
+        self.assertEqual(policy.claude, config.PeerPolicy())
+        with self.assertRaises(config.ConfigError):
+            policy.for_peer("cursor")
+
+    def test_invalid_blocks_are_rejected(self):
+        bad: tuple[dict, ...] = (
+            {"gemini": {}},
+            {"codex": {"sandbox": "read-only"}},
+            {"codex": {"profile": "yolo"}},
+            {"codex": {"timeout_s": 0}},
+            {"codex": {"timeout_s": "60"}},
+            {"codex": {"idle_timeout_s": True}},
+            {"codex": {"model": 5}},
+            {"codex": "fast"},
+        )
+        for spec in bad:
+            with self.subTest(spec=spec), self.assertRaises(config.ConfigError):
+                _build({}, {"invoke": spec})
+
+    def test_unknown_field_error_lists_allowed(self):
+        with self.assertRaisesRegex(config.ConfigError, "Allowed keys: model, effort, profile"):
+            _build({}, {"invoke": {"claude": {"bogus": 1}}})
+
+    def test_example_config_block_parses(self):
+        data = json.loads(config.example_template_text())
+        policy = config._build(data, Path("/tmp/x.json"), None).invoke
+        self.assertEqual((policy.codex.model, policy.codex.effort), ("gpt-6-astra", "high"))
+        self.assertEqual(policy.claude, config.PeerPolicy())
+
+
 class TestSyncPlan(unittest.TestCase):
     def _all_enabled(self) -> config.CairnConfig:
         return _build(
@@ -149,3 +211,27 @@ class TestConfigInitChoices(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInvokeBlockShape(unittest.TestCase):
+    def test_falsy_or_non_object_invoke_blocks_are_rejected(self):
+        from pathlib import Path
+
+        from cairn import config as cfg
+
+        base = {
+            "data_root": "/tmp/x",
+            "qmd_binary": "qmd",
+            "collections": {},
+            "project_groups": {},
+            "repo_catalog": {},
+            "project_descriptions": {},
+        }
+        bad: tuple[object, ...] = (False, [], "", 0, "review")
+        for value in bad:
+            with self.subTest(value=value), self.assertRaises(cfg.ConfigError):
+                cfg._build({**base, "invoke": value}, Path("/tmp/config.json"), None)
+        # null and absent both mean "defaults".
+        for ok in ({**base, "invoke": None}, base):
+            built = cfg._build(ok, Path("/tmp/config.json"), None)
+            self.assertEqual(built.invoke.codex.profile, "review")

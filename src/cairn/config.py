@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
@@ -48,6 +48,10 @@ _REQUIRED_KEYS = (
 
 # Default sync cadence when the config omits ``cron.schedule``: hourly at minute 7.
 DEFAULT_CRON_SCHEDULE = "7 * * * *"
+
+# The shared permission profiles for ``cairn invoke``. Each harness adapter maps a
+# profile to its own exact native flags; the names here are the only valid values.
+PROFILES = ("review", "edit", "full")
 
 
 class ConfigError(RuntimeError):
@@ -147,6 +151,41 @@ class Collection:
 
 
 @dataclass(frozen=True)
+class PeerPolicy:
+    """Defaults for ``cairn invoke <peer>``: one peer agent's model, profile and clocks.
+
+    ``model``/``effort`` ``None`` lets the peer CLI choose. ``profile`` is one of
+    :data:`PROFILES`. All durations are in seconds: ``timeout_s`` is the wall clock,
+    ``idle_timeout_s`` kills a run with no activity, and ``quiet_after_s`` /
+    ``stall_after_s`` are the activity thresholds ``cairn invoke status`` reports.
+    """
+
+    model: str | None = None
+    effort: str | None = None
+    profile: str = "review"
+    timeout_s: int = 1800
+    idle_timeout_s: int = 900
+    quiet_after_s: int = 120
+    stall_after_s: int = 600
+
+
+@dataclass(frozen=True)
+class InvokePolicy:
+    """The ``invoke`` block: one :class:`PeerPolicy` per supported peer."""
+
+    codex: PeerPolicy = PeerPolicy()
+    claude: PeerPolicy = PeerPolicy()
+
+    def for_peer(self, peer: str) -> PeerPolicy:
+        """The policy for ``peer``, failing loudly for a peer cairn cannot invoke."""
+        if peer == "codex":
+            return self.codex
+        if peer == "claude":
+            return self.claude
+        raise ConfigError(f"No invoke policy for peer {peer!r}. Known: {', '.join(INVOKE_PEERS)}")
+
+
+@dataclass(frozen=True)
 class CairnConfig:
     """Read-only, validated view of ``cairn.config.json``."""
 
@@ -163,6 +202,7 @@ class CairnConfig:
     repo_catalog: dict[str, dict[str, str]]
     project_descriptions: dict[str, str]
     collections: dict[str, Collection]
+    invoke: InvokePolicy = InvokePolicy()
 
     def output_dir(self, collection: str) -> Path:
         """Where a collection's exported markdown lives: ``data_root / <collection>``."""
@@ -274,6 +314,53 @@ def _parse_collection(name: str, spec: dict) -> Collection:
     )
 
 
+INVOKE_PEERS = ("codex", "claude")
+_PEER_FIELDS = tuple(f.name for f in fields(PeerPolicy))
+_PEER_NULLABLE = frozenset({"model", "effort"})
+_PEER_INT_FIELDS = frozenset({"timeout_s", "idle_timeout_s", "quiet_after_s", "stall_after_s"})
+
+
+def _parse_peer(peer: str, spec: object) -> PeerPolicy:
+    if not isinstance(spec, dict):
+        raise ConfigError(f"invoke.{peer} must be an object, got {type(spec).__name__}")
+    values = {k: v for k, v in spec.items() if not k.startswith("//")}
+    unknown = set(values) - set(_PEER_FIELDS)
+    if unknown:
+        raise ConfigError(
+            f"invoke.{peer} has unknown keys: {', '.join(sorted(unknown))}. "
+            f"Allowed keys: {', '.join(_PEER_FIELDS)}."
+        )
+    for key in _PEER_NULLABLE & set(values):
+        value = values[key]
+        if value is not None and not (isinstance(value, str) and value.strip()):
+            raise ConfigError(f"invoke.{peer}.{key} must be a non-empty string or null")
+    for key in _PEER_INT_FIELDS & set(values):
+        value = values[key]
+        # bool is an int subclass; a ``true`` timeout is a typo, not one second.
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ConfigError(f"invoke.{peer}.{key} must be a positive integer, got {value!r}")
+    profile = values.get("profile", "review")
+    if profile not in PROFILES:
+        raise ConfigError(
+            f"invoke.{peer}.profile must be one of {', '.join(PROFILES)}, got {profile!r}"
+        )
+    return PeerPolicy(**values)
+
+
+def _parse_invoke(spec: object) -> InvokePolicy:
+    """Parse the optional ``invoke`` block; every omitted peer or field takes its default."""
+    if not isinstance(spec, dict):
+        raise ConfigError(f"'invoke' must be an object, got {type(spec).__name__}")
+    peers = {k: v for k, v in spec.items() if not k.startswith("//")}
+    unknown = set(peers) - set(INVOKE_PEERS)
+    if unknown:
+        raise ConfigError(
+            f"invoke has unknown peers: {', '.join(sorted(unknown))}. "
+            f"Allowed peers: {', '.join(INVOKE_PEERS)}."
+        )
+    return InvokePolicy(**{peer: _parse_peer(peer, value) for peer, value in peers.items()})
+
+
 def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig:
     missing = [k for k in _REQUIRED_KEYS if k not in data]
     if missing:
@@ -294,6 +381,15 @@ def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig
     }
 
     cron_schedule = str((data.get("cron") or {}).get("schedule", DEFAULT_CRON_SCHEDULE))
+    raw_invoke = data.get("invoke")
+    if raw_invoke is None:
+        raw_invoke = {}
+    if not isinstance(raw_invoke, dict):
+        raise ConfigError(
+            f"{config_path}: 'invoke' must be an object of per-peer settings, "
+            f"got {type(raw_invoke).__name__}"
+        )
+    invoke = _parse_invoke(raw_invoke)
 
     return CairnConfig(
         repo_root=repo_root,
@@ -309,6 +405,7 @@ def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig
         repo_catalog={g: dict(repos) for g, repos in data["repo_catalog"].items()},
         project_descriptions=dict(data["project_descriptions"]),
         collections=collections,
+        invoke=invoke,
     )
 
 
@@ -336,9 +433,13 @@ __all__ = [
     "DEFAULT_CRON_SCHEDULE",
     "ENV_OVERRIDE",
     "EXAMPLE_FILENAME",
+    "INVOKE_PEERS",
+    "PROFILES",
     "CairnConfig",
     "Collection",
     "ConfigError",
+    "InvokePolicy",
+    "PeerPolicy",
     "ServiceSource",
     "SyncPolicy",
     "claude_slug",

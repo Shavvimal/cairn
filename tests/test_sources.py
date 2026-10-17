@@ -36,6 +36,17 @@ class TestSourceModules(unittest.TestCase):
                 self.assertTrue(callable(getattr(m, "main", None)))
                 self.assertTrue(issubclass(getattr(m, cls), ConversationSource))
 
+    def test_conversation_sources_match_registry_types(self):
+        from cairn.registry import BY_NAME
+
+        for mod, cls in CONVERSATION_SOURCES.items():
+            module = importlib.import_module(f"cairn.sources.{mod}")
+            source = getattr(module, cls)()
+            entry = BY_NAME[source.source_name]
+            self.assertEqual(source.session_type, entry.session_type)
+            self.assertEqual(source.subagent_type, entry.subagent_type)
+            self.assertEqual(source.session_types, entry.session_types)
+
     def test_service_docs_exposes_main(self):
         m = importlib.import_module("cairn.sources.service_docs")
         self.assertTrue(callable(getattr(m, "main", None)))

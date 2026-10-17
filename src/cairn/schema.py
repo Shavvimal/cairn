@@ -30,13 +30,26 @@ class CodeBlockData(TypedDict, total=False):
 
 
 class Message(TypedDict, total=False):
-    role: str  # "user" | "assistant" | "tool"
+    role: str  # "user" | "assistant" | "tool" | "agent" (inter-agent message; never user input)
     text: str
     timestamp: str | None
     thinking: str | None
     reasoning_recoverable: bool  # False marks encrypted/dropped reasoning (renderer flags it)
     tool_calls: list[ToolCallData]
     code_blocks: list[CodeBlockData]
+
+
+class SubagentRef(TypedDict, total=False):
+    """One row of a parent document's ``## Subagents`` index."""
+
+    agent_id: str
+    title: str
+    agent_type: str | None
+    request_shape: str | None
+    workflow_run: str | None
+    finished: bool
+    stopped_by_user: bool
+    path: str  # relative to the parent document
 
 
 # Parsed YAML frontmatter has dynamic keys (type, date, session_id, status, …),
@@ -93,6 +106,34 @@ class SessionData(TypedDict, total=False):
     # status / titling
     status: str
     title: str
+    # lineage (shared by Claude and Codex child documents)
+    parent_session_id: str | None
+    spawn_depth: int | None
+    agent_type: str | None
+    subagents: list[SubagentRef]
+    finished: bool
+    stopped_by_user: bool
+    # Claude subagent transcript metadata (agent-<id>.meta.json)
+    agent_id: str | None
+    description: str | None
+    tool_use_id: str | None
+    request_shape: str | None
+    workflow_run: str | None
+    workflow_phase: str | None
+    parent_agent_id: str | None
+    is_fork: bool
+    parent_document: str | None  # relative link from a child document to its parent
+    agent_cwd: str | None  # the child's own cwd when it differs from the parent's
+    # Codex rollout context (session_meta / turn_context)
+    originator: str | None
+    thread_source: str | None
+    forked_from_id: str | None
+    agent_nickname: str | None
+    agent_path: str | None
+    effort: str | None
+    sandbox: str | None
+    approval_policy: str | None
+    replay_unresolved: bool
     # meeting-specific (Granola)
     duration_min: int | None
     attendees: list[Any]
@@ -111,5 +152,6 @@ __all__ = [
     "Frontmatter",
     "Message",
     "SessionData",
+    "SubagentRef",
     "ToolCallData",
 ]

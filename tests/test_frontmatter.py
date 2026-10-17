@@ -203,3 +203,39 @@ class HeadHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTitleLineFlattening(unittest.TestCase):
+    def test_line_breaks_become_spaces(self):
+        from cairn.frontmatter import parse_frontmatter, title_line
+
+        line = title_line("First line\nSecond line\r\nThird")
+        self.assertEqual(line, 'title: "First line Second line Third"')
+        self.assertEqual(
+            parse_frontmatter(f"---\n{line}\n---\n")["title"], "First line Second line Third"
+        )
+
+
+class TestQuotedLinkDedupe(unittest.TestCase):
+    def test_hand_quoted_link_is_not_duplicated(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from cairn.mutations import add_link
+
+        # add_link takes a document lock under $HOME; keep it in the temp dir.
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"HOME": str(Path(tmp) / "home")}),
+        ):
+            doc = Path(tmp) / "s.md"
+            doc.write_text(
+                "---\ntype: codex-session\nsession_id: abc\nstatus: active\ntags: []\n"
+                'rating: null\ncomments: ""\nprojects: []\nlinks:\n  - "peer claude:x"\n---\n'
+            )
+            self.assertTrue(add_link(lambda _sid: doc, "abc", "peer", "claude:x"))
+            text = doc.read_text()
+            self.assertEqual(text.count("peer claude:x"), 1)
+            self.assertNotIn('"peer claude:x"', text)

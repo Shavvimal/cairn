@@ -20,7 +20,8 @@ A foreground `Bash` call dies long before a ten-minute model download finishes, 
 
 2. Arm `Monitor` on the log when the tool is available. The filter must catch completion,
    progress AND failures; silence is not success. The embed ends with
-   `✓ Done! Embedded N chunks from M documents`; download progress prints percentages,
+   `✓ Done! Embedded N chunks from M documents` and a `[qmd-verify]` line with the
+   index-wide document/vector/pending counts; download progress prints percentages,
    "model" or "download"; failures show `Error`/`Traceback`/`failed`/`Killed`/`OOM`.
 
    > Monitor invocation:
@@ -29,7 +30,7 @@ A foreground `Bash` call dies long before a ten-minute model download finishes, 
    > - **command:**
    >   ```bash
    >   tail -n +1 -f "$DATA_ROOT/logs/context-sync.log" \
-   >     | grep -E --line-buffered "Done!|Embedded |[0-9]+%|download|model|Error|Traceback|failed|FAILED|Killed|OOM|=== (done|FAILED) ==="
+   >     | grep -E --line-buffered "Done!|Embedded |[0-9]+%|download|model|Error|Traceback|failed|FAILED|INCOMPLETE|qmd-verify|coalesced|skipped|Killed|OOM|=== (done|FAILED) ==="
    >   ```
 
    `tail -n +1 -f` replays lines written before Monitor armed, then streams new ones.
@@ -40,6 +41,16 @@ A foreground `Bash` call dies long before a ten-minute model download finishes, 
      current; check total documents/vectors and a real query before declaring success.
    - **Failure:** the log shows `=== FAILED ===` or an error line, or the task exits
      non-zero. `Read` the full log and stop and report; do not verify a broken index.
+     The `failed steps:` line before `=== FAILED ===` names what failed.
+     `[qmd-embed] FAILED - qmd exited 0 but reported: N chunks failed` or
+     `[qmd-verify] INCOMPLETE` means QMD stopped early (QMD 1.1.5 and 2.5.3 cap one embed
+     session at 30 minutes). Completed documents keep their vectors; a partly embedded
+     document restarts. Rerun only while the pending count in `cairn doctor` falls.
+     The embed line says `exited 0`, not `ok`; the `[qmd-verify]` line is the verdict.
+   - **Skipped:** `=== context-sync (...) skipped: another cairn sync is running ... ===`
+     means your run exited 0 without doing work. The running sync runs its missing
+     stages (a `[coalesced]` line) before its own `=== done ===` or `=== FAILED ===`;
+     judge that instead.
    - **Silence or timeout:** `Read` the tail of the log. Download or percentage lines
      mean it is still working, so re-arm Monitor. Otherwise report it as wedged.
 
@@ -62,3 +73,21 @@ plugin-declared timeout cannot raise, so the handler only queues the event and s
 detached worker. End a real session, then inspect `cairn hook status --harness claude`
 and search a distinctive phrase from that session. An isolated shell invocation of the
 handler is not host lifecycle verification.
+
+## Peer runs and fan-out health
+
+Start `cairn invoke <peer> … --json` with `Bash` `run_in_background: true` and keep the task
+id; the JSON result line arrives on the task's stdout when it exits, and the host sends a
+completion notice. Read the first stderr line for the thread id. Mid-run, read
+`cairn invoke status <id>`; with `Monitor` available, watch the thread's `events-NN.jsonl`
+under `<data_root>/logs/invoke/<peer>/<id>/`. Stop the monitor afterwards. Silence proves
+nothing: a `silent` activity label past the stall threshold means a probable hang.
+
+For a fan-out of `Agent` subagents plus peer runs, `cairn agents list` shows every item the
+current session spawned with its execution state, activity and outcome. Run
+`cairn agents wait --session claude:<id>` in the background to get one completion notice when
+the last one exits. After a context reset, run `cairn agents list` before resuming work.
+
+Skills: `/cairn:invoke-codex` and `/cairn:invoke-claude`. Both may be invoked by the model
+when the user asks for a peer run or a quality gate; the engine's read-only default profile,
+timeouts and depth guard bound what a run can do.

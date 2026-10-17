@@ -23,15 +23,25 @@ A single shell call cannot wait out a ten-minute model download, so run
    tail -n 20 "$DATA_ROOT/logs/context-sync.log"
    ```
 
-   Completion prints `✓ Done! Embedded N chunks from M documents` and then
+   Completion prints `✓ Done! Embedded N chunks from M documents`, a
+   `[qmd-verify]` line with the index-wide document/vector/pending counts, and then
    `=== done ===`; progress prints percentages, "model" or "download"; failures show
-   `Error`/`Traceback`/`failed`/`Killed`/`OOM` or `=== FAILED ===`.
+   `Error`/`Traceback`/`failed`/`Killed`/`OOM`, a `failed steps:` line and `=== FAILED ===`.
 
 3. Decide from evidence: exit 0 plus `=== done ===` is sync success. Note N/M; zero new
    chunks can mean the index is already current, so verify total documents/vectors and
    a real query. A non-zero exit or `=== FAILED ===` means stop and report with
-   the log. Silence with download lines means keep polling; silence without them means
+   the log; `failed steps:` names what failed. `[qmd-embed] FAILED - qmd exited 0 but
+   reported: N chunks failed` or `[qmd-verify] INCOMPLETE` means QMD stopped early
+   (QMD 1.1.5 and 2.5.3 cap one embed session at 30 minutes). Completed documents keep
+   their vectors; a partly embedded document restarts. Rerun only while the pending
+   count in `cairn doctor` falls. The embed line says `exited 0`, not `ok`; the
+   `[qmd-verify]` line is the verdict. Silence with download lines means keep polling; silence without them means
    report it as wedged. Elapsed time is never completion.
+   If the only new line is `=== context-sync (...) skipped: another cairn sync is
+   running ... ===`, your run exited 0 without doing work: the running sync runs its
+   missing stages (a `[coalesced]` line) before its own `=== done ===` or
+   `=== FAILED ===`; judge that instead.
 
 Collect missing settings with an available user-input tool. Some synchronous input tools
 are restricted to Plan mode; use asynchronous input or ordinary conversation otherwise.
@@ -70,3 +80,19 @@ SessionEnd runs when the main session ends (normal client shutdown, archive/dele
 open conversation, or the host's idle timeout). Switching conversations does not immediately
 end one. End a real session and check completed sync plus a QMD search for its distinctive
 text, without waiting for cron. The three-second callback hands work to a detached process.
+
+## Peer runs and fan-out health
+
+Run `cairn invoke <peer> … --json` with `exec_command` and a long `yield_time_ms`, keep the
+session handle, and poll with `write_stdin` (an empty write returns new output) until it
+exits; the last stdout line is the JSON result. Read the first stderr line for the thread id
+and poll `cairn invoke status <id>` between writes. Run invoke with escalated permissions:
+the sandbox hides the login keychain (`claude -p` reports "Not logged in"), blocks the peer's
+network, and denies writes under `~/.codex` and `~/.claude`. Never start a nested
+`codex exec` inside the sandbox; the engine refuses depth 1 without `--allow-nested`.
+
+`cairn agents list` shows every peer run and subagent of the current thread with execution
+state, activity and outcome; `cairn agents wait --session codex:<id>` blocks until the last
+one exits. The `invoke-codex` and `invoke-claude` skills ship with
+`allow_implicit_invocation: true`, so a request in conversation can start them; setup stays
+explicit.
