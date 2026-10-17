@@ -122,6 +122,8 @@ class SessionData(TypedDict, total=False):
     workflow_phase: str | None
     parent_agent_id: str | None
     is_fork: bool
+    parent_document: str | None  # relative link from a child document to its parent
+    agent_cwd: str | None  # the child's own cwd when it differs from the parent's
     # Codex rollout context (session_meta / turn_context)
     originator: str | None
     thread_source: str | None

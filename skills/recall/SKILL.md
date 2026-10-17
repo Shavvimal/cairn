@@ -31,7 +31,8 @@ Parse the user's input after `/recall`:
 
 ```bash
 cairn recall list "DATE_EXPR"          # e.g. yesterday, today, "last week", 2026-06-20
-cairn recall list "DATE_EXPR" --json   # machine-readable (session_id, time, msgs, title, project)
+cairn recall list "DATE_EXPR" --json   # machine-readable (session_id, time, msgs, title, project, type, parent)
+cairn recall list "DATE_EXPR" --include-subagents   # also list subagent transcripts
 ```
 
 Date expressions: `today`, `yesterday`, `YYYY-MM-DD`, `N days ago`, `last N days`,
@@ -41,6 +42,13 @@ use `--min-msgs 1` to include short sessions), `--project PATH`, repeatable `--s
 Use `--refresh` for recent/live history: it exports without requiring QMD. Stop on refresh
 failure and report the store as potentially stale. Date windows are UTC; reduced-precision
 legacy records are labeled. Keep source-qualified `reference` values for expansion.
+
+Subagent transcripts (`type: claude-subagent`, id `agent-<agentId>`) are hidden from
+`list` by default. `--include-subagents` shows them; `--min-msgs` does not apply to them,
+because a subagent has one user message, its prompt. Each JSON row has `type` (the
+document type) and `parent` (the parent session id, or `null` for a session). Text rows
+for a child end with `(subagent of <parent[:8]>)`. `expand` takes a child id directly,
+for example `cairn recall expand claude:agent-a193a0cb5d55bc5b6`.
 
 Present the session table. To expand one the user picks:
 

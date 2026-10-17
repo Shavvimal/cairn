@@ -17,6 +17,11 @@ def run(args: argparse.Namespace) -> int:
         if getattr(args, "source", None) and ":" not in reference:
             reference = f"{args.source}:{reference}"
         record = SessionStore(get_config()).resolve(reference)
+        if record.is_subagent:
+            raise ValueError(
+                "cannot resume a subagent transcript; "
+                f"resume its parent {record.source}:{record.parent_id}"
+            )
         argv = get_harness(record.source).resume(record.session_id, args.fork)
         if args.launch:
             if not sys.stdin.isatty():

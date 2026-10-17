@@ -14,11 +14,18 @@ Codex stores each session as a rollout JSONL file:
 
 Each line is `{"type": ..., "payload": {...}}`. The exporter pulls:
 
-- `session_meta` → session id, cwd, timestamp, git branch/commit, cli version
-- `turn_context` → model (e.g. `gpt-5.5`)
+- `session_meta` (the first one) → session id, cwd, timestamp, git branch/commit, cli
+  version, `originator` (`codex-tui`, `codex_exec`, ...), `thread_source`,
+  `forked_from_id`, and for a subagent the `source.subagent.thread_spawn` lineage
+- `turn_context` → model (e.g. `gpt-5.5`), `effort`, `sandbox` (`sandbox_policy.type`),
+  `approval_policy`
 - `event_msg` (`user_message`) → user prompts
-- `response_item` (`message`, role assistant) → assistant text
-- `response_item` (`function_call` / `function_call_output`) → compact tool trace
+- `response_item` (`message`, role assistant) → assistant text; `phase: final_answer`
+  marks a subagent finished
+- `response_item` (`function_call` / `function_call_output`, `custom_tool_call` /
+  `custom_tool_call_output`) → compact tool trace (code-mode `exec` calls included)
+- `response_item` (`agent_message`) → an `### Agent` turn: `from <author> to
+  <recipient>`, the plaintext header, and `[encrypted]` for the encrypted body
 
 Skipped: telemetry (`token_count`, `rate_limits`, `task_started` / `task_complete`) and
 encrypted `reasoning` items.
@@ -42,6 +49,12 @@ repo: your-product-api
 branch: feature/tuning-resolution
 commit: 5611a97848ba96f6cf454cb150e680acfa5383a8
 model: gpt-5.5
+originator: codex-tui             # when present
+thread_source: user               # when present
+effort: high                      # latest turn_context
+sandbox: read-only                # sandbox_policy.type
+approval_policy: never
+forked_from_id: 019e...           # fork children only
 title: "..."
 messages: 4
 last_activity: ISO timestamp
@@ -52,9 +65,50 @@ comments: ""
 projects: []
 ```
 
-Content sections: Tool Calls, My Notes, Conversation.
+A subagent document has `type: codex-subagent` and adds, after the context keys:
+
+```yaml
+parent_session_id: 019e...        # thread_spawn.parent_thread_id
+spawn_depth: 1
+agent_type: worker                # thread_spawn.agent_role, omitted when null
+agent_nickname: "Bohr"
+agent_path: "/root/worker"
+replay_unresolved: true           # only when the replay cut failed (see below)
+```
+
+Its status defaults to `done` once it gave a final answer.
+
+Content sections: Subagents (parents only), Tool Calls, My Notes, Conversation.
 Preserved on export: `## My Notes` plus frontmatter `comments`, `projects`, `status`,
 `tags`, `rating`, `title`.
+
+## Subagent rollouts
+
+Codex multi-agent runs write one rollout per child thread. The exporter keeps each child
+as its own document:
+
+- **First meta wins.** A child spawned with `fork_context` writes two `session_meta`
+  lines, its own then the parent's, followed by the replayed parent history. The child
+  keeps its own id, so it never merges with the parent.
+- **Replay cut** (`src/cairn/sources/codex_replay.py`, tagged `codex-cli 0.160`). The
+  child's own history starts at the first `task_started` whose `turn_id` sorts at or
+  after the child id (both UUIDv7). Fallback: the `thread_settings_applied` event for
+  the child, or the developer message with `<multi_agent_role>`. If neither appears, a
+  rollout changed in the last 600 s is a live child and is skipped this run. An older
+  one exports whole with `replay_unresolved: true` and a warning on stderr.
+- **Title.** The first user prompt. Children usually have none (inter-agent text is
+  encrypted), so the title falls back to `<agent_type> <agent_nickname>: <agent_path>`.
+- **Location.** A child lives in its parent's session folder:
+  `<parent stem>/agent-<short id>.md`. A child exported before its parent document
+  existed stays at the canonical path.
+- **Parent index.** The parent document lists every child under `## Subagents` with a
+  relative link, the child id, its agent type, and `finished` or `running`. A new,
+  retitled, or finished child re-renders the parent even when the parent rollout did not
+  change. A windowed export selects a parent when it or any child changed in the window.
+- **Listing.** `codex-subagent` documents resolve by id (`note`, `log`, recall) but are
+  hidden from `list`. `export_target` for a parent also exports its children, and for a
+  child also refreshes the parent index. The first-line lineage index is cached under
+  `$XDG_CACHE_HOME/cairn/lineage/`.
 
 ## Resume and automatic sync
 
