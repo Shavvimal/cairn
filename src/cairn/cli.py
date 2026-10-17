@@ -132,9 +132,18 @@ def run(source: ConversationSource, argv: list[str] | None = None) -> None:
         from .storage import locked
 
         with locked(source.output_dir / ".operation.lock"):
-            result = args.func(args)
+            try:
+                result = args.func(args)
+            finally:
+                # Persist the catalog before the lock is released so the next
+                # reader sees this run's write-through entries.
+                source.flush_catalog()
         sys.exit(result)
-    sys.exit(args.func(args))
+    try:
+        result = args.func(args)
+    finally:
+        source.flush_catalog()
+    sys.exit(result)
 
 
 __all__ = ["build_parser", "run"]

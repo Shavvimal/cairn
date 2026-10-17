@@ -333,3 +333,42 @@ class TestSharedStore(StoreFixture):
             check=False,
         )
         self.assertNotEqual(bad.returncode, 0)
+
+
+class TestActivityDates(StoreFixture):
+    def test_frontmatter_holds_days_not_every_timestamp(self):
+        stamps = [
+            f"2026-03-{day:02}T{hour:02}:{minute:02}:00Z"
+            for day in (28, 29, 30)
+            for hour in range(24)
+            for minute in (0, 15, 30, 45)
+        ]
+        self.native("codex", "busy", stamps=stamps)
+        self.run_cli("codex", "export", "--all")
+        content = self.records()[0].path.read_text()
+        fm = parse_frontmatter(content)
+        self.assertEqual(fm["activity_dates"], ["2026-03-28", "2026-03-29", "2026-03-30"])
+        self.assertNotIn("activity_timestamps", fm)
+        self.assertEqual(fm["time_precision"], "messages")
+        self.assertIn("### User - 2026-03-29T12:15:00Z", content)  # full times stay in the body
+        _rc, out = self.query("list", "2026-03-29", "--all-projects", "--min-msgs", "1", "--json")
+        self.assertEqual(len(json.loads(out)), 1)
+
+    def test_pre_release_timestamp_lists_are_still_read(self):
+        folder = self.root / "data/codex-sessions"
+        folder.mkdir(parents=True)
+        (folder / "old-format.md").write_text(
+            '---\ntype: codex-session\nsession_id: legacy-stamps\ncairn_schema: "1"\n'
+            'source: codex\nnative_id: legacy-stamps\nuser_message_count: "2"\n'
+            "activity_timestamps:\n  - 2026-03-28T23:30:00Z\n  - 2026-03-30T00:30:00+02:00\n"
+            "status: active\n---\n## Conversation\n"
+        )
+        record = self.records()[0]
+        self.assertEqual(
+            [d.isoformat() for d in record.activity],
+            ["2026-03-28T00:00:00+00:00", "2026-03-29T00:00:00+00:00"],
+        )
+        _rc, out = self.query("list", "2026-03-29", "--all-projects", "--min-msgs", "1", "--json")
+        self.assertEqual([r["session_id"] for r in json.loads(out)], ["legacy-stamps"])
+        _rc, out = self.query("list", "2026-03-30", "--all-projects", "--min-msgs", "1", "--json")
+        self.assertEqual(json.loads(out), [])

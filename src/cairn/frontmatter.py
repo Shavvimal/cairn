@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 # Fields preserved across re-syncs so manual edits survive: the tail fields are
@@ -141,6 +142,35 @@ def parse_frontmatter(content: str) -> dict:
         frontmatter[current_key] = "\n".join(multiline_value).rstrip()
 
     return frontmatter
+
+
+# A frontmatter block larger than this is not something cairn ever writes; refuse
+# rather than read an arbitrarily large file looking for a closing fence.
+MAX_FRONTMATTER_BYTES = 4 * 1024 * 1024
+
+
+def read_frontmatter_head(path: Path, limit: int = MAX_FRONTMATTER_BYTES) -> dict:
+    """Parse a file's frontmatter by reading only up to its closing fence.
+
+    Behaves like ``parse_frontmatter(path.read_text())`` for every file cairn
+    writes, without reading the (often multi-megabyte) body. A file without an
+    opening fence yields ``{}``; a block that exceeds ``limit`` raises
+    :class:`FrontmatterParseError` instead of scanning the whole file.
+    """
+    with path.open(encoding="utf-8") as handle:
+        first = handle.readline()
+        if first != "---\n":
+            return {}
+        parts = [first]
+        total = len(first)
+        for line in handle:
+            parts.append(line)
+            total += len(line)
+            if line == "---\n":
+                break
+            if total > limit:
+                raise FrontmatterParseError(f"frontmatter block exceeds {limit} bytes")
+    return parse_frontmatter("".join(parts))
 
 
 def extract_my_notes_section(content: str) -> str | None:

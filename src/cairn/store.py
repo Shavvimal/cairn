@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .catalog import Catalog, load_catalog
 from .config import CairnConfig
-from .frontmatter import FrontmatterParseError, _escape_scalar, parse_frontmatter
+from .frontmatter import _escape_scalar, parse_frontmatter
 from .registry import SOURCES
 from .schema import Message, SessionData
 from .timeutil import parse_iso
@@ -26,6 +27,9 @@ def messages_of(data: SessionData) -> list[Message]:
 def metadata_lines(source: str, native_id: str, data: SessionData) -> list[str]:
     messages = messages_of(data)
     times = sorted({ts for m in messages if (ts := m.get("timestamp"))})
+    # Day granularity is all recall needs; every turn header in the body keeps the
+    # full timestamp, so the frontmatter stays small even for thousand-turn sessions.
+    days = sorted({d.date().isoformat() for ts in times if (d := _date(ts)) is not None})
     first = data.get("first_timestamp") or data.get("created_at")
     last = data.get("last_timestamp") or data.get("last_activity")
     values: dict[str, object] = {
@@ -50,20 +54,9 @@ def metadata_lines(source: str, native_id: str, data: SessionData) -> list[str]:
         for k, v in values.items()
         if v is not None
     ]
-    lines.append("activity_timestamps:" if times else "activity_timestamps: []")
-    lines.extend(f"  - {ts}" for ts in times)
+    lines.append("activity_dates:" if days else "activity_dates: []")
+    lines.extend(f"  - {day}" for day in days)
     return lines
-
-
-def needs_upgrade(path: Path | None) -> bool:
-    if path is None or not path.exists():
-        return True
-    try:
-        return parse_frontmatter(path.read_text(encoding="utf-8")).get("cairn_schema") != str(
-            SCHEMA_VERSION
-        )
-    except (OSError, UnicodeError, FrontmatterParseError):
-        return True
 
 
 def file_revision(path: Path) -> str:
@@ -73,17 +66,15 @@ def file_revision(path: Path) -> str:
     ).hexdigest()
 
 
-def is_current(path: Path | None, revision: str) -> bool:
+def needs_upgrade(record: SessionRecord | None) -> bool:
+    return record is None or record.metadata.get("cairn_schema") != str(SCHEMA_VERSION)
+
+
+def is_current(record: SessionRecord | None, revision: str) -> bool:
     """Annotation writes must never advance the native source checkpoint."""
-    if needs_upgrade(path):
-        return False
-    assert path is not None
-    try:
-        return (
-            parse_frontmatter(path.read_text(encoding="utf-8")).get("source_revision") == revision
-        )
-    except (OSError, UnicodeError, FrontmatterParseError):
-        return False
+    return not needs_upgrade(record) and (
+        record is not None and record.metadata.get("source_revision") == revision
+    )
 
 
 def _number(value: object) -> int | None:
@@ -96,6 +87,16 @@ def _number(value: object) -> int | None:
 def _date(value: object) -> datetime | None:
     result = parse_iso(value) if isinstance(value, str) else None
     return result.astimezone(UTC) if result else None
+
+
+def _utc_day(value: object) -> datetime | None:
+    """A bare ``YYYY-MM-DD`` as UTC midnight (never interpreted in local time)."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").replace(tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -129,19 +130,44 @@ class SessionRecord:
         )
 
 
-def read_record(path: Path, source: str, id_field: str, session_type: str) -> SessionRecord | None:
-    fm = parse_frontmatter(path.read_text(encoding="utf-8"))
+def native_id_of(fm: dict, id_field: str) -> str | None:
+    native_id = fm.get("native_id") or fm.get(id_field)
+    return native_id if isinstance(native_id, str) and native_id else None
+
+
+def _activity_days(fm: dict) -> tuple[datetime, ...]:
+    days = fm.get("activity_dates")
+    if isinstance(days, list):
+        return tuple(sorted({d for s in days if (d := _utc_day(s)) is not None}))
+    # Files written by the pre-release branch carry every timestamp; reduce to days
+    # so their intermediate activity is not lost (their source_revision is unchanged,
+    # so a re-export will not rewrite them and the native data may be gone).
+    stamps = fm.get("activity_timestamps")
+    if isinstance(stamps, list):
+        return tuple(
+            sorted(
+                {
+                    d.replace(hour=0, minute=0, second=0, microsecond=0)
+                    for s in stamps
+                    if (d := _date(s)) is not None
+                }
+            )
+        )
+    return ()
+
+
+def record_from_frontmatter(
+    path: Path, fm: dict, source: str, id_field: str, session_type: str
+) -> SessionRecord | None:
+    """Build a record from already-parsed frontmatter (``None`` if not a session)."""
     if fm.get("type") != session_type:
         return None
-    native_id = fm.get("native_id") or fm.get(id_field)
-    if not isinstance(native_id, str) or not native_id:
+    native_id = native_id_of(fm, id_field)
+    if native_id is None:
         return None
     if fm.get("source", source) != source:
         raise ValueError("source disagrees with collection")
-    stamps = fm.get("activity_timestamps", [])
-    if not isinstance(stamps, list):
-        stamps = []
-    activity = tuple(t for s in stamps if (t := _date(s)) is not None)
+    activity = _activity_days(fm)
     first = _date(fm.get("started_at"))
     precision = "messages"
     if not activity:
@@ -171,6 +197,30 @@ def read_record(path: Path, source: str, id_field: str, session_type: str) -> Se
     )
 
 
+def read_record(path: Path, source: str, id_field: str, session_type: str) -> SessionRecord | None:
+    """Parse one file in full and build its record (the catalog-free path)."""
+    fm = parse_frontmatter(path.read_text(encoding="utf-8"))
+    return record_from_frontmatter(path, fm, source, id_field, session_type)
+
+
+def collection_records(
+    catalog: Catalog, source: str, id_field: str, session_type: str
+) -> list[SessionRecord]:
+    """Every session record in a refreshed catalog; unreadable files are reported."""
+    result = []
+    for rel, message in sorted(catalog.errors.items()):
+        print(f"Warning: skipping {catalog.path_of(rel)}: {message}", file=sys.stderr)
+    for path, fm in catalog.items():
+        try:
+            record = record_from_frontmatter(path, fm, source, id_field, session_type)
+        except ValueError as exc:
+            print(f"Warning: skipping {path}: {exc}", file=sys.stderr)
+            continue
+        if record:
+            result.append(record)
+    return result
+
+
 class SessionStore:
     def __init__(self, config: CairnConfig):
         self.config = config
@@ -182,14 +232,11 @@ class SessionStore:
                 continue
             if source.collection not in self.config.collections:
                 continue
-            for path in sorted(self.config.output_dir(source.collection).rglob("*.md")):
-                try:
-                    record = read_record(path, source.source, source.id_field, source.session_type)
-                except (OSError, UnicodeError, ValueError) as exc:
-                    print(f"Warning: skipping {path}: {exc}", file=sys.stderr)
-                    continue
-                if record:
-                    result.append(record)
+            catalog = load_catalog(self.config.output_dir(source.collection))
+            result.extend(
+                collection_records(catalog, source.source, source.id_field, source.session_type)
+            )
+            catalog.save()
         return result
 
     def resolve(self, reference: str, records: list[SessionRecord] | None = None) -> SessionRecord:

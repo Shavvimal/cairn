@@ -27,12 +27,13 @@ from pathlib import Path
 
 from .. import frontmatter as fm_mod
 from .. import listing, mutations, qmd
+from ..catalog import Catalog, load_catalog
 from ..paths import get_output_path
 from ..registry import SOURCES
 from ..rendering import render_conversation, strip_lone_surrogates
 from ..schema import Message, SessionData
 from ..storage import atomic_write, document_lock, locked
-from ..store import metadata_lines, read_record, resolve
+from ..store import SessionRecord, metadata_lines, native_id_of, record_from_frontmatter
 
 
 class ConversationSource(ABC):
@@ -113,24 +114,100 @@ class ConversationSource(ABC):
     # Shared concrete helpers
     # ====================================================================
 
-    def find_file(self, session_id: str) -> Path | None:
-        source = next((s for s in SOURCES if s.collection == self.collection), None)
-        if source is None:
+    @property
+    def source_name(self) -> str:
+        """The registry source verb for this collection (``claude``, ``codex`` …)."""
+        return next(s.source for s in SOURCES if s.collection == self.collection)
+
+    @property
+    def catalog(self) -> Catalog:
+        """The collection's stat-validated catalog, refreshed once per process.
+
+        Export runs hold the collection's operation lock, so within one run the only
+        other writers are annotations, which :meth:`Catalog.get` re-validates per hit.
+        """
+        if self._catalog is None:
+            self._catalog = load_catalog(self.output_dir)
+        return self._catalog
+
+    _catalog: Catalog | None = None
+    _index: dict[str, list[str]] | None = None
+    _index_generation = -1
+
+    def flush_catalog(self) -> None:
+        """Persist catalog changes (no-op when nothing changed or never loaded)."""
+        if self._catalog is not None:
+            self._catalog.save()
+
+    def _id_index(self) -> dict[str, list[str]]:
+        """native_id -> relative paths, rebuilt whenever the catalog changed."""
+        catalog = self.catalog
+        if self._index is None or self._index_generation != catalog.generation:
+            index: dict[str, list[str]] = {}
+            for rel, entry in catalog.entries.items():
+                fm = entry.frontmatter
+                if fm.get("type") != self.session_type:
+                    continue
+                native_id = native_id_of(fm, self.id_field)
+                if native_id is not None:
+                    index.setdefault(native_id, []).append(rel)
+            self._index = index
+            self._index_generation = catalog.generation
+        return self._index
+
+    def _record_at(self, rel: str) -> SessionRecord | None:
+        entry = self.catalog.get(rel)
+        if entry is None:
             return None
-        records = []
-        for path in self.output_dir.rglob("*.md"):
-            try:
-                record = read_record(path, source.source, self.id_field, self.session_type)
-                if record:
-                    records.append(record)
-            except (ValueError, OSError, UnicodeError):
-                continue
         try:
-            return resolve(session_id, records).path
-        except ValueError as exc:
-            if str(exc).startswith("no session"):
-                return None
-            raise FileExistsError(str(exc)) from exc
+            return record_from_frontmatter(
+                self.catalog.path_of(rel),
+                entry.frontmatter,
+                self.source_name,
+                self.id_field,
+                self.session_type,
+            )
+        except ValueError:
+            return None
+
+    def find_record(self, session_id: str) -> SessionRecord | None:
+        """Locate a session by full id, unique prefix, or ``source:id`` reference.
+
+        Served from the catalog: a dictionary hit plus one ``stat`` of the file.
+        Raises :class:`FileExistsError` when the id is ambiguous, so a mutation can
+        never silently land on the wrong session. Returns ``None`` when nothing
+        matches (including a reference that names another source).
+        """
+        source, prefix = session_id.split(":", 1) if ":" in session_id else (None, session_id)
+        if source is not None and source != self.source_name:
+            return None
+        for _attempt in range(2):  # once more if the hit's identity changed on disk
+            index = self._id_index()
+            if prefix in index:
+                native_id, rels = prefix, index[prefix]
+            else:
+                matches = [(nid, rels) for nid, rels in index.items() if nid.startswith(prefix)]
+                if not matches:
+                    return None
+                if len(matches) > 1:
+                    choices = ", ".join(f"{self.source_name}:{nid}" for nid, _ in sorted(matches))
+                    raise FileExistsError(f"ambiguous session {session_id!r}; choose {choices}")
+                native_id, rels = matches[0]
+            if len(rels) > 1:
+                paths = ", ".join(str(self.catalog.path_of(rel)) for rel in sorted(rels))
+                raise FileExistsError(
+                    f"ambiguous session {session_id!r}: {len(rels)} files carry it: {paths}"
+                )
+            record = self._record_at(rels[0])
+            if record is not None and record.session_id == native_id:
+                return record
+            # The file vanished or now holds a different session: the index was
+            # rebuilt by the re-validation, so look once more before giving up.
+        return None
+
+    def find_file(self, session_id: str) -> Path | None:
+        record = self.find_record(session_id)
+        return record.path if record else None
 
     def output_path(
         self,
@@ -195,17 +272,19 @@ class ConversationSource(ABC):
                 if not ok:
                     return None
                 markdown = strip_lone_surrogates(self.render_document(data, existing_fm, my_notes))
-                source = next(s.source for s in SOURCES if s.collection == self.collection)
-                metadata = "\n".join(metadata_lines(source, source_id, data))
+                metadata = "\n".join(metadata_lines(self.source_name, source_id, data))
                 markdown = markdown.replace("\nstatus:", "\n" + metadata + "\nstatus:", 1)
                 atomic_write(output_file, markdown)
+                # Write-through while the document lock is held: the recorded stat
+                # identity is this write's, not a concurrent annotation's.
+                self.catalog.put(output_file, fm_mod.parse_frontmatter(markdown))
         return output_file
 
     def all_sessions(self) -> list[tuple[Path, dict]]:
-        return listing.get_session_files(self.output_dir, self.session_type)
+        return listing.get_session_files(self.output_dir, self.session_type, self.catalog)
 
     def active_sessions(self) -> list[tuple[Path, dict]]:
-        return listing.get_active_sessions(self.output_dir, self.session_type)
+        return listing.get_active_sessions(self.output_dir, self.session_type, self.catalog)
 
     def current_session_id(self, explicit: str | None) -> str | None:
         """Resolve the session to act on: explicit id, then env var, then the single

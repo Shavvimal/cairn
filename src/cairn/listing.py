@@ -12,26 +12,28 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from .frontmatter import FrontmatterParseError, parse_frontmatter
+from .catalog import Catalog, load_catalog
 from .schema import Frontmatter
 
 MAX_LISTED = 20  # rows shown by print_sessions before truncating
 
 
-def get_session_files(output_dir: Path, session_type: str) -> list[tuple[Path, Frontmatter]]:
-    """All exported session files of ``session_type``, newest activity first."""
-    sessions = []
-    for f in output_dir.rglob("*.md"):
-        try:
-            content = f.read_text(encoding="utf-8")
-            fm = parse_frontmatter(content)
-        except (OSError, FrontmatterParseError) as e:
-            # An unreadable or unparseable file is surfaced, not silently dropped
-            # from every listing - that would hide data loss (CORE_PRINCIPLES §8).
-            print(f"Warning: could not read {f}: {e}", file=sys.stderr)
-            continue
-        if fm.get("type") == session_type:
-            sessions.append((f, fm))
+def get_session_files(
+    output_dir: Path, session_type: str, catalog: Catalog | None = None
+) -> list[tuple[Path, Frontmatter]]:
+    """All exported session files of ``session_type``, newest activity first.
+
+    Served from the collection's stat-validated catalog (one walk, no body reads).
+    Pass an already-loaded ``catalog`` to share it across calls in one process.
+    """
+    if catalog is None:
+        catalog = load_catalog(output_dir)
+        catalog.save()
+    for rel, message in sorted(catalog.errors.items()):
+        # An unreadable or unparseable file is surfaced, not silently dropped
+        # from every listing - that would hide data loss (CORE_PRINCIPLES §8).
+        print(f"Warning: could not read {catalog.path_of(rel)}: {message}", file=sys.stderr)
+    sessions = [(f, fm) for f, fm in catalog.items() if fm.get("type") == session_type]
 
     return sorted(
         sessions,
@@ -40,11 +42,13 @@ def get_session_files(output_dir: Path, session_type: str) -> list[tuple[Path, F
     )
 
 
-def get_active_sessions(output_dir: Path, session_type: str) -> list[tuple[Path, Frontmatter]]:
+def get_active_sessions(
+    output_dir: Path, session_type: str, catalog: Catalog | None = None
+) -> list[tuple[Path, Frontmatter]]:
     """Sessions with status 'active' (used for 'current session' resolution)."""
     return [
         (f, fm)
-        for f, fm in get_session_files(output_dir, session_type)
+        for f, fm in get_session_files(output_dir, session_type, catalog)
         if fm.get("status") == "active"
     ]
 

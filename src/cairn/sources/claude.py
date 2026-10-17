@@ -344,10 +344,11 @@ class ClaudeSource(ConversationSource):
         if not jsonl_path.exists() or jsonl_path.stat().st_size == 0:
             return None
 
-        # Skip if output is already up to date.
-        existing_file = self.find_file(session_id)
+        # Skip if output is already up to date (catalog lookup: one stat, no reads).
+        record = self.find_record(session_id)
+        existing_file = record.path if record else None
         revision = file_revision(jsonl_path)
-        if is_current(existing_file, revision):
+        if is_current(record, revision):
             return existing_file
 
         repo = None

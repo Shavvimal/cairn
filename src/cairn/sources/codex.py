@@ -16,7 +16,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .. import cli
 from ..config import get_config
@@ -344,27 +344,29 @@ class CodexSource(ConversationSource):
         return self.assemble(head, [], title, existing_fm, my_notes, data["messages"])
 
     # ---- export driver ----
-    def export_rollouts(
-        self,
-        date_filter: float | None = None,
-        quiet: bool = False,
-        rollouts: list[Path] | None = None,
-        session_id: str | None = None,
-    ) -> int:
-        rollouts = _get_all_rollout_files() if rollouts is None else rollouts
-        exported = 0
-
-        # Codex resume/fork writes a *new* rollout per resume but keeps the same
-        # session_meta.id, so several files map to one logical session. Keep the
-        # most complete fragment (most user messages, then latest activity / mtime).
-        best: dict[str, tuple] = {}  # session_id -> (score, source_mtime, data)
+    @staticmethod
+    def _parse_rollouts(rollouts: list[Path]) -> list[tuple[Path, dict]]:
+        """Parse each rollout exactly once, stamping its native revision."""
+        parsed = []
         for rollout in rollouts:
             revision = file_revision(rollout)
             data = parse_rollout(rollout)
-            if not data or (session_id is not None and data["session_id"] != session_id):
-                continue
+            if data:
+                data["source_revision"] = revision
+                parsed.append((rollout, data))
+        return parsed
+
+    @staticmethod
+    def _best_fragments(parsed: list[tuple[Path, dict]]) -> dict[str, tuple[float, dict]]:
+        """Pick the most complete fragment per logical session.
+
+        Codex resume/fork writes a *new* rollout per resume but keeps the same
+        session_meta.id, so several files map to one logical session. Keep the
+        most complete fragment (most user messages, then latest activity / mtime).
+        """
+        best: dict[str, tuple] = {}  # session_id -> (score, source_mtime, data)
+        for rollout, data in parsed:
             source_mtime = rollout.stat().st_mtime
-            data["source_revision"] = revision
             score = (
                 len(data["user_messages"]),
                 len(data.get("messages", [])),
@@ -374,20 +376,29 @@ class CodexSource(ConversationSource):
             prev = best.get(data["session_id"])
             if prev is None or score > prev[0]:
                 best[data["session_id"]] = (score, source_mtime, data)
+        return {sid: (mtime, data) for sid, (_score, mtime, data) in best.items()}
 
-        for session_id, (_score, source_mtime, data) in best.items():
+    def export_rollouts(
+        self,
+        date_filter: float | None = None,
+        quiet: bool = False,
+        parsed: list[tuple[Path, dict]] | None = None,
+    ) -> int:
+        if parsed is None:
+            parsed = self._parse_rollouts(_get_all_rollout_files())
+        exported = 0
+        for session_id, (source_mtime, data) in self._best_fragments(parsed).items():
             if date_filter and source_mtime < date_filter:
                 continue
 
-            existing_file = self.find_file(session_id)
-            output_file = existing_file or self.output_path(
-                session_id, data["date"], data.get("project"), data.get("repo_subdir")
-            )
-
-            if is_current(output_file, data["source_revision"]):
+            record = self.find_record(session_id)
+            if is_current(record, data["source_revision"]):
                 continue
 
-            if self.export_one(session_id, data, existing_file) is None:
+            output_file = self.export_one(
+                session_id, cast(SessionData, data), record.path if record else None
+            )
+            if output_file is None:
                 continue
 
             exported += 1
@@ -405,19 +416,19 @@ class CodexSource(ConversationSource):
         if path:
             if not path.is_file():
                 raise ValueError(f"Codex transcript unavailable: {path}")
-            data = parse_rollout(path)
-            if not data or data["session_id"] != session_id:
-                raise ValueError("transcript session ID does not match requested session")
             if path not in candidates:
                 candidates.append(path)
         if not candidates:
             raise ValueError(f"Codex transcript unavailable for {session_id}")
-        if not any(
-            (data := parse_rollout(candidate)) and data["session_id"] == session_id
-            for candidate in candidates
-        ):
+        # One parse per candidate; the event's own transcript must carry the event's id.
+        parsed = [
+            (p, d) for p, d in self._parse_rollouts(candidates) if d["session_id"] == session_id
+        ]
+        if path and not any(p == path for p, _ in parsed):
+            raise ValueError("transcript session ID does not match requested session")
+        if not parsed:
             raise ValueError(f"No readable Codex transcript for {session_id}")
-        self.export_rollouts(quiet=True, rollouts=candidates, session_id=session_id)
+        self.export_rollouts(quiet=True, parsed=parsed)
         result = self.find_file(session_id)
         if result is None:
             raise ValueError(f"Codex export failed for {session_id}")

@@ -429,12 +429,12 @@ class CursorSource(ConversationSource):
                 skipped += 1
                 continue
 
-            existing_file = self.find_file(composer_id)
-            if is_current(existing_file, str(updated_ms)):
+            record = self.find_record(composer_id)
+            if is_current(record, str(updated_ms)):
                 skipped += 1
                 continue
 
-            to_export.append((composer_id, composer_json, existing_file))
+            to_export.append((composer_id, composer_json, record.path if record else None))
 
         if not to_export:
             if not quiet:

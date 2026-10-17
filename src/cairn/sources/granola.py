@@ -721,14 +721,15 @@ class GranolaSource(ConversationSource):
             if date_filter and data["date"] < date_filter:
                 skipped += 1
                 continue
-            existing_file = self.find_file(doc_id)
-            if existing_file and existing_file.exists():
+            record = self.find_record(doc_id)
+            existing_file = record.path if record else None
+            if record is not None:
                 updated_dt = parse_iso(doc.get("updated_at") or doc.get("created_at", ""))
                 if updated_dt:
                     output_mtime = datetime.fromtimestamp(
-                        existing_file.stat().st_mtime, tz=updated_dt.tzinfo
+                        record.path.stat().st_mtime, tz=updated_dt.tzinfo
                     )
-                    if output_mtime >= updated_dt and not needs_upgrade(existing_file):
+                    if output_mtime >= updated_dt and not needs_upgrade(record):
                         skipped += 1
                         continue
             meetings_to_export[doc_id] = (doc, data, existing_file)
