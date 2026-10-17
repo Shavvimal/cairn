@@ -441,16 +441,29 @@ def subagent_index(children: list[Path], parent_doc: Path | None) -> list[Subage
 
     ``parent_doc`` gives each row its link (``./<parent stem>/agent-<id>.md``); pass
     ``None`` before the parent's path is known and fill it with :func:`_link_index`.
+
+    A malformed meta never blocks the family: its row says the meta is unreadable,
+    and :meth:`ClaudeSource.sync_children` reports that child's error, so the parent
+    and every healthy sibling still export before the run fails.
     """
     refs: list[SubagentRef] = []
     for child in children:
         agent_id = _agent_id_of(child)
-        meta = read_subagent_meta(child)
+        try:
+            meta = read_subagent_meta(child)
+        except ValueError:
+            meta, unreadable = {}, True
+        else:
+            unreadable = False
         fields = subagent_fields(meta, agent_id, None, workflow_run_of(child))
+        if unreadable:
+            title = f"agent {agent_id} (meta unreadable)"
+        else:
+            title = fields["description"] or f"agent {agent_id}"
         refs.append(
             {
                 "agent_id": agent_id,
-                "title": fields["description"] or f"agent {agent_id}",
+                "title": title,
                 "agent_type": fields["agent_type"],
                 "request_shape": fields["request_shape"],
                 "workflow_run": fields["workflow_run"],
@@ -472,18 +485,13 @@ def _link_index(refs: list[SubagentRef], parent_doc: Path) -> None:
 def parent_revision(jsonl: Path, index: list[SubagentRef]) -> str:
     """The parent's native revision: its transcript plus the index it renders.
 
-    A new child, a retitled child, or a child that finishes or is stopped changes
-    the parent document even when the parent transcript did not change.
+    Every field of every row is hashed through one normalised form (the exact refs
+    that render the index, link included), so any visible change to the index -
+    a new child, a title, type, request shape, workflow run, finish or stop -
+    re-renders the parent even when the parent transcript did not change.
     """
     rows = sorted(
-        (
-            ref["agent_id"],
-            ref.get("title"),
-            ref.get("agent_type"),
-            bool(ref.get("finished")),
-            bool(ref.get("stopped_by_user")),
-        )
-        for ref in index
+        (json.dumps(dict(ref), sort_keys=True) for ref in index),
     )
     payload = file_revision(jsonl) + json.dumps(rows)
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -503,7 +511,7 @@ def _index_lines(refs: list[SubagentRef]) -> list[str]:
         return []
     lines = ["## Subagents", ""]
     for ref in refs:
-        title = ref.get("title", "").replace("\n", " ").replace("[", "\\[").replace("]", "\\]")
+        title = _one_line(ref.get("title", "")).replace("[", "\\[").replace("]", "\\]")
         if ref.get("workflow_run"):
             shape = f"workflow {ref['workflow_run']}"
         else:
@@ -523,7 +531,12 @@ def _index_lines(refs: list[SubagentRef]) -> list[str]:
 
 
 def _quoted(key: str, value: str) -> str:
-    return f'{key}: "{_escape_scalar(value.replace(chr(10), " "))}"'
+    return f'{key}: "{_escape_scalar(_one_line(value))}"'
+
+
+def _one_line(value: str) -> str:
+    """Flatten CR/LF so a free-text value stays one frontmatter or list line."""
+    return value.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
 
 
 # =============================================================================
@@ -680,7 +693,9 @@ class ClaudeSource(ConversationSource):
         # Skip if output is already up to date (catalog lookup: one stat, no reads).
         record = self.find_record(session_id)
         existing_file = record.path if record else None
-        index = subagent_index(iter_subagent_files(jsonl_path), None)
+        # Link the rows before hashing when the document exists, so the revision
+        # covers the exact index that renders.
+        index = subagent_index(iter_subagent_files(jsonl_path), existing_file)
         revision = parent_revision(jsonl_path, index)
         if is_current(record, revision):
             return existing_file
@@ -706,12 +721,16 @@ class ClaudeSource(ConversationSource):
         data["subagents"] = index
 
         planned = existing_file or self.output_path(session_id, data["date"], project, repo_subdir)
+        # The stored revision must hash the index exactly as written (links
+        # included), or the next run would see a different revision and re-render.
         _link_index(index, planned)
+        data["source_revision"] = parent_revision(jsonl_path, index)
         output_file = self.export_one(session_id, cast(SessionData, data), existing_file)
         if output_file is not None and index and output_file != planned:
             # export_one moved the document off a colliding path: relink the index
             # to the folder beside the file that was actually written.
             _link_index(index, output_file)
+            data["source_revision"] = parent_revision(jsonl_path, index)
             output_file = self.export_one(session_id, cast(SessionData, data), output_file)
         if output_file is None:
             return None

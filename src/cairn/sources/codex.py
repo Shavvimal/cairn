@@ -28,6 +28,7 @@ from ..frontmatter import (
     _escape_scalar,
     head_close,
     head_open,
+    read_frontmatter_head,
     resolve_title,
     title_line,
 )
@@ -38,7 +39,7 @@ from ..schema import SessionData, SubagentRef
 from ..store import file_revision, is_current
 from ..timeutil import today_str
 from .base import ConversationSource
-from .codex_lineage import rollout_lineage, spawn_fields
+from .codex_lineage import Lineage, rollout_lineage, spawn_fields
 from .codex_replay import LIVE_CHILD_WINDOW_S, REPLAY_HEURISTIC_VERSION, ReplayCut
 
 COLLECTION = "codex-sessions"
@@ -503,13 +504,40 @@ def _subagent_ref(
 
 
 def _parent_revision(file_rev: str, refs: list[SubagentRef]) -> str:
-    """The parent's revision folds in the index it renders, so a new, retitled or
-    finished child re-renders an unchanged parent rollout."""
+    """The parent's revision folds in the index it renders (link paths included), so a
+    new, retitled, finished or relocated child re-renders an unchanged parent rollout."""
     rows = sorted(
-        (ref["agent_id"], ref.get("title"), ref.get("agent_type"), ref.get("finished"))
+        (
+            ref["agent_id"],
+            ref.get("title"),
+            ref.get("agent_type"),
+            ref.get("finished"),
+            ref.get("path"),
+        )
         for ref in refs
     )
     return hashlib.sha256(f"{file_rev}|{rows!r}".encode()).hexdigest()
+
+
+def _family(lineage: Lineage, session_id: str) -> list[str]:
+    """Thread ids of ``session_id``'s whole family: its root ancestor and every
+    transitive descendant of that root (cycle-safe)."""
+    root = session_id
+    seen = {root}
+    while (parent := lineage.parent_of(root)) and parent not in seen:
+        seen.add(parent)
+        root = parent
+    family = [root]
+    queue = [root]
+    visited = {root}
+    while queue:
+        for child in lineage.children_of(queue.pop()):
+            meta = lineage.meta_of(child)
+            if meta is not None and meta.id not in visited:
+                visited.add(meta.id)
+                family.append(meta.id)
+                queue.append(meta.id)
+    return family
 
 
 def _subagent_index(refs: list[SubagentRef]) -> list[str]:
@@ -638,17 +666,32 @@ class CodexSource(ConversationSource):
                 best[data["session_id"]] = (score, source_mtime, data)
         return {sid: (mtime, data) for sid, (_score, mtime, data) in best.items()}
 
+    def _safe_target(self, session_id: str, planned: Path, claimed: dict[Path, str]) -> Path:
+        """``planned``, or its collision-suffixed form when another session already
+        holds it on disk or earlier in this run (mirrors :meth:`export_one`), so the
+        parent index links where the child is really written."""
+        holder = claimed.get(planned)
+        if holder is None and planned.exists():
+            holder = read_frontmatter_head(planned).get(self.id_field)
+        if holder is not None and holder != session_id:
+            digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+            planned = planned.with_stem(planned.stem + "-" + digest)
+        return planned
+
     def _plan_targets(
         self, best: dict[str, tuple[float, dict]], order: list[str]
     ) -> dict[str, Path]:
         """Document path per session: an existing record's path, else the child folder
-        of the parent's (planned or existing) document, else the canonical path."""
+        of the parent's (planned or existing) document, else the canonical path; new
+        paths get the same collision suffix :meth:`export_one` would give them."""
         targets: dict[str, Path] = {}
+        claimed: dict[Path, str] = {}
         for sid in order:
             data = best[sid][1]
             record = self.find_record(sid)
             if record is not None:
                 targets[sid] = record.path
+                claimed[record.path] = sid
                 continue
             parent = data.get("parent_session_id")
             parent_doc = targets.get(parent) if parent else None
@@ -656,11 +699,13 @@ class CodexSource(ConversationSource):
                 parent_record = self.find_record(parent)
                 parent_doc = parent_record.path if parent_record else None
             if parent_doc is not None:
-                targets[sid] = subagent_path(session_dir_of(parent_doc), self.short_id(sid))
+                planned = subagent_path(session_dir_of(parent_doc), self.short_id(sid))
             else:
-                targets[sid] = self.output_path(
+                planned = self.output_path(
                     sid, data["date"], data.get("project"), data.get("repo_subdir")
                 )
+            targets[sid] = self._safe_target(sid, planned, claimed)
+            claimed[targets[sid]] = sid
         return targets
 
     def export_rollouts(
@@ -723,22 +768,24 @@ class CodexSource(ConversationSource):
                 candidates.append(path)
         if not candidates:
             raise ValueError(f"Codex transcript unavailable for {session_id}")
-        # A parent renders its children's index; a child refreshes its parent's index,
-        # which lists every sibling. The first-line lineage index names those files.
+        # Every document this call rewrites renders an index, so load the whole family:
+        # the root above the target (each ancestor's index is refreshed) and every
+        # transitive descendant of that root (no index renders from a partial set).
         lineage = rollout_lineage(SESSIONS_DIR)
-        related = lineage.children_of(session_id)
-        parent = lineage.parent_of(session_id)
-        if parent:
-            related += lineage.paths_of(parent) + lineage.children_of(parent)
-        candidates += [p for p in dict.fromkeys(related) if p not in candidates]
+        for thread_id in _family(lineage, session_id):
+            candidates += [p for p in lineage.paths_of(thread_id) if p not in candidates]
         # One parse per candidate; the event's own transcript must carry the event's id.
-        parsed, _failed = self._parse_rollouts(candidates)
+        parsed, failed = self._parse_rollouts(candidates)
         own = [(p, d) for p, d in parsed if d["session_id"] == session_id]
-        if path and not any(p == path for p, _ in own):
+        if path and path not in failed and not any(p == path for p, _ in own):
             raise ValueError("transcript session ID does not match requested session")
-        if not own:
+        if not own and not failed:
             raise ValueError(f"No readable Codex transcript for {session_id}")
         self.export_rollouts(quiet=True, parsed=parsed)
+        if failed:
+            # Readable documents are written; fail so the durable hook job retries.
+            names = ", ".join(str(p) for p in failed)
+            raise ValueError(f"Codex export for {session_id} incomplete; unreadable: {names}")
         result = self.find_file(session_id)
         if result is None:
             raise ValueError(f"Codex export failed for {session_id}")

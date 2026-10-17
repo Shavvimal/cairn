@@ -381,7 +381,15 @@ def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig
     }
 
     cron_schedule = str((data.get("cron") or {}).get("schedule", DEFAULT_CRON_SCHEDULE))
-    invoke = _parse_invoke(data.get("invoke") or {})
+    raw_invoke = data.get("invoke")
+    if raw_invoke is None:
+        raw_invoke = {}
+    if not isinstance(raw_invoke, dict):
+        raise ConfigError(
+            f"{config_path}: 'invoke' must be an object of per-peer settings, "
+            f"got {type(raw_invoke).__name__}"
+        )
+    invoke = _parse_invoke(raw_invoke)
 
     return CairnConfig(
         repo_root=repo_root,

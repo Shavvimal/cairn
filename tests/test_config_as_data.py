@@ -211,3 +211,27 @@ class TestConfigInitChoices(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInvokeBlockShape(unittest.TestCase):
+    def test_falsy_or_non_object_invoke_blocks_are_rejected(self):
+        from pathlib import Path
+
+        from cairn import config as cfg
+
+        base = {
+            "data_root": "/tmp/x",
+            "qmd_binary": "qmd",
+            "collections": {},
+            "project_groups": {},
+            "repo_catalog": {},
+            "project_descriptions": {},
+        }
+        bad: tuple[object, ...] = (False, [], "", 0, "review")
+        for value in bad:
+            with self.subTest(value=value), self.assertRaises(cfg.ConfigError):
+                cfg._build({**base, "invoke": value}, Path("/tmp/config.json"), None)
+        # null and absent both mean "defaults".
+        for ok in ({**base, "invoke": None}, base):
+            built = cfg._build(ok, Path("/tmp/config.json"), None)
+            self.assertEqual(built.invoke.codex.profile, "review")

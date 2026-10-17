@@ -238,9 +238,11 @@ def title_line(title: str) -> str:
     """The ``title: "..."`` frontmatter line, with quotes and backslashes escaped.
 
     Symmetric with :func:`parse_frontmatter`'s unescaping, so titles round-trip
-    instead of accumulating backslashes on every sync.
+    instead of accumulating backslashes on every sync. Line breaks are flattened to
+    spaces: a title is one frontmatter line, whatever the source put in it.
     """
-    return f'title: "{_escape_scalar(title)}"'
+    flat = " ".join(title.split())  # any line break or whitespace run becomes one space
+    return f'title: "{_escape_scalar(flat)}"'
 
 
 def head_open(session_type: str, date: str, id_field: str, id_value: str) -> list[str]:

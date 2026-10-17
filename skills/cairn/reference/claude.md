@@ -84,14 +84,16 @@ The parent gains a `## Subagents` index after Artifacts, read from the metas onl
 ```
 
 The fields are the agent type, `background`, `foreground` or `workflow wf_<id>`, and
-`done`, `stopped` or `running`. The parent re-renders when a child appears or its title,
-type, `finished` or `stoppedByUser` changes. A child re-renders when its transcript or
+`done`, `stopped` or `running`. The parent re-renders when any field of its index changes: a new child, a title, type,
+request shape, workflow run, `finished` or `stoppedByUser`. A child re-renders when its transcript or
 its meta changes.
 
 Visibility: `cairn claude list` and `cairn recall list` show parents only;
 `cairn recall list --include-subagents` adds the children. `export --since` selects a
 parent when the parent or any child changed in the window, because background agents
-finish after the parent goes quiet. A malformed `meta.json` fails the parent's export.
+finish after the parent goes quiet. A malformed `meta.json` does not block the family:
+its index row reads `agent <id> (meta unreadable)`, the parent and the other subagents
+export, and the run then fails (exit 1, or a failed hook job that retries).
 
 ## Resume (Claude-only)
 

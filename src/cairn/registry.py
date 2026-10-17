@@ -35,7 +35,9 @@ SOURCES = (
         on_hook_default=True,
         subagent_type="claude-subagent",
     ),
-    Source("codex", "codex-sessions", "codex-session", targeted=True, subagent_type="codex-subagent"),
+    Source(
+        "codex", "codex-sessions", "codex-session", targeted=True, subagent_type="codex-subagent"
+    ),
     Source("cursor", "cursor-sessions", "cursor-session", "composer_id"),
     Source("granola", "granola-sessions", "granola-meeting", "meeting_id"),
     Source("service-docs", "service-docs", "", windowed=False),

@@ -107,7 +107,9 @@ class Claude:
             argv += ["--json-schema", request.output_schema.read_text(encoding="utf-8")]
         argv += request.extra
         if not request.prompt_via_stdin:
-            argv.append(request.prompt)
+            # ``--disallowedTools`` (and any variadic flag in ``extra``) would swallow a
+            # bare trailing prompt; ``--`` ends option parsing. Verified live on 2.1.301.
+            argv += ["--", request.prompt]
         return argv
 
     def parse_event(self, line: str) -> list[Event]:

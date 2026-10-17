@@ -242,16 +242,19 @@ class TestReplayCut(unittest.TestCase):
         self.assertIsNone(uuid7_key("turn-1"))
         self.assertIsNone(uuid7_key(None))
 
-    def test_uuid7_rule_ignores_markers_and_cuts_at_the_child_turn(self):
+    def test_uuid7_rule_cuts_at_the_child_turn(self):
         cut = ReplayCut.start(CHILD)
-        for rtype, payload in (
-            ("event_msg", {"type": "task_started", "turn_id": SPAWN_TURN}),
-            ("event_msg", {"type": "thread_settings_applied", "thread_id": CHILD}),
-        ):
-            cut = cut.observe(rtype, payload)
-            self.assertFalse(cut.ended)
+        cut = cut.observe("event_msg", {"type": "task_started", "turn_id": SPAWN_TURN})
+        self.assertFalse(cut.ended)
         cut = cut.observe("event_msg", {"type": "task_started", "turn_id": CHILD_TURN})
         self.assertEqual(cut.rule, "uuid7-turn")
+
+    def test_exact_marker_wins_after_an_ancestor_uuid7_turn(self):
+        # Regression: a UUIDv7 ancestor turn used to lock out the marker fallback.
+        cut = ReplayCut.start(CHILD)
+        cut = cut.observe("event_msg", {"type": "task_started", "turn_id": SPAWN_TURN})
+        cut = cut.observe("event_msg", {"type": "thread_settings_applied", "thread_id": CHILD})
+        self.assertEqual(cut.rule, "thread-settings")
 
     def test_marker_rule_counts_one_group_per_fork_level(self):
         marker = _role_marker()["payload"]
@@ -459,6 +462,110 @@ class TestParseChild(CodexSubagentFixture):
         self.assertIn("status: active", text)
 
 
+class TestReplayRegressions(CodexSubagentFixture):
+    def test_mixed_ids_uuid7_ancestor_turn_then_legacy_child_turn(self):
+        records = [
+            _meta(CHILD, FORK_TS, **_spawn(PARENT, 1, "Bohr")),
+            _meta(PARENT, "2026-10-04T13:00:00Z"),
+            *[{**r, "timestamp": FORK_TS} for r in _parent_history()],
+            _task(SPAWN_TURN),
+            _settings(CHILD),
+            _task("legacy-turn", "2026-10-04T14:06:00Z"),
+            _assistant("mixed child answer", "2026-10-04T14:06:01Z", "final_answer"),
+        ]
+        err = io.StringIO()
+        with redirect_stderr(err):
+            data = self.mod.parse_rollout(self.write(CHILD, records))
+        self.assertEqual(err.getvalue(), "")
+        self.assertNotIn("replay_unresolved", data)
+        texts = json.dumps(data["messages"])
+        self.assertNotIn(PARENT_PROMPT, texts)
+        self.assertIn("mixed child answer", texts)
+        self.assertTrue(data["finished"])
+
+
+def _plain_child(thread_id: str, parent: str, depth: int, nickname: str, turn: str) -> list:
+    """A non-forked subagent: one meta, then its own turn."""
+    return [
+        _meta(thread_id, FORK_TS, **_spawn(parent, depth, nickname, path=f"/root/{nickname}")),
+        _task(turn, "2026-10-04T14:20:00Z"),
+        _assistant(f"{nickname} done", "2026-10-04T14:20:05Z", "final_answer"),
+    ]
+
+
+class TestFamilyRegressions(CodexSubagentFixture):
+    def _nested_family(self) -> None:
+        """P -> {A, B}, B -> G."""
+        self.write(PARENT, _parent_rollout())
+        self.write(CHILD, _child_rollout())
+        self.write(SIBLING, _plain_child(SIBLING, PARENT, 1, "Noether", CHILD_TURN_2))
+        self.write(GRANDCHILD, _plain_child(GRANDCHILD, SIBLING, 2, "Curie", GRANDCHILD_TURN))
+
+    def test_targeted_exports_keep_nested_indexes(self):
+        self._nested_family()
+        self.assertEqual(self.source().export_rollouts(quiet=True), 4)
+        sibling_doc = self.doc(SIBLING)
+        self.assertEqual(self.doc(GRANDCHILD).parent, sibling_doc.with_suffix(""))
+        for target in (CHILD, PARENT, SIBLING, GRANDCHILD):
+            with self.subTest(target=target):
+                self.mod.CodexSource().export_target(target, None)
+                self.assertIn(f"`{GRANDCHILD}`", sibling_doc.read_text(encoding="utf-8"))
+                parent = self.doc(PARENT).read_text(encoding="utf-8")
+                self.assertIn(f"`{CHILD}`", parent)
+                self.assertIn(f"`{SIBLING}`", parent)
+
+    def test_targeted_grandchild_refreshes_every_ancestor(self):
+        self.write(PARENT, _parent_rollout())
+        self.write(SIBLING, _plain_child(SIBLING, PARENT, 1, "Noether", CHILD_TURN_2))
+        self.source().export_rollouts(quiet=True)
+        self.write(GRANDCHILD, _plain_child(GRANDCHILD, SIBLING, 2, "Curie", GRANDCHILD_TURN))
+        self.mod.CodexSource().export_target(GRANDCHILD, None)
+        self.assertIn(f"`{GRANDCHILD}`", self.doc(SIBLING).read_text(encoding="utf-8"))
+        self.assertEqual(self.doc(GRANDCHILD).parent, self.doc(SIBLING).with_suffix(""))
+
+    def test_short_id_collision_links_each_child_to_its_own_file(self):
+        first = "01a1073b-aaaa-7000-8000-cafe00000001"
+        second = "01a1073b-bbbb-7000-8000-cafe00000002"
+        source = self.source()
+        self.assertEqual(source.short_id(first), source.short_id(second))
+        self.write(PARENT, _parent_rollout())
+        self.write(
+            first, _plain_child(first, PARENT, 1, "Ada", "01a10750-0000-7000-8000-000000000001")
+        )
+        self.write(
+            second, _plain_child(second, PARENT, 1, "Bea", "01a10750-0000-7000-8000-000000000002")
+        )
+        self.assertEqual(source.export_rollouts(quiet=True), 3)
+        parent_doc = self.doc(PARENT)
+        parent = parent_doc.read_text(encoding="utf-8")
+        paths = {self.doc(first), self.doc(second)}
+        self.assertEqual(len(paths), 2)
+        for child_id in (first, second):
+            line = next(ln for ln in parent.splitlines() if f"`{child_id}`" in ln)
+            rel = line.split("](", 1)[1].split(")", 1)[0]
+            target = (parent_doc.parent / rel).resolve()
+            self.assertEqual(target, self.doc(child_id).resolve())
+            self.assertIn(f"session_id: {child_id}\n", target.read_text(encoding="utf-8"))
+        stamps = {p: p.stat().st_mtime_ns for p in (parent_doc, *paths)}
+        self.assertEqual(self.mod.CodexSource().export_rollouts(quiet=True), 0)
+        self.assertEqual({p: p.stat().st_mtime_ns for p in stamps}, stamps)
+
+    def test_targeted_export_fails_loud_on_an_unreadable_family_member(self):
+        self.write(PARENT, _parent_rollout())
+        self.write(CHILD, _child_rollout())
+        bad = self.write(SIBLING, _plain_child(SIBLING, PARENT, 1, "Noether", CHILD_TURN_2))
+        with open(bad, "ab") as handle:
+            handle.write(b"\xff\xfe broken\n")
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaisesRegex(ValueError, "incomplete") as caught:
+            self.source().export_target(PARENT, None)
+        self.assertIn(str(bad), str(caught.exception))
+        self.assertIn(f"Error parsing {bad}", err.getvalue())
+        parent = self.doc(PARENT).read_text(encoding="utf-8")
+        self.assertIn(f"`{CHILD}`", parent)
+        self.assertIsNotNone(self.source().find_file(CHILD))
+
+
 class TestExportFamily(CodexSubagentFixture):
     def test_parent_and_child_export_as_two_documents(self):
         self.write(PARENT, _parent_rollout())
@@ -608,6 +715,13 @@ class TestLineage(CodexSubagentFixture):
             codex_lineage.lineage_cache_path(self.store).write_text("{not json")
             codex_lineage.rollout_lineage(self.store)
             self.assertEqual(reader.call_count, 3)
+
+    def test_bad_bytes_after_the_first_line_keep_the_meta_visible(self):
+        child = self.write(CHILD, _child_rollout())
+        with open(child, "ab") as handle:
+            handle.write(b"\xff\xfe broken\n")
+        lineage = codex_lineage.rollout_lineage(self.store)
+        self.assertEqual(lineage.parent_of(CHILD), PARENT)
 
 
 if __name__ == "__main__":

@@ -302,10 +302,29 @@ class ConversationSource(ABC):
                 markdown = strip_lone_surrogates(self.render_document(data, existing_fm, my_notes))
                 metadata = "\n".join(metadata_lines(self.source_name, source_id, data))
                 markdown = markdown.replace("\nstatus:", "\n" + metadata + "\nstatus:", 1)
+                # Validate before replacing the file: a document the catalog cannot
+                # parse must never land on disk (it would be flagged on every listing
+                # and lose the user's round-trip guarantee).
+                try:
+                    rendered_fm = fm_mod.parse_frontmatter(markdown)
+                except fm_mod.FrontmatterParseError as exc:
+                    print(
+                        f"Error: refusing to write {output_file}: rendered frontmatter "
+                        f"does not parse ({exc})",
+                        file=sys.stderr,
+                    )
+                    return None
+                if rendered_fm.get(self.id_field) != source_id:
+                    print(
+                        f"Error: refusing to write {output_file}: rendered {self.id_field} "
+                        f"is not {source_id!r}",
+                        file=sys.stderr,
+                    )
+                    return None
                 atomic_write(output_file, markdown)
                 # Write-through while the document lock is held: the recorded stat
                 # identity is this write's, not a concurrent annotation's.
-                self.catalog.put(output_file, fm_mod.parse_frontmatter(markdown))
+                self.catalog.put(output_file, rendered_fm)
         return output_file
 
     def all_sessions(self) -> list[tuple[Path, dict]]:

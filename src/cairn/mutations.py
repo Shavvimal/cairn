@@ -138,6 +138,14 @@ def set_session_tags(find_file: FindFile, session_id: str, tags: list[str]) -> b
     return _mutate_file(find_file, session_id, mutate)
 
 
+def _bare_link(item: object) -> str:
+    """One ``links:`` entry without surrounding quotes or stray whitespace."""
+    text = str(item).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1]
+    return text.strip()
+
+
 def add_link(find_file: FindFile, session_id: str, role: str, ref: str) -> bool:
     """Append a ``"<role> <source>:<id>"`` entry to a session's ``links:`` list.
 
@@ -164,7 +172,9 @@ def add_link(find_file: FindFile, session_id: str, role: str, ref: str) -> bool:
     def mutate(fm: dict) -> None:
         nonlocal added
         existing = fm.get("links")
-        links = list(existing) if isinstance(existing, list) else []
+        # A hand-edited quoted entry ("peer claude:x") parses with its quotes; compare
+        # and store the bare form so one relationship can never appear twice.
+        links = [_bare_link(item) for item in existing] if isinstance(existing, list) else []
         if entry not in links:
             links.append(entry)
             added = True

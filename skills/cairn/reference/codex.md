@@ -92,22 +92,28 @@ as its own document:
   keeps its own id, so it never merges with the parent.
 - **Replay cut** (`src/cairn/sources/codex_replay.py`, tagged `codex-cli 0.160`). The
   child's own history starts at the first `task_started` whose `turn_id` sorts at or
-  after the child id (both UUIDv7). Fallback: the `thread_settings_applied` event for
-  the child, or the developer message with `<multi_agent_role>`. If neither appears, a
+  after the child id (both UUIDv7), or at the `thread_settings_applied` event for the
+  child, or at the developer message with `<multi_agent_role>`, whichever comes first
+  (the exact child marker always counts, even after an ancestor's UUIDv7 turn ids). If
+  none appears, a
   rollout changed in the last 600 s is a live child and is skipped this run. An older
   one exports whole with `replay_unresolved: true` and a warning on stderr.
 - **Title.** The first user prompt. Children usually have none (inter-agent text is
   encrypted), so the title falls back to `<agent_type> <agent_nickname>: <agent_path>`.
 - **Location.** A child lives in its parent's session folder:
   `<parent stem>/agent-<short id>.md`. A child exported before its parent document
-  existed stays at the canonical path.
+  existed stays at the canonical path. Two children with the same short id get the
+  same sha256 suffix `export_one` applies, and the parent links each to its real file.
 - **Parent index.** The parent document lists every child under `## Subagents` with a
   relative link, the child id, its agent type, and `finished` or `running`. A new,
   retitled, or finished child re-renders the parent even when the parent rollout did not
-  change. A windowed export selects a parent when it or any child changed in the window.
+  change, and so does a moved link. A windowed export selects a parent when it or any
+  child changed in the window.
 - **Listing.** `codex-subagent` documents resolve by id (`note`, `log`, recall) but are
-  hidden from `list`. `export_target` for a parent also exports its children, and for a
-  child also refreshes the parent index. The first-line lineage index is cached under
+  hidden from `list`. `export_target` for any family member loads the whole family (the
+  root and all its descendants), so every rewritten index is complete. If a family
+  rollout cannot be read, it writes the readable documents and then fails, so the hook
+  job retries. The first-line lineage index is cached under
   `$XDG_CACHE_HOME/cairn/lineage/`.
 
 ## Resume and automatic sync

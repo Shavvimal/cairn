@@ -85,14 +85,16 @@ class RolloutMeta:
 
 def read_first_meta(path: Path) -> RolloutMeta | None:
     """The ``session_meta`` on a rollout's first line, or None if torn or absent."""
+    # Binary read: a text-mode readline decodes a whole buffer, so a bad byte later in
+    # the file would hide a valid first line (and that file's family membership).
     try:
-        with open(path, encoding="utf-8") as handle:
-            line = handle.readline()
-    except (OSError, UnicodeDecodeError):
+        with open(path, "rb") as handle:
+            raw = handle.readline()
+    except OSError:
         return None
     try:
-        record = json.loads(line)
-    except json.JSONDecodeError:
+        record = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(record, dict) or record.get("type") != "session_meta":
         return None

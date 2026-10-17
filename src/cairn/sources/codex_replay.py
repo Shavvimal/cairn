@@ -15,8 +15,9 @@ Evidence (100 of 100 forked child rollouts on the author's machine, codex-cli 0.
   millisecond prefix orders them in time (rule 1, held in 100 of 100 files).
 * In 95 of 100 files a ``thread_settings_applied`` event (its ``thread_id`` is the
   child's) and a developer message containing ``<multi_agent_role>`` sit directly
-  before that turn, with no rendered record between the marker and the cut
-  (rule 2, the fallback when the ids are not comparable as UUIDv7).
+  before that turn, with no rendered record between the marker and the cut (rule 2).
+  Both rules stay active and the first signal wins: an ancestor's UUIDv7 turn ids
+  must not hide the child's own marker when the child's turn ids are not UUIDv7.
 * Nested forks repeat the layout: one more ``session_meta`` and one more marker group
   per level, and rule 1 still compares against the first meta's id.
 
@@ -75,7 +76,6 @@ class ReplayCut:
     metas: int = 1  # replayed session_meta lines seen (1 for a direct fork)
     groups: int = 0  # marker groups seen (one per fork level)
     in_group: bool = False  # the previous record was a marker
-    saw_uuid7_turn: bool = False  # the replay carries UUIDv7 turn ids
     rule: str | None = None
 
     @classmethod
@@ -98,17 +98,15 @@ class ReplayCut:
         ptype = payload.get("type")
         if rtype == "event_msg" and ptype == "task_started":
             turn_key = uuid7_key(payload.get("turn_id"))
-            if turn_key is not None and self.child_key is not None:
-                if turn_key >= self.child_key:
-                    return replace(self, rule="uuid7-turn", in_group=False)
-                return replace(self, saw_uuid7_turn=True, in_group=False)
+            if turn_key is not None and self.child_key is not None and turn_key >= self.child_key:
+                return replace(self, rule="uuid7-turn", in_group=False)
             return replace(self, in_group=False)
+        # No rule locks the other out: whichever boundary signal fires first wins, so a
+        # UUIDv7 ancestor turn never hides the child's own marker. In the sampled files
+        # the marker sits directly before the rule-1 turn with nothing rendered between.
         marker = self._marker(rtype, ptype, payload)
         if marker is None:
             return replace(self, in_group=False) if self.in_group else self
-        if self.child_key is not None and self.saw_uuid7_turn:
-            # Rule 1 is usable; markers are only a fallback.
-            return replace(self, in_group=True)
         if marker == "exact":
             return replace(self, rule="thread-settings", in_group=True)
         groups = self.groups if self.in_group else self.groups + 1

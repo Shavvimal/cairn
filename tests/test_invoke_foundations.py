@@ -590,6 +590,7 @@ class TestClaudeArgv(unittest.TestCase):
                 '{"type":"object"}',
                 "--add-dir",
                 "/x",
+                "--",
                 "Review this",
             ],
         )
@@ -613,7 +614,7 @@ class TestClaudeArgv(unittest.TestCase):
             ],
         )
         full = self.claude.exec_argv(_request("claude", session_id="s", profile="full"))
-        self.assertEqual(full[-3:], ["--permission-mode", "bypassPermissions", "Review this"])
+        self.assertEqual(full[-4:], ["--permission-mode", "bypassPermissions", "--", "Review this"])
 
     def test_resume(self):
         argv = self.claude.exec_argv(_request("claude", resume="5f0c", model="sonnet"))
@@ -633,10 +634,19 @@ class TestClaudeArgv(unittest.TestCase):
                 "Edit,Write,NotebookEdit",
                 "--model",
                 "sonnet",
+                "--",
                 "Review this",
             ],
         )
         self.assertNotIn("--session-id", argv)
+
+    def test_prompt_is_never_swallowed_by_variadic_flags(self):
+        # --disallowedTools is variadic in claude 2.1.301; without "--" the review
+        # profile's default argv consumed the prompt (verified live).
+        argv = self.claude.exec_argv(_request("claude", session_id="s"))
+        self.assertEqual(argv[-2:], ["--", "Review this"])
+        stdin = self.claude.exec_argv(_request("claude", session_id="s", prompt_via_stdin=True))
+        self.assertNotIn("--", stdin)
 
     def test_fresh_needs_session_id(self):
         with self.assertRaises(ValueError):

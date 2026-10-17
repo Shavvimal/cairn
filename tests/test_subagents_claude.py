@@ -349,6 +349,27 @@ class TestRevisions(SubagentFixture):
         self.assertEqual(changed(before), {parent_rel, f"{stem}/agent-a1.md"})
         self.assertIn("general-purpose, background, running", self.parent_doc().read_text())
 
+    def test_any_rendered_index_field_rerenders_the_parent(self):
+        """Regression: a change to request shape or workflow run alone must re-render."""
+        self.export_all()
+        parent_rel = str(self.parent_doc().relative_to(self.out))
+        (self.subagents / "agent-a1.meta.json").write_text(
+            json.dumps(self.meta_a1(requestShape="foreground"))
+        )
+        before = self.stamps()
+        self.export_all()
+        self.assertNotEqual(self.stamps()[parent_rel], before[parent_rel])
+        self.assertIn("general-purpose, foreground, done", self.parent_doc().read_text())
+
+        moved = self.subagents / "workflows" / "wf_new"
+        moved.mkdir(parents=True)
+        for name in ("agent-a2.jsonl", "agent-a2.meta.json"):
+            (self.subagents / "workflows" / "wf_abc" / name).rename(moved / name)
+        before = self.stamps()
+        self.export_all()
+        self.assertNotEqual(self.stamps()[parent_rel], before[parent_rel])
+        self.assertIn("workflow wf_new", self.parent_doc().read_text())
+
     def test_running_child_moves_to_done_when_it_finishes(self):
         self.export_all()
         self.assertEqual(self.fm(self.child_doc("a3"))["status"], "active")
@@ -525,6 +546,31 @@ class TestDiscovery(SubagentFixture):
         result = self.run_cli("claude", "export", "--all", check=False)
         self.assertEqual(result.returncode, 1)
         self.assertIn("malformed subagent meta", result.stderr)
+
+    def test_malformed_meta_does_not_block_the_family(self):
+        """Regression: one corrupt meta must not stop the parent or healthy siblings."""
+        (self.subagents / "agent-a1.meta.json").write_text("{not json")
+        result = self.run_cli("claude", "export", "--all", check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("subagent agent-a1: malformed subagent meta", result.stderr)
+        text = self.parent_doc().read_text()
+        self.assertIn("[agent a1 (meta unreadable)]", text)
+        self.assertFalse(self.child_doc("a1").exists())
+        for agent_id in ("a2", "a3", "a4", "af"):
+            self.assertTrue(self.child_doc(agent_id).exists(), agent_id)
+        # The hook path writes the family, then fails so the durable job retries.
+        self.child_doc("a2").unlink()
+        hook = self.run_cli(
+            "hook", "export", "--source", "claude", "--session-id", PARENT, check=False
+        )
+        self.assertEqual(hook.returncode, 1)
+        self.assertIn("agent-a1", hook.stderr)
+        self.assertTrue(self.child_doc("a2").exists())
+        # Repairing the meta re-renders the index row and exports the child.
+        (self.subagents / "agent-a1.meta.json").write_text(json.dumps(self.meta_a1()))
+        self.export_all()
+        self.assertIn('[Scout the "orchard"]', self.parent_doc().read_text())
+        self.assertTrue(self.child_doc("a1").exists())
 
 
 if __name__ == "__main__":
