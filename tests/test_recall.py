@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
 import unittest
 from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
@@ -89,6 +91,11 @@ class _RecallFixture(unittest.TestCase):
         self._prev = os.environ.get("CAIRN_CONFIG")
         os.environ["CAIRN_CONFIG"] = str(cfg_path)
         config.get_config.cache_clear()
+        subprocess.run(
+            [sys.executable, "-m", "cairn", "claude", "export", "--all", "--quiet"],
+            check=True,
+            capture_output=True,
+        )
 
     def tearDown(self):
         if self._prev is None:

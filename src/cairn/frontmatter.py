@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 # Fields preserved across re-syncs so manual edits survive: the tail fields are
@@ -143,15 +144,83 @@ def parse_frontmatter(content: str) -> dict:
     return frontmatter
 
 
-def extract_my_notes_section(content: str) -> str | None:
-    """Extract the '## My Notes' section from existing content."""
-    if PRESERVED_SECTION not in content:
-        return None
-    pattern = rf"({re.escape(PRESERVED_SECTION)}.*?)(?=\n## |\Z)"
-    match = re.search(pattern, content, re.DOTALL)
-    if match:
-        return match.group(1).rstrip()
-    return None
+# A frontmatter block larger than this is not something cairn ever writes; refuse
+# rather than read an arbitrarily large file looking for a closing fence.
+MAX_FRONTMATTER_BYTES = 4 * 1024 * 1024
+
+
+def read_frontmatter_head(path: Path, limit: int = MAX_FRONTMATTER_BYTES) -> dict:
+    """Parse a file's frontmatter by reading only up to its closing fence.
+
+    Behaves like ``parse_frontmatter(path.read_text())`` for every file cairn
+    writes, without reading the (often multi-megabyte) body. A file without an
+    opening fence yields ``{}``; a block that exceeds ``limit`` raises
+    :class:`FrontmatterParseError` instead of scanning the whole file.
+    """
+    with path.open(encoding="utf-8") as handle:
+        first = handle.readline()
+        if first != "---\n":
+            return {}
+        parts = [first]
+        total = len(first)
+        for line in handle:
+            parts.append(line)
+            total += len(line)
+            if line == "---\n":
+                break
+            if total > limit:
+                raise FrontmatterParseError(f"frontmatter block exceeds {limit} bytes")
+    return parse_frontmatter("".join(parts))
+
+
+def extract_my_notes_section(
+    content: str, *, conversation_heading: str | None = "## Conversation"
+) -> str | None:
+    """Extract the '## My Notes' section from existing content.
+
+    A ``## `` heading inside a fenced code block does not end the section. A fence
+    left open to the end of the file is treated as plain text instead: otherwise
+    the section would swallow the conversation that follows it, and every export
+    would append one more copy of that conversation to the file.
+
+    Chat sources stop before their conversation so transcript text cannot become
+    annotations. Meetings pass ``None``: their native notes and summaries precede
+    My Notes and may legitimately contain any heading, including Conversation.
+    """
+    lines = content.splitlines()
+    result = _scan_my_notes(lines, track_fences=True, conversation_heading=conversation_heading)
+    if result == "unclosed":
+        return _scan_my_notes(lines, track_fences=False, conversation_heading=conversation_heading)
+    return result
+
+
+def _scan_my_notes(
+    lines: list[str], *, track_fences: bool, conversation_heading: str | None
+) -> str | None:
+    start = None
+    fence = None
+    for index, line in enumerate(lines):
+        if track_fences:
+            match = re.match(r"(`{3,}|~{3,})", line.lstrip())
+            if match:
+                token = match[1]
+                if fence is None:
+                    fence = token
+                elif token[0] == fence[0] and len(token) >= len(fence):
+                    fence = None
+                continue
+            if fence is not None:
+                continue
+        if start is None:
+            if line == conversation_heading:
+                return None
+            if line == PRESERVED_SECTION:
+                start = index
+        elif line.startswith("## "):
+            return "\n".join(lines[start:index]).rstrip()
+    if start is not None and fence is not None:
+        return "unclosed"
+    return "\n".join(lines[start:]).rstrip() if start is not None else None
 
 
 def resolve_title(

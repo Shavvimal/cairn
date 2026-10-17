@@ -1,8 +1,12 @@
 ---
 name: cairn
-description: Exports, lists, annotates, and resumes local AI coding sessions (Claude Code, Codex, Cursor) plus Granola meetings and service docs to searchable markdown via the cairn CLI. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "resume session", "add session note", "close session", "log session", "sync docs", "sync service docs", or "meeting transcripts". Covers per-source export/list/context/note/close/log, the Claude-only resume, the top-level sync/doctor/config/cron commands, and the config-driven enablement model. Requires the cairn CLI - install via /cairn:setup.
+description: Exports, lists, annotates, and resumes local AI coding sessions (Claude Code, Codex, Cursor) plus Granola meetings and service docs to searchable markdown via the cairn CLI. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "resume session", "add session note", "close session", "log session", "sync docs", "sync service docs", or "meeting transcripts". Covers per-source export/list/context/note/close/log, Claude and Codex resume, the top-level sync/doctor/config/cron commands, and the config-driven enablement model. Requires the cairn CLI - install via /cairn:setup.
 allowed-tools: Bash, Read
 ---
+
+Read [the harness contract](../../references/harnesses/contract.md) and its relevant
+Claude or Codex reference from this installed package before host-specific operations.
+
 
 # Cairn
 
@@ -41,7 +45,8 @@ The four conversation sources (claude, codex, cursor, granola) accept the same v
 | `close`   | Mark item done (+ optional note)        | `cairn codex close "shipped"`                            |
 | `log`     | Annotate status/tags/rating (+ comment) | `cairn cursor log --status done --tags "x,y" --rating 8` |
 
-Claude additionally has `resume` (and an internal `sync` hook); see `reference/claude.md`.
+Use `cairn resume SOURCE:ID` for either Claude or Codex: it prints the appropriate native
+command. Show that command for the user's terminal. Claude also retains its legacy picker.
 
 ### Time window (windowed sources: claude, codex, cursor, granola)
 
@@ -71,8 +76,9 @@ hand-editing JSON):
 - `cairn config set <source>.enabled true|false` - toggle one later (e.g. `cairn config set cursor.enabled false`).
 
 `cairn sync` runs only **enabled** sources, then refreshes QMD. The `SessionEnd` hook
-(`cairn sync --hook`) runs only sources with `on_hook` true (engine default: **Claude only**;
-toggle with `cairn config set <source>.on_hook true|false`).
+(`cairn hook handle --harness HOST`) exports only the originating session. Enabled sources
+default to hook sync unless `on_hook` is explicitly false. `cairn sync --hook` retains the
+legacy Claude-default policy for existing scripts.
 
 Config resolution: `$CAIRN_CONFIG`, else `$XDG_CONFIG_HOME/cairn/config.json` (else
 `~/.config/cairn/config.json`), else the repo root for dev checkouts. Locate it with
@@ -91,15 +97,15 @@ cairn help                             # overview an agent can read to drive the
 cairn --version
 ```
 
-`--hook` is the fast SessionEnd path (on_hook sources only); `--cron` is the hourly
-full sync; `--all` syncs every enabled source regardless of window. Temporal recall has
+`--hook` is the legacy fast sync (on_hook sources only); `--cron` is the hourly
+full sync; `--all` also updates and embeds every enabled source using its configured window. Temporal recall has
 its own skill (`/cairn:recall`); `cairn recall --help` shows its args.
 
 ## Preserved on export (shared)
 
 Re-exporting never clobbers your annotations. Across all sources, exports preserve the
 `## My Notes` section and these frontmatter fields: `comments`, `status`, `tags`,
-`rating`, `title`, `projects` (claude uses `related` instead of `projects`).
+`rating`, `title`, `projects`.
 
 ## Per-source reference
 

@@ -27,9 +27,13 @@ from pathlib import Path
 
 from .. import frontmatter as fm_mod
 from .. import listing, mutations, qmd
-from ..paths import find_session_file, get_output_path
+from ..catalog import Catalog, load_catalog
+from ..paths import get_output_path
+from ..registry import SOURCES
 from ..rendering import render_conversation, strip_lone_surrogates
 from ..schema import Message, SessionData
+from ..storage import atomic_write, document_lock, lock_path, locked
+from ..store import SessionRecord, metadata_lines, native_id_of, record_from_frontmatter
 
 
 class ConversationSource(ABC):
@@ -43,13 +47,15 @@ class ConversationSource(ABC):
     # `list` default: "active" -> status == "active"; "not-done" -> status != "done"
     list_default: str = "active"
     # env var consulted to resolve the "current" session for mutations
-    session_env_var: str = "CLAUDE_SESSION_ID"
+    session_env_var: str = ""
     # frontmatter key holding the id (claude/codex: session_id; cursor: composer_id)
     id_field: str = "session_id"
     # default status written when no existing file (cursor overrides per-composer)
     default_status: str = "active"
     # preserved-section wording in the My Notes placeholder ("syncs" vs "exports")
     preserved_note: str = "syncs"
+    # Chat transcript boundary; meetings have native notes before My Notes instead.
+    conversation_heading: str | None = "## Conversation"
 
     # ====================================================================
     # Overridable per source
@@ -110,8 +116,100 @@ class ConversationSource(ABC):
     # Shared concrete helpers
     # ====================================================================
 
+    @property
+    def source_name(self) -> str:
+        """The registry source verb for this collection (``claude``, ``codex`` …)."""
+        return next(s.source for s in SOURCES if s.collection == self.collection)
+
+    @property
+    def catalog(self) -> Catalog:
+        """The collection's stat-validated catalog, refreshed once per process.
+
+        Export runs hold the collection's operation lock, so within one run the only
+        other writers are annotations, which :meth:`Catalog.get` re-validates per hit.
+        """
+        if self._catalog is None:
+            self._catalog = load_catalog(self.output_dir)
+        return self._catalog
+
+    _catalog: Catalog | None = None
+    _index: dict[str, list[str]] | None = None
+    _index_generation = -1
+
+    def flush_catalog(self) -> None:
+        """Persist catalog changes (no-op when nothing changed or never loaded)."""
+        if self._catalog is not None:
+            self._catalog.save()
+
+    def _id_index(self) -> dict[str, list[str]]:
+        """native_id -> relative paths, rebuilt whenever the catalog changed."""
+        catalog = self.catalog
+        if self._index is None or self._index_generation != catalog.generation:
+            index: dict[str, list[str]] = {}
+            for rel, entry in catalog.entries.items():
+                fm = entry.frontmatter
+                if fm.get("type") != self.session_type:
+                    continue
+                native_id = native_id_of(fm, self.id_field)
+                if native_id is not None:
+                    index.setdefault(native_id, []).append(rel)
+            self._index = index
+            self._index_generation = catalog.generation
+        return self._index
+
+    def _record_at(self, rel: str) -> SessionRecord | None:
+        entry = self.catalog.get(rel)
+        if entry is None:
+            return None
+        try:
+            return record_from_frontmatter(
+                self.catalog.path_of(rel),
+                entry.frontmatter,
+                self.source_name,
+                self.id_field,
+                self.session_type,
+            )
+        except ValueError:
+            return None
+
+    def find_record(self, session_id: str) -> SessionRecord | None:
+        """Locate a session by full id, unique prefix, or ``source:id`` reference.
+
+        Served from the catalog: a dictionary hit plus one ``stat`` of the file.
+        Raises :class:`FileExistsError` when the id is ambiguous, so a mutation can
+        never silently land on the wrong session. Returns ``None`` when nothing
+        matches (including a reference that names another source).
+        """
+        source, prefix = session_id.split(":", 1) if ":" in session_id else (None, session_id)
+        if source is not None and source != self.source_name:
+            return None
+        for _attempt in range(2):  # once more if the hit's identity changed on disk
+            index = self._id_index()
+            if prefix in index:
+                native_id, rels = prefix, index[prefix]
+            else:
+                matches = [(nid, rels) for nid, rels in index.items() if nid.startswith(prefix)]
+                if not matches:
+                    return None
+                if len(matches) > 1:
+                    choices = ", ".join(f"{self.source_name}:{nid}" for nid, _ in sorted(matches))
+                    raise FileExistsError(f"ambiguous session {session_id!r}; choose {choices}")
+                native_id, rels = matches[0]
+            if len(rels) > 1:
+                paths = ", ".join(str(self.catalog.path_of(rel)) for rel in sorted(rels))
+                raise FileExistsError(
+                    f"ambiguous session {session_id!r}: {len(rels)} files carry it: {paths}"
+                )
+            record = self._record_at(rels[0])
+            if record is not None and record.session_id == native_id:
+                return record
+            # The file vanished or now holds a different session: the index was
+            # rebuilt by the re-validation, so look once more before giving up.
+        return None
+
     def find_file(self, session_id: str) -> Path | None:
-        return find_session_file(self.output_dir, self.short_id(session_id))
+        record = self.find_record(session_id)
+        return record.path if record else None
 
     def output_path(
         self,
@@ -140,7 +238,10 @@ class ConversationSource(ABC):
         except fm_mod.FrontmatterParseError as e:
             print(f"Warning: skipping {output_file}: {e}", file=sys.stderr)
             return None, None, False
-        return existing_fm, fm_mod.extract_my_notes_section(content), True
+        my_notes = fm_mod.extract_my_notes_section(
+            content, conversation_heading=self.conversation_heading
+        )
+        return existing_fm, my_notes, True
 
     def export_one(
         self, source_id: str, data: SessionData, existing_file: Path | None
@@ -160,25 +261,62 @@ class ConversationSource(ABC):
         output_file = existing_file or self.output_path(
             source_id, data["date"], data.get("project"), data.get("repo_subdir")
         )
-        existing_fm, my_notes, ok = self.load_existing(output_file)
-        if not ok:
-            return None
-        markdown = strip_lone_surrogates(self.render_document(data, existing_fm, my_notes))
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_file.write_text(markdown, encoding="utf-8")
+        # Collection lock protects filename allocation; document lock coordinates
+        # read/merge/write with annotations. Readers see the old or new whole file.
+        with locked(lock_path(self.output_dir, "export")):
+            if output_file.exists():
+                existing = fm_mod.parse_frontmatter(output_file.read_text(encoding="utf-8"))
+                if existing.get(self.id_field) != source_id:
+                    import hashlib
+
+                    output_file = output_file.with_stem(
+                        output_file.stem + "-" + hashlib.sha256(source_id.encode()).hexdigest()[:16]
+                    )
+            with locked(document_lock(output_file)):
+                existing_fm, my_notes, ok = self.load_existing(output_file)
+                if not ok:
+                    return None
+                markdown = strip_lone_surrogates(self.render_document(data, existing_fm, my_notes))
+                metadata = "\n".join(metadata_lines(self.source_name, source_id, data))
+                markdown = markdown.replace("\nstatus:", "\n" + metadata + "\nstatus:", 1)
+                atomic_write(output_file, markdown)
+                # Write-through while the document lock is held: the recorded stat
+                # identity is this write's, not a concurrent annotation's.
+                self.catalog.put(output_file, fm_mod.parse_frontmatter(markdown))
         return output_file
 
     def all_sessions(self) -> list[tuple[Path, dict]]:
-        return listing.get_session_files(self.output_dir, self.session_type)
+        return listing.get_session_files(self.output_dir, self.session_type, self.catalog)
 
     def active_sessions(self) -> list[tuple[Path, dict]]:
-        return listing.get_active_sessions(self.output_dir, self.session_type)
+        return listing.get_active_sessions(self.output_dir, self.session_type, self.catalog)
 
     def current_session_id(self, explicit: str | None) -> str | None:
         """Resolve the session to act on: explicit id, then env var, then the single
         active session. Refuses to guess when more than one session is active so a
         mutation can never silently land on the wrong one."""
-        sid = explicit or os.environ.get(self.session_env_var)
+        from ..harnesses import detect_harness, get_harness
+
+        source = next((s.source for s in SOURCES if s.collection == self.collection), None)
+        try:
+            if not explicit and source in ("claude", "codex"):
+                active_host = detect_harness()
+                hints = any(
+                    os.environ.get(name)
+                    for name in ("CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID")
+                )
+                if active_host != source and (active_host or hints):
+                    raise ValueError(
+                        f"cannot infer the current {source} session from mixed or other-host hints; pass --session-id"
+                    )
+            sid = explicit or (
+                get_harness(source).current_id()
+                if source in ("claude", "codex")
+                else os.environ.get(self.session_env_var)
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return None
         if sid:
             return sid
 
@@ -187,8 +325,7 @@ class ConversationSource(ABC):
             return None
         if len(active) > 1:
             print(
-                f"Error: {len(active)} active sessions found; pass --session-id or set "
-                f"{self.session_env_var} to choose one.",
+                f"Error: {len(active)} active sessions found; pass --session-id to choose one.",
                 file=sys.stderr,
             )
             return None
@@ -203,7 +340,8 @@ class ConversationSource(ABC):
         sid = self.current_session_id(explicit)
         if not sid:
             print(
-                f"Error: No session_id. Use --session-id or set {self.session_env_var}",
+                "Error: No session_id. Use --session-id"
+                + (f" or set {self.session_env_var}" if self.session_env_var else ""),
                 file=sys.stderr,
             )
         return sid

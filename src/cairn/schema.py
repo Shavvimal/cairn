@@ -64,6 +64,7 @@ class SessionData(TypedDict, total=False):
     repo_subdir: str | None
     cwd: str | None
     folder: str | None
+    source_revision: str  # native snapshot identity, independent of annotation mtime
     # vcs / model / tool metadata
     git_branch: str | None
     branch: str | None
@@ -84,6 +85,7 @@ class SessionData(TypedDict, total=False):
     files_created: list[str]
     files_modified: list[str]
     # timestamps (raw ISO strings as found in the source store)
+    created_at: str | None
     first_timestamp: str | None
     last_timestamp: str | None
     last_activity: str | None

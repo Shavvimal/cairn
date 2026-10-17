@@ -7,7 +7,7 @@
   "//cron": "Optional. Schedule for 'cairn sync --cron' as a standard 5-field crontab expression. Defaults to '7 * * * *' (hourly at minute 7) when omitted.",
   "cron": { "schedule": "7 * * * *" },
   "//collections": "Each key is BOTH the QMD collection name AND the output subdirectory under data_root.",
-  "//sync": "Per-collection sync policy (config-as-data). 'enabled' is the integration on/off switch the engine reads - disabled sources are skipped by 'cairn sync'. 'since' is the export window (today|yesterday|Nd|Nw|YYYY-MM-DD). 'on_hook' runs the source on the fast SessionEnd hook (default: Claude only). Omitting the whole block means enabled with a 1d window.",
+  "//sync": "Per-collection sync policy (config-as-data). 'enabled' is the integration on/off switch the engine reads - disabled sources are skipped by 'cairn sync'. 'since' is the export window (today|yesterday|Nd|Nw|YYYY-MM-DD). 'on_hook': false opts out of the originating host's SessionEnd sync (otherwise enabled). Legacy 'sync --hook' still defaults to Claude. Omitting the whole block means enabled with a 1d window.",
   "collections": {
     "claude-code-sessions": {
       "store": "~/.claude/projects",

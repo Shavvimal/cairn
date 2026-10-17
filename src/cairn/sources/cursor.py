@@ -36,6 +36,7 @@ from ..projects import (
 )
 from ..rendering import render_artifacts
 from ..schema import SessionData
+from ..store import is_current
 from ..timeutil import today_str
 from .base import ConversationSource
 
@@ -208,6 +209,7 @@ def extract_composer_data(composer_json: dict, workspace_map: dict) -> dict | No
 
     return {
         "composer_id": composer_id,
+        "cwd": folder_path,
         "date": date,
         "title": title,
         "mode": unified_mode or None,
@@ -427,16 +429,12 @@ class CursorSource(ConversationSource):
                 skipped += 1
                 continue
 
-            existing_file = self.find_file(composer_id)
-            if (
-                existing_file
-                and existing_file.exists()
-                and existing_file.stat().st_mtime * 1000 >= updated_ms
-            ):
+            record = self.find_record(composer_id)
+            if is_current(record, str(updated_ms)):
                 skipped += 1
                 continue
 
-            to_export.append((composer_id, composer_json, existing_file))
+            to_export.append((composer_id, composer_json, record.path if record else None))
 
         if not to_export:
             if not quiet:
@@ -455,6 +453,8 @@ class CursorSource(ConversationSource):
             if not data:
                 skipped += 1
                 continue
+
+            data["source_revision"] = str(composer_json.get("lastUpdatedAt", 0))
 
             data["messages_ordered"] = fetch_bubbles(
                 conn, composer_id, data["bubble_order"], data.get("legacy_turns")

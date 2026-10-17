@@ -108,8 +108,8 @@ class SyncPolicy:
     recorded in the config file and *consumed* by :mod:`cairn.sync`. ``enabled``
     gates the source entirely; ``since`` is its export window (a ``parse_since``
     token); ``on_hook`` decides whether the fast SessionEnd hook runs it (``None``
-    means "use the engine's per-source default" - the hook is a Claude Code hook,
-    so Claude is the natural default).
+    means enable the originating host's hook. Legacy ``sync --hook`` retains
+    its per-source default, enabling Claude only).
     """
 
     enabled: bool = True

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Final
 
 from .frontmatter import FrontmatterParseError, rewrite_preserved_tail
+from .storage import atomic_write, document_lock, locked
 
 # The session lifecycle vocabulary. Declared here, at the mutation boundary, so an
 # invalid status is rejected no matter which caller writes it (not only the CLI).
@@ -59,17 +60,22 @@ def _mutate_file(find_file: FindFile, session_id: str, mutate: Callable[[dict], 
         print(f"Error: Session file not found for {session_id[:8]}", file=sys.stderr)
         return False
 
-    content = session_file.read_text(encoding="utf-8")
-    try:
-        new_content = rewrite_preserved_tail(content, mutate)
-    except FrontmatterParseError as e:
-        print(f"Error: cannot parse frontmatter in {session_file.name}: {e}", file=sys.stderr)
-        return False
-    if new_content is None:
-        print(f"Error: No frontmatter block in {session_file.name}", file=sys.stderr)
-        return False
+    with locked(document_lock(session_file)):
+        # Preserve transcript characters exactly: converting CRLF would invalidate
+        # length-framed turns even though this mutation only changes frontmatter.
+        with session_file.open(encoding="utf-8", newline="") as handle:
+            content = handle.read()
+        try:
+            new_content = rewrite_preserved_tail(content, mutate)
+        except FrontmatterParseError as e:
+            print(f"Error: cannot parse frontmatter in {session_file.name}: {e}", file=sys.stderr)
+            return False
+        if new_content is None:
+            print(f"Error: No frontmatter block in {session_file.name}", file=sys.stderr)
+            return False
 
-    session_file.write_text(new_content, encoding="utf-8")
+        atomic_write(session_file, new_content)
+
     return True
 
 

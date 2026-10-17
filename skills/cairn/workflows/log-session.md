@@ -7,7 +7,7 @@ cursor, and granola). service-docs is a file mirror and has no annotation verbs.
 
 ## Behavior
 
-- **Always generates a summary** via a haiku subagent (analyzes the conversation)
+- **Always generates a summary** from the available conversation context
 - Reads valid tags from `../schema/tags.yaml`
 - Updates frontmatter via the cairn CLI
 - Fields: title, tags, status, rating, comments, summary
@@ -33,7 +33,7 @@ current one).
 
 User says: "log session - Enhanced sync skill, done, implementation automation, 8"
 
-Claude:
+Agent:
 
 1. Parses intent from natural language:
    - title: "Enhanced sync skill"
@@ -42,7 +42,7 @@ Claude:
    - rating: 8
    - comment: (auto-generated from context)
 2. Reads `../schema/tags.yaml` to validate tags
-3. Runs a haiku subagent to generate a 2-3 line summary
+3. Writes a 2-3 line summary from the conversation; do not require a host-specific subagent
 4. Updates via CLI (`cairn claude log`, `cairn claude note`, `cairn claude close`)
 
 ### Example inputs
@@ -63,10 +63,11 @@ Claude:
 
 ## Finding the current session
 
-```bash
-echo $CLAUDE_SESSION_ID
-# Session file pattern: claude-code-sessions/YYYY-MM-DD-{session_id[:8]}.md
-```
+Use the harness reference for current-session metadata, or select a source-qualified
+record from `cairn recall list DATE --all-projects --json`. Pass the full native ID with
+`--session-id`. If the target is ambiguous, ask; do not guess from recent filenames.
+The CLI annotates comments/status/tags/rating; put a proposed title or summary in the
+comment rather than inventing unsupported flags.
 
 ## Status values
 

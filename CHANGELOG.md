@@ -5,13 +5,81 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.4.0]
+
+### Upgrading from 2.3.0
+
+Run the [setup skill](skills/setup/SKILL.md) again to follow its
+[update workflow](skills/setup/references/updating.md). It upgrades the engine first,
+then the plugin, using the relevant host adapter. Afterwards it runs
+`cairn hook install --harness claude` (or `codex`) so
+the SessionEnd hook records the engine's interpreter and config. Until then the
+bundled launcher falls back to `cairn` on PATH. If the plugin updates before the
+engine, the launcher detects the 2.3.0 engine, runs the legacy `cairn sync --hook`
+detached, and prints the upgrade command to the hook log.
+
+Keep the existing Markdown store and QMD database; no full rebuild is required.
+Legacy metadata remains readable and upgrades on export when native data is available.
+For older history, optionally export each enabled source with `--all`, then run
+`cairn sync --cron`. Rewritten documents need their embeddings refreshed; unchanged
+documents do not. See the setup skill's update workflow for preservation and
+unavailable-history behavior.
+Reinstall hooks and the existing cron entry to record the complete QMD environment.
 
 ### Added
+- Hooks and cron retain the selected QMD configuration, cache and database paths,
+  including effective defaults, instead of inheriting a different host index.
+- Index writers coordinate on canonical configuration and database resources, even
+  when environment aliases or different cache directories refer to shared state.
+- Collection discovery and registration time out after 30 seconds; failed hook jobs
+  release their locks and can be retried.
+- Legacy Claude `agent-*` sidechains are intentional skips, not export failures.
+- Legacy date-only records retain their recorded day label across machine timezones.
+- Structurally invalid catalog caches rebuild from Markdown instead of crashing.
+
+- Shared Claude/Codex harness adapters, portable packaging, explicit Codex onboarding,
+  and discovery-based lifecycle registration with trust diagnostics.
+- Durable session exports queued to a detached worker; failures get at most three attempts,
+  index updates are serialised, and embedding stays out of the callback. Completed and
+  disabled requests and exhausted failures are pruned seven days after becoming terminal.
+  `cairn hook retry SOURCE:FULL_SESSION_ID` explicitly resets a failed request's attempt
+  budget; `cairn hook status`
+  shows every actionable request plus the ten most recent completed ones (`--all`).
+- Recall of exported conversations across sources with source-qualified IDs, UTC activity
+  filtering, schema migration, bounded expansion, and safe concurrent annotations.
+- Native resume command selection, host-aware diagnostics, and shared skill references.
+- A stat-validated session catalog (`$XDG_CACHE_HOME/cairn/catalogs/`) so session lookup,
+  `list` and `recall` cost one directory walk instead of parsing every exported file.
+  The catalog is a derived cache: entries are trusted only while the file's
+  mtime/ctime/size/inode match, and a missing or corrupt catalog is rebuilt.
+- A POSIX `sh` hook launcher (`hooks/launch.sh`) that never depends on the macOS
+  `/usr/bin/python3` stub.
+- Resource locks under `~/.local/state/cairn/locks/` keep lock files out of Markdown
+  and QMD directories while coordinating shared canonical paths across profiles.
 - Community health files: `CODE_OF_CONDUCT.md`, `SECURITY.md`, issue and pull
   request templates, and Dependabot configuration.
 - CI: a `version-bump` gate that requires `__version__` to change when
   `src/cairn/` is modified.
+- Live verification and outstanding desktop/skill-evaluation acceptance recorded in
+  `docs/codex-acceptance.md`.
+
+### Fixed
+- Hook and cron index updates create the QMD database and config directories they
+  pin, so the first job on a machine where QMD has never run no longer fails.
+- A code fence left open in `## My Notes` no longer swallows the conversation that
+  follows it, which made every export append another copy of the conversation.
+- Granola notes and summaries containing `## Conversation` no longer cause
+  handwritten `## My Notes` content to be discarded on re-export.
+- Recall expansion preserves embedded CRLF line endings so message limits remain
+  accurate for existing exports. Annotation edits preserve transcript bytes and
+  their turn lengths as well.
+
+### Changed
+- The setup skill handles existing installations through a dedicated update workflow;
+  the README points users there for upgrades and optional historical metadata backfill.
+- Exported frontmatter records `activity_dates` (unique UTC days) instead of one line
+  per message timestamp; the full timestamps remain in each turn header. Files written
+  by the pre-release branch with `activity_timestamps` are still read.
 
 ## [2.3.0]
 

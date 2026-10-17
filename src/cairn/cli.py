@@ -128,7 +128,22 @@ def run(source: ConversationSource, argv: list[str] | None = None) -> None:
     """
     parser = build_parser(source)
     args = parser.parse_args(argv)
-    sys.exit(args.func(args))
+    if args.command in ("export", "sync"):
+        from .storage import lock_path, locked
+
+        with locked(lock_path(source.output_dir, "operation")):
+            try:
+                result = args.func(args)
+            finally:
+                # Persist the catalog before the lock is released so the next
+                # reader sees this run's write-through entries.
+                source.flush_catalog()
+        sys.exit(result)
+    try:
+        result = args.func(args)
+    finally:
+        source.flush_catalog()
+    sys.exit(result)
 
 
 __all__ = ["build_parser", "run"]

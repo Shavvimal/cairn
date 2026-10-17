@@ -99,6 +99,7 @@ def render_conversation(messages: list[Message]) -> list[str]:
     """Markdown lines for the '## Conversation' body - interleaved turns."""
     lines = ["## Conversation", ""]
     for message in messages:
+        turn_start = len(lines)
         header = _ROLE_HEADERS.get(message.get("role", ""), "### Message")
         timestamp = message.get("timestamp")
         if timestamp:
@@ -125,6 +126,10 @@ def render_conversation(messages: list[Message]) -> list[str]:
             lines.extend([_render_tool_call(tool_call), ""])
         for code_block in message.get("code_blocks", []):
             lines.extend([_render_code_block(code_block), ""])
+        # The declared length must equal what the final join writes after the
+        # marker line: the body, a newline, and the blank separator line.
+        body = strip_lone_surrogates("\n".join(lines[turn_start:])).rstrip("\n")
+        lines[turn_start:] = [f"<!-- cairn:turn {len(body) + 2} -->", body, ""]
     return lines
 
 

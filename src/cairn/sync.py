@@ -12,12 +12,13 @@ import argparse
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from .config import CairnConfig, get_config
-from .qmd import ensure_collection, list_collections
+from .qmd import ensure_collection, list_collections, locked_index
+from .registry import SOURCE_COLLECTIONS as SOURCE_COLLECTIONS
+from .registry import SOURCES as _BINDINGS
 
 
 def _log_file() -> Path:
@@ -28,35 +29,6 @@ def _log_file() -> Path:
 def _export(source: str, *extra: str) -> list[str]:
     """``python -m cairn <source> export …`` - interpreter-relative, PATH-independent."""
     return [sys.executable, "-m", "cairn", source, "export", *extra]
-
-
-# Static binding from a source's stable CLI identity to the config collection that
-# carries its data (store, enable/window/hook policy) and to whether it accepts a
-# ``--since`` window. This is *code* - which adapter implements a source - never
-# policy: WHETHER and HOW OFTEN each runs is read from the config (see _plan).
-#
-# ``on_hook_default`` is the engine default for the fast SessionEnd hook, used only
-# when the config leaves ``sync.on_hook`` unset; the hook is a Claude Code hook, so
-# Claude is the natural default. Any source can opt in via ``"sync": {"on_hook": true}``.
-@dataclass(frozen=True)
-class _SourceBinding:
-    source: str  # cairn CLI verb, e.g. "claude"
-    collection: str  # config.collections key, e.g. "claude-code-sessions"
-    windowed: bool  # accepts --since (mirrors like service-docs do not)
-    on_hook_default: bool
-
-
-_BINDINGS: tuple[_SourceBinding, ...] = (
-    _SourceBinding("claude", "claude-code-sessions", windowed=True, on_hook_default=True),
-    _SourceBinding("codex", "codex-sessions", windowed=True, on_hook_default=False),
-    _SourceBinding("cursor", "cursor-sessions", windowed=True, on_hook_default=False),
-    _SourceBinding("granola", "granola-sessions", windowed=True, on_hook_default=False),
-    _SourceBinding("service-docs", "service-docs", windowed=False, on_hook_default=False),
-)
-
-# source CLI verb -> config collection key. Consumed by ``cairn config init --enable``
-# to flip ``sync.enabled`` on the right collections. Importing this never reads config.
-SOURCE_COLLECTIONS: dict[str, str] = {b.source: b.collection for b in _BINDINGS}
 
 
 def _plan(config: CairnConfig, mode: str) -> list[tuple[str, list[str]]]:
@@ -204,12 +176,18 @@ def main(argv: list[str] | None = None):
         description="Sync context collections and update the QMD index",
     )
     parser.add_argument(
-        "--hook", action="store_true", help="Fast mode for SessionEnd hook (Claude only)"
+        "--hook",
+        action="store_true",
+        help="Legacy fast sync: Claude by default, explicit on_hook overrides; new hooks use cairn hook handle",
     )
     parser.add_argument(
         "--cron", action="store_true", help="Full mode for the cron job (all sources)"
     )
-    parser.add_argument("--all", action="store_true", help="Everything including a full re-embed")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Sync all enabled sources and embed incrementally (same as --cron)",
+    )
     args = parser.parse_args(argv)
 
     config = get_config()
@@ -218,35 +196,33 @@ def main(argv: list[str] | None = None):
     rotate_log()
     log(f"\n=== context-sync ({mode}) {datetime.now().isoformat()} ===")
 
+    from .hooks import worker
+
+    success = True
     try:
+        if mode != "hook":
+            success = worker(config) == 0
         # Run exports for the sources this mode enables (resolved from config).
         steps = _plan(config, mode)
         if not steps:
             log("  (no enabled sources for this mode - check 'sync.enabled' in your config)")
         for name, command in steps:
-            run_step(name, command)
+            success = run_step(name, command) and success
 
-        # Register any enabled collection that now has markdown on disk, BEFORE
-        # the index refresh so qmd update picks up freshly-registered collections
-        # in the same run. Idempotent + self-healing, so it runs in every mode
-        # (it's one cheap 'qmd collection list' check when nothing is new).
-        run_inproc("qmd-collections", lambda: _ensure_collections(config))
-
-        # Always update index
-        run_step("qmd-update", [qmd, "update"])
-
-        # Embed only in cron/all modes (slow, not needed for hook). The FIRST embed
-        # downloads ~2GB of models and can take many minutes, so allow up to an hour
-        # rather than 600s - an unattended first cron run must be able to finish.
-        if mode in ("cron", "all"):
-            run_step("qmd-embed", [qmd, "embed"], timeout=3600)
+        with locked_index():
+            success = run_inproc("qmd-collections", lambda: _ensure_collections(config)) and success
+            success = run_step("qmd-update", [qmd, "update"]) and success
+            if mode in ("cron", "all"):
+                success = run_step("qmd-embed", [qmd, "embed"], timeout=3600) and success
     except Exception:
         import traceback
 
+        success = False
         log("UNCAUGHT ERROR:\n" + traceback.format_exc())
 
-    log("=== done ===")
+    log("=== done ===" if success else "=== FAILED ===")
+    return 0 if success else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

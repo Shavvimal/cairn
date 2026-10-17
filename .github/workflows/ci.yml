@@ -48,7 +48,8 @@ jobs:
           # cache actually refreshes and stays locked to the engine. Docs/tests/CI are
           # not user-facing and never require a bump.
           changed=$(git diff --name-only "$BASE_SHA"...HEAD -- \
-            'src/cairn/**' 'skills/**' 'hooks/**' '.claude-plugin/**' 'commands/**' 'agents/**')
+            'src/cairn/**' 'skills/**' 'hooks/**' '.claude-plugin/**' '.codex-plugin/**' \
+            'plugin.json' '.agents/plugins/**' 'references/**' 'commands/**' 'agents/**')
           if [ -z "$changed" ]; then
             echo "No user-facing changes; version bump not required."
             exit 0

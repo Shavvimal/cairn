@@ -42,6 +42,7 @@ from ..projects import (
 )
 from ..rendering import render_artifacts
 from ..schema import SessionData
+from ..store import file_revision, is_current
 from ..timeutil import today_str
 from .base import ConversationSource
 
@@ -132,6 +133,9 @@ def extract_session_data(records: list[dict]) -> dict:
             data["session_id"] = record["sessionId"]
 
         # Last non-null branch wins (a session can start on one branch and switch).
+        if record.get("cwd"):
+            data["cwd"] = record["cwd"]
+
         if record.get("gitBranch"):
             data["git_branch"] = record["gitBranch"]
 
@@ -340,13 +344,11 @@ class ClaudeSource(ConversationSource):
         if not jsonl_path.exists() or jsonl_path.stat().st_size == 0:
             return None
 
-        # Skip if output is already up to date.
-        existing_file = self.find_file(session_id)
-        if (
-            existing_file
-            and existing_file.exists()
-            and existing_file.stat().st_mtime >= jsonl_path.stat().st_mtime
-        ):
+        # Skip if output is already up to date (catalog lookup: one stat, no reads).
+        record = self.find_record(session_id)
+        existing_file = record.path if record else None
+        revision = file_revision(jsonl_path)
+        if is_current(record, revision):
             return existing_file
 
         repo = None
@@ -362,7 +364,10 @@ class ClaudeSource(ConversationSource):
             return None
 
         data = extract_session_data(records)
+        if data.get("session_id") and data["session_id"] != session_id:
+            raise ValueError("transcript session ID does not match requested session")
         data["session_id"] = session_id
+        data["source_revision"] = revision
         data["repo"] = repo
         data["project"] = project
         data["repo_subdir"] = repo_subdir
@@ -375,11 +380,20 @@ class ClaudeSource(ConversationSource):
             print(f"Synced: {output_file}")
         return output_file
 
+    def export_target(self, session_id: str, transcript_path: str | None) -> Path:
+        result = self.sync_session(session_id, transcript_path, quiet=True)
+        if result is None:
+            raise ValueError(f"Claude transcript unavailable for {session_id}")
+        return result
+
     # ---- export ----
     def extend_export_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("file", nargs="?", help="export one specific session file")
 
     def run_export(self, args: argparse.Namespace) -> int:
+        if not args.file and not PROJECTS_BASE.is_dir():
+            print(f"Error: Sessions dir not found: {PROJECTS_BASE}", file=sys.stderr)
+            return 1
         if args.file:
             sessions = [Path(args.file)]
         elif args.all:
@@ -390,10 +404,18 @@ class ClaudeSource(ConversationSource):
             sessions = [f for f in _get_all_session_files() if f.stat().st_mtime >= cutoff]
             print(f"Found {len(sessions)} sessions in the selected window")
 
+        failed = False
         for session_file in sessions:
             session_id = session_file.stem
-            self.sync_session(session_id, str(session_file), quiet=args.quiet)
-        return 0
+            if session_id.startswith("agent-"):
+                continue  # intentionally excluded side-thread, not a failed export
+            try:
+                if self.sync_session(session_id, str(session_file), quiet=args.quiet) is None:
+                    failed = True
+            except (OSError, ValueError) as exc:
+                print(f"Error exporting {session_id}: {exc}", file=sys.stderr)
+                failed = True
+        return int(failed)
 
     # ---- claude-only extras: sync (hook) + resume ----
     def add_extra_parsers(
@@ -468,9 +490,9 @@ class ClaudeSource(ConversationSource):
             print(f"Error: No session_id in {target_file}", file=sys.stderr)
             return 1
 
-        cmd = ["claude", "--resume", session_id]
-        if args.fork:
-            cmd.append("--fork-session")
+        from ..harnesses import get_harness
+
+        cmd = get_harness("claude").resume(session_id, args.fork)
         print(f"Resuming: {session_id}")
         os.execvp("claude", cmd)
 

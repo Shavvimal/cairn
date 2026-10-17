@@ -23,6 +23,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 from cairn import config
+from cairn.schema import SessionData
 
 
 def _write_config(root: Path, stores: dict[str, str]) -> Path:
@@ -54,6 +55,8 @@ class _AdapterFixture(unittest.TestCase):
     def setUp(self):
         self._tmp = TemporaryDirectory()
         self.root = Path(self._tmp.name)
+        self._home_patch = patch.dict(os.environ, {"HOME": str(self.root / "home")})
+        self._home_patch.start()
         self._prev = os.environ.get("CAIRN_CONFIG")
 
     def _activate(self, stores: dict[str, str]):
@@ -64,6 +67,7 @@ class _AdapterFixture(unittest.TestCase):
         return importlib.reload(module)
 
     def tearDown(self):
+        self._home_patch.stop()
         if self._prev is None:
             os.environ.pop("CAIRN_CONFIG", None)
         else:
@@ -77,6 +81,51 @@ class _AdapterFixture(unittest.TestCase):
 
 class TestCodexExport(_AdapterFixture):
     module_name = "cairn.sources.codex"
+
+    def test_current_response_users_exclude_context_and_deduplicate_legacy_events(self):
+        store = self.root / "codex-store"
+        store.mkdir()
+        mod = self._activate({"codex-sessions": str(store)})
+        records = [{"type": "session_meta", "payload": {"id": "current", "cwd": "/tmp"}}]
+        for turn in ("first", "second"):
+            records.append(
+                {"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn}}
+            )
+            for text, kind in (
+                ("Injected environment", "environments.environment_context"),
+                ("Investigate the widget bug", "user.text"),
+            ):
+                records.append(
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-10-16T12:00:00Z",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": text}],
+                            "internal_chat_message_metadata_passthrough": {
+                                "turn_id": turn,
+                                "content_item_kinds": [kind],
+                            },
+                        },
+                    }
+                )
+            if turn == "first":
+                records.append(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "Investigate the widget bug",
+                        },
+                    }
+                )
+        path = store / "rollout-current.jsonl"
+        path.write_text("\n".join(map(json.dumps, records)))
+        data = mod.parse_rollout(path)
+        self.assertEqual(data["user_messages"], ["Investigate the widget bug"] * 2)
+        self.assertEqual(data["message_count"], 2)
+        self.assertEqual(len(data["messages"]), 2)
 
     def test_rollout_parses_and_renders(self):
         store = self.root / "codex-store"
@@ -207,6 +256,42 @@ class TestCursorExport(_AdapterFixture):
         self.assertNotIn("\ud83c", text)  # lone surrogate stripped
         self.assertIn("Trophy", text)
         self.assertIn("here", text)
+
+
+class TestGranolaExport(_AdapterFixture):
+    module_name = "cairn.sources.granola"
+
+    def test_source_headings_do_not_erase_handwritten_notes_on_reexport(self):
+        mod = self._activate({"granola-sessions": str(self.root / "granola")})
+        for field in ("notes_markdown", "summary_markdown"):
+            with self.subTest(field=field):
+                source = mod.GranolaSource()
+                data: SessionData = {
+                    "meeting_id": field,
+                    "date": "2026-07-01",
+                    "title": "Meeting",
+                    "transcript_markdown": "Native transcript\n## My Notes\nTranscript text",
+                }
+                native_notes = "## Conversation\nCustomer feedback\n## Transcript\nMore notes"
+                if field == "notes_markdown":
+                    data["notes_markdown"] = native_notes
+                else:
+                    data["summary_markdown"] = native_notes
+                path = source.export_one(field, data, None)
+                assert path is not None
+                path.write_text(
+                    path.read_text().replace(
+                        "<!-- Add your notes here. This section is preserved across exports. -->",
+                        "Important handwritten follow-up\n```md\n## Conversation\n```",
+                    )
+                )
+                for _ in range(2):
+                    self.assertEqual(source.export_one(field, data, path), path)
+                    content = path.read_text()
+                    self.assertEqual(content.count("Important handwritten follow-up"), 1)
+                    self.assertEqual(content.count("Native transcript"), 1)
+                    self.assertEqual(content.count("Transcript text"), 1)
+                    self.assertIn("```md\n## Conversation\n```", content)
 
 
 class TestGranolaHelpers(unittest.TestCase):

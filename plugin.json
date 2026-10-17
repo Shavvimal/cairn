@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "cairn",
+  "version": "2.4.0",
+  "description": "Local, searchable memory across Claude, Codex, Cursor and Granola.",
+  "author": {
+    "name": "Shav Vimalendiran"
+  },
+  "license": "MIT",
+  "extensions": {
+    "com.openai": {
+      "onboardingSkill": "./skills/setup/SKILL.md",
+      "hooks": "./hooks/codex.json"
+    }
+  }
+}
