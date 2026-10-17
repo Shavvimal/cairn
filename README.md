@@ -121,10 +121,16 @@ codex plugin add cairn@cairn
 cairn hook install --harness codex
 ```
 
-Restart and review changed hooks. For Claude, re-run `cairn hook install --harness claude`
-after an engine reinstall. Diagnose package drift with
-`cairn doctor --harness HOST --plugin-manifest /absolute/installed/package/plugin.json`
+Restart and review changed hooks. For Claude, run `cairn hook install --harness claude`
+once after upgrading to 2.4.0 and again after any engine reinstall. Diagnose package drift
+with `cairn doctor --harness HOST --plugin-manifest /absolute/installed/package/plugin.json`
 (use `.claude-plugin/plugin.json` for Claude). Cron and hooks use recorded absolute paths.
+
+**Upgrade order is engine first, then plugin.** Plugins auto-update, so the bundled
+launcher (`hooks/launch.sh`) tolerates the reverse: without a recorded engine it uses
+`cairn` from PATH, and if that engine is 2.3.x (no `cairn hook` command) it runs the
+legacy `cairn sync --hook` detached and logs the upgrade command. It never calls the
+macOS `/usr/bin/python3` stub unless the Command Line Tools are installed.
 
 ### Disable or remove
 
@@ -267,6 +273,14 @@ without QMD and returns failure if refresh failed. Schema upgrades preserve anno
 even when native mtime is unchanged; unavailable native data leaves old exports intact.
 
 Every export checks whether its source actually changed (mtime/timestamp/hash) before doing work, so a "nothing changed" run is nearly instant. Steps are timed and logged to `.context/logs/context-sync.log`.
+
+Session lookup, `list` and `recall` read a per-collection catalog under
+`$XDG_CACHE_HOME/cairn/catalogs/` rather than parsing every exported file. The markdown
+stays the only source of truth: an entry is trusted only while the file's mtime, ctime,
+size and inode still match, changed files are re-parsed, and a missing or corrupt catalog
+is rebuilt from the files. On a store of 8,000 Claude sessions a lookup drops from about
+a second to under 100 ms. The catalog never lives inside the corpus, so a git-tracked
+data root does not see it.
 
 ## Repository layout
 

@@ -1,10 +1,50 @@
 # Claude execution
 
 Use `Bash` for shell commands and `Read`/`Edit` for files. Collect missing settings with
-`AskUserQuestion` when available, otherwise ordinary conversation. For long setup work,
-use Bash's supported background execution, retain the task ID, observe progress with
-`Monitor` when available, and read the task's actual exit status. Stop the monitor after
-the task finishes; silence alone proves nothing.
+`AskUserQuestion` when available, otherwise ordinary conversation.
+
+## Long work: the first sync and embed
+
+A foreground `Bash` call dies long before a ten-minute model download finishes, so run
+`cairn sync --cron` detached and watch its log. The engine writes to
+`<data_root>/logs/context-sync.log`; get `DATA_ROOT` from
+`cairn config show --json` (key `data_root`).
+
+1. Start it with `run_in_background: true`:
+
+   ```bash
+   cairn sync --cron
+   ```
+
+   Keep the task ID so you can read its real exit status later.
+
+2. Arm `Monitor` on the log when the tool is available. The filter must catch completion,
+   progress AND failures; silence is not success. The embed ends with
+   `✓ Done! Embedded N chunks from M documents`; download progress prints percentages,
+   "model" or "download"; failures show `Error`/`Traceback`/`failed`/`Killed`/`OOM`.
+
+   > Monitor invocation:
+   > - **description:** `cairn first sync (model download + embed) progress`
+   > - **timeout_ms:** `3600000` (60 min)
+   > - **command:**
+   >   ```bash
+   >   tail -n +1 -f "$DATA_ROOT/logs/context-sync.log" \
+   >     | grep -E --line-buffered "Done!|Embedded |[0-9]+%|download|model|Error|Traceback|failed|FAILED|Killed|OOM|=== (done|FAILED) ==="
+   >   ```
+
+   `tail -n +1 -f` replays lines written before Monitor armed, then streams new ones.
+
+3. Decide from evidence, then stop the monitor (the `tail -f` never exits on its own):
+   - **Success:** the log ends with `=== done ===` and the background task exits 0.
+     Note N/M; `Embedded 0 chunks` means search will be empty, so investigate before
+     continuing.
+   - **Failure:** the log shows `=== FAILED ===` or an error line, or the task exits
+     non-zero. `Read` the full log and stop and report; do not verify a broken index.
+   - **Silence or timeout:** `Read` the tail of the log. Download or percentage lines
+     mean it is still working, so re-arm Monitor. Otherwise report it as wedged.
+
+Without `Monitor`, re-read the log tail with `Read` every few minutes and check the
+background task's exit status; never treat elapsed time as completion.
 
 Invoke `/cairn:setup` explicitly; other workflows are `/cairn:cairn`, `/cairn:recall`, and
 `/cairn:search`. `disable-model-invocation` keeps setup explicit. Read the selected source's
@@ -15,7 +55,10 @@ explicitly to mutations. The plugin manifest is `.claude-plugin/plugin.json`.
 Update the engine with `uv tool upgrade cairn`, then `/plugin update cairn@cairn` and
 `/reload-plugins`. Re-run `cairn hook install` after an engine reinstall.
 
-Bundled `hooks/hooks.json` supplies SessionEnd. `cairn hook install` records absolute
-engine/config paths; it does not add another global hook. End a real session, then inspect
-`cairn hook status --harness claude` and search a distinctive phrase from that session.
-An isolated shell invocation of the handler is not host lifecycle verification.
+Bundled `hooks/hooks.json` supplies SessionEnd through `hooks/launch.sh`. `cairn hook
+install` records absolute engine/config paths in `hook-launcher.env`; it does not add
+another global hook. Claude gives every SessionEnd hook a shared 1.5 s budget that a
+plugin-declared timeout cannot raise, so the handler only queues the event and starts a
+detached worker. End a real session, then inspect `cairn hook status --harness claude`
+and search a distinctive phrase from that session. An isolated shell invocation of the
+handler is not host lifecycle verification.

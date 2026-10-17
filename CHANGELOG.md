@@ -5,25 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 2.4.0
+## [2.4.0]
 
-- Add shared Claude/Codex harness adapters, portable packaging, explicit Codex onboarding,
-  and discovery-based lifecycle registration with trust diagnostics.
-- Queue durable session exports in a detached worker; retain/retry failures and serialize
-  index updates without embedding in the callback.
-- Recall exported conversations across sources with source-qualified IDs, UTC activity
-  filtering, schema migration, bounded expansion, and safe concurrent annotations.
-- Add native resume command selection, host-aware diagnostics, and shared skill references.
-- Record live verification and outstanding desktop/skill-evaluation acceptance in
-  `docs/codex-acceptance.md`.
+### Upgrading from 2.3.0
 
-## [Unreleased]
+Upgrade the engine first, then the plugin: `uv tool upgrade cairn`, then
+`/plugin update cairn@cairn` and `/reload-plugins` (Claude) or the Codex commands in
+the README. Afterwards run `cairn hook install --harness claude` (or `codex`) once so
+the SessionEnd hook records the engine's interpreter and config. Until then the
+bundled launcher falls back to `cairn` on PATH. If the plugin updates before the
+engine, the launcher detects the 2.3.0 engine, runs the legacy `cairn sync --hook`
+detached, and prints the upgrade command to the hook log.
 
 ### Added
+- Shared Claude/Codex harness adapters, portable packaging, explicit Codex onboarding,
+  and discovery-based lifecycle registration with trust diagnostics.
+- Durable session exports queued to a detached worker; failures are retained and retried,
+  index updates are serialised, and embedding stays out of the callback. Completed and
+  disabled requests are pruned seven days after they finished; `cairn hook status`
+  shows every actionable request plus the ten most recent completed ones (`--all`).
+- Recall of exported conversations across sources with source-qualified IDs, UTC activity
+  filtering, schema migration, bounded expansion, and safe concurrent annotations.
+- Native resume command selection, host-aware diagnostics, and shared skill references.
+- A stat-validated session catalog (`$XDG_CACHE_HOME/cairn/catalogs/`) so session lookup,
+  `list` and `recall` cost one directory walk instead of parsing every exported file.
+  The catalog is a derived cache: entries are trusted only while the file's
+  mtime/ctime/size/inode match, and a missing or corrupt catalog is rebuilt.
+- A POSIX `sh` hook launcher (`hooks/launch.sh`) that never depends on the macOS
+  `/usr/bin/python3` stub.
 - Community health files: `CODE_OF_CONDUCT.md`, `SECURITY.md`, issue and pull
   request templates, and Dependabot configuration.
 - CI: a `version-bump` gate that requires `__version__` to change when
   `src/cairn/` is modified.
+- Live verification and outstanding desktop/skill-evaluation acceptance recorded in
+  `docs/codex-acceptance.md`.
+
+### Changed
+- Exported frontmatter records `activity_dates` (unique UTC days) instead of one line
+  per message timestamp; the full timestamps remain in each turn header. Files written
+  by the pre-release branch with `activity_timestamps` are still read.
 
 ## [2.3.0]
 

@@ -78,6 +78,27 @@ The successful real embedding run and the controlled failure/empty runs are sepa
 experiments. The injected failure tests validate supervision, not model download reliability.
 Optional Granola dependency failures are covered automatically, not with a live Granola account.
 
+## Review follow-up (2026-10-17)
+
+A review of the branch found two blockers and several defects; all are fixed on this
+branch and re-verified as follows. Unit and CLI evidence only: the live host criteria
+below were not repeated after these changes and remain open.
+
+| Change | Evidence |
+| --- | --- |
+| Session lookup no longer parses every exported file | Stat-validated catalog (`src/cairn/catalog.py`). On the developer's real store (8,344 Claude files, 329 MB): `find_record` 577 ms cold (one-time rebuild), 80 to 90 ms warm, against 620 to 1,140 ms before. `cairn recall list yesterday --all-projects --json` returned the identical 35 references as the pre-change code on the same day. A real `cairn claude export --since 1d` into a scratch data root took 0.46 s for 14 sessions and 0.06 s when nothing changed, with no duplicate `native_id`. |
+| Hook survives a plugin-before-engine upgrade | `hooks/launch.sh` (POSIX sh). Tests cover the recorded-engine path, `cairn` on PATH without a launcher file, a 2.3.x engine (exit 2, `unknown command 'hook'`) degrading to detached `cairn sync --hook` with the upgrade hint, pass-through of other failures, and no engine at all. `/usr/bin/python3` is only tried when the Command Line Tools exist. |
+| Turn marker framing | Declared length is now exactly the written body plus separator; a test covers text, tool result and code block bodies ending in a newline plus a forged marker inside a body. The real 1,575-message session still frames with zero mismatches. |
+| Frontmatter size | `activity_dates` (unique UTC days) replaces one line per timestamp; a 288-timestamp test session yields three lines. Files from this branch's earlier test profiles that carry `activity_timestamps` are still read. |
+| Codex `export_target` | Each candidate rollout is parsed once. |
+| Queue hygiene | Completed/disabled requests are pruned seven days after their terminal timestamp; failed and running requests are never pruned. `cairn hook status` shows actionable requests plus the ten most recent completed (`--all` for everything); doctor caps failure warnings at five. |
+| Checks | `make check`: ruff, mypy and 184 unit tests pass; `ruff format --check` passes. |
+
+Not repeated after these changes: installation from GitHub, real Claude and Codex
+shutdowns through the installed plugin, the Codex user-level fallback registration, and
+the plugin-only upgrade path against a real 2.3.0 engine. These must be re-run with the
+temporary-profile method above before the PR leaves draft.
+
 ## Acceptance still requiring evidence
 
 - **Codex desktop:** no Codex desktop application is installed in this environment. Desktop

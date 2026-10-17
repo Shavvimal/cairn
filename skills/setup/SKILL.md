@@ -180,15 +180,23 @@ To change integrations later: `cairn config set <source>.enabled true|false` (no
 
 Run `cairn sync --cron` using the harness's long-process tools and retain the process
 handle. This exports enabled sources, registers nonempty collections, updates QMD, and
-embeds. Initial model downloads can be large and take many minutes. Inspect bounded output
-from `<data_root>/logs/context-sync.log` and wait for the actual process exit code.
+embeds. **The first embed downloads ~2GB of GGUF models and can take 10+ minutes**, far
+longer than a foreground shell call survives. Inspect bounded output from
+`<data_root>/logs/context-sync.log` and wait for the actual process exit code.
+
+For example, in Claude Code run it with Bash `run_in_background: true` and watch the log
+with `Monitor` when available; in Codex start it with `exec_command` and poll with
+`write_stdin`. Your harness reference (`references/harnesses/claude.md` or `codex.md`)
+has the exact recipe, including the log filter and what success, failure and silence
+look like.
 
 - Exit 0: inspect `qmd collection list` and `qmd status`. Collections with exported
   Markdown must be registered, and a nonempty corpus must have embeddings.
 - Nonzero exit: read the failed source/index step in the log, fix the cause and retry.
   Do not treat a partly populated index as completed setup.
-- Silence: inspect the process status and log. If still working, keep observing using the
-  host tools. A timeout is not success; if wedged, report the evidence.
+- Silence: inspect the process status and log. Download or percentage lines mean it is
+  still working, so keep observing with the host tools. A timeout is not success; if
+  wedged, report the evidence.
 - No exported data: report an empty installation honestly. Widen a source's window with
   `cairn SOURCE export --since 30d` if the user wants older history, then sync again.
   Do not invent a search result or claim a populated index.

@@ -1,9 +1,36 @@
 # Codex execution
 
-Use the shell execution tool available in this client (for example `exec_command`). For
-long-running commands retain the returned session/process handle and poll its exit status
-with the matching tool (for example `write_stdin`); inspect bounded log output. Do not use
-Claude-only `Bash` background flags or require `Monitor`. Use available file reads/patches.
+Use the shell execution tool available in this client (for example `exec_command`). Do
+not use Claude-only `Bash` background flags or require `Monitor`. Use available file
+reads/patches.
+
+## Long work: the first sync and embed
+
+A single shell call cannot wait out a ten-minute model download, so run
+`cairn sync --cron` as a long-lived process and poll it. The engine writes to
+`<data_root>/logs/context-sync.log`; get `DATA_ROOT` from `cairn config show --json`.
+
+1. Start it with `exec_command` and retain the returned session/process handle:
+
+   ```bash
+   cairn sync --cron
+   ```
+
+2. Poll with `write_stdin` on that handle (an empty write returns new output) until the
+   process exits, and read bounded log output between polls:
+
+   ```bash
+   tail -n 20 "$DATA_ROOT/logs/context-sync.log"
+   ```
+
+   Completion prints `✓ Done! Embedded N chunks from M documents` and then
+   `=== done ===`; progress prints percentages, "model" or "download"; failures show
+   `Error`/`Traceback`/`failed`/`Killed`/`OOM` or `=== FAILED ===`.
+
+3. Decide from evidence: exit 0 plus `=== done ===` is success (note N/M; zero chunks
+   means an empty index). A non-zero exit or `=== FAILED ===` means stop and report with
+   the log. Silence with download lines means keep polling; silence without them means
+   report it as wedged. Elapsed time is never completion.
 
 Collect missing settings with an available user-input tool. Some synchronous input tools
 are restricted to Plan mode; use asynchronous input or ordinary conversation otherwise.
