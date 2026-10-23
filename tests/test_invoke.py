@@ -218,7 +218,13 @@ class InvokeFixture(StoreFixture):
                 path = run_dir / "thread.json"
                 if path.exists():
                     data = json.loads(path.read_text())
-                    if data["rounds"] and data["rounds"][-1].get("peer_pid"):
+                    # The id and the peer pid together: a renamed directory is coherent
+                    # from the moment it appears, so both are set in one read.
+                    if (
+                        data.get("thread_id")
+                        and data["rounds"]
+                        and data["rounds"][-1].get("peer_pid")
+                    ):
                         return data
             return None
 
