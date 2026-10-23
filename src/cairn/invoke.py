@@ -1560,8 +1560,11 @@ class Runner:
         """Rename ``pending-<uuid>/`` to the thread id, holding both locks across it.
 
         The destination lock is taken before the directory appears under its final
-        name, so no reader (``publish``, ``status``) can lock it first; ``thread.json``
-        is rewritten with the real id before the pending lock is released.
+        name, so no reader (``publish``, ``status``) can lock it first. ``thread.json``
+        is rewritten with the real id and the final paths while the directory is still
+        ``pending-``, so the moment it appears under its final name it is coherent: a
+        reader that opens the file without the lock never sees a null id beside a
+        running round (a CI run on a slow worker did, once).
         """
         target = self.run_dir.parent / thread_id
         if target.exists():
@@ -1569,21 +1572,29 @@ class Runner:
         destination = ThreadLock()
         destination.acquire(target)
         pending = self.run_dir
+        number = int(self.round["round"])
+        previous_paths = {
+            key: self.round[key] for key in _round_files(pending, number) if key in self.round
+        }
+        self.state.thread_id = thread_id
+        self.state.resume_command = " ".join(self.harness.resume(thread_id))
+        for key, path in _round_files(target, number).items():
+            if key not in _LATE_FILES:
+                self.round[key] = str(path)
+        self.state.save(pending / "thread.json")
         try:
             os.rename(pending, target)
         except OSError:
+            # Undo the recorded identity: the round goes on under its pending name.
+            self.state.thread_id = None
+            self.state.resume_command = None
+            self.round.update(previous_paths)
+            self.state.save(pending / "thread.json")
             destination.release()
             raise
         self.run_dir = target
         self.thread_id = thread_id
-        self.state.thread_id = thread_id
         self.state.path = target / "thread.json"
-        self.state.resume_command = " ".join(self.harness.resume(thread_id))
-        number = int(self.round["round"])
-        for key, path in _round_files(target, number).items():
-            if key not in _LATE_FILES:
-                self.round[key] = str(path)
-        self.state.save()
         self.lock.release()
         self.lock = destination
         # The skills read this line to learn the id while the run is still going.

@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.1]
+
+### Fixed
+- `cairn invoke`: when a peer reports its thread id, the run directory is renamed from
+  `pending-<uuid>/` to the id. `thread.json` was rewritten with the id after the rename, so
+  for an instant the directory existed under its final name with a null `thread_id` beside a
+  running round; a reader without the thread lock (one CI run was that reader) could see it.
+  The file is now rewritten while the directory is still pending, so it is coherent the
+  moment it appears.
+
 ## [2.7.0]
 
 The fix for the dead round in `docs/antigravity-invoke-postmortem.md`: a headless `agy`
