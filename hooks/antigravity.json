@@ -1,0 +1,12 @@
+{
+  "cairn": {
+    "enabled": true,
+    "Stop": [
+      {
+        "type": "command",
+        "command": "cairn hook handle --harness antigravity",
+        "timeout": 10
+      }
+    ]
+  }
+}

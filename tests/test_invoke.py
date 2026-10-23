@@ -1,7 +1,7 @@
 """``cairn invoke``: the runner, the post-run pipeline, status/cancel/publish, health.
 
-Stub ``codex``, ``claude`` and ``qmd`` executables (tests/fixtures/invoke/) run from
-a temp ``bin/`` prepended to PATH; nothing touches the network or the real stores.
+Stub ``codex``, ``claude``, ``agy`` and ``qmd`` executables (tests/fixtures/invoke/) run
+from a temp ``bin/`` prepended to PATH; nothing touches the network or the real stores.
 """
 
 from __future__ import annotations
@@ -105,12 +105,19 @@ class InvokeFixture(StoreFixture):
         self.codex_home = self.root / "codexhome"
         self.sessions = self.codex_home / "sessions"
         self.sessions.mkdir(parents=True)
+        self.agy_store = self.root / "agy"
+        self.agy_store.mkdir()
         shutil.copy(FIXTURES / "models_cache.json", self.codex_home / "models_cache.json")
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for name in ("codex", "claude", "qmd"):
+        for name, stub in (
+            ("codex", "codex"),
+            ("claude", "claude"),
+            ("agy", "antigravity"),
+            ("qmd", "qmd"),
+        ):
             target = self.bin / name
-            target.write_text(f"#!{sys.executable}\n" + (FIXTURES / f"{name}_stub.py").read_text())
+            target.write_text(f"#!{sys.executable}\n" + (FIXTURES / f"{stub}_stub.py").read_text())
             target.chmod(0o755)
         self.stub_log = self.root / "stub.log"
         self.write_config()
@@ -118,6 +125,7 @@ class InvokeFixture(StoreFixture):
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "CODEX_HOME": str(self.codex_home),
             "STUB_CLAUDE_STORE": str(self.claude),
+            "STUB_AGY_STORE": str(self.agy_store),
             "STUB_LOG": str(self.stub_log),
         }
         self.env.update(extra)
@@ -129,6 +137,7 @@ class InvokeFixture(StoreFixture):
     def write_config(self, **policy):
         data = json.loads(self.config.read_text())
         data["collections"]["codex-sessions"]["store"] = str(self.sessions)
+        data["collections"]["antigravity-sessions"] = {"store": str(self.agy_store)}
         data["qmd_binary"] = str(self.bin / "qmd")
         merged = {**self.invoke_policy, **policy}
         if merged:
@@ -761,6 +770,332 @@ class TestClaudeRun(InvokeFixture):
 
 
 # ---------------------------------------------------------------------------
+# Antigravity runs
+# ---------------------------------------------------------------------------
+
+
+class TestAntigravityRun(InvokeFixture):
+    def run_agy(self, *args, prompt="Say PONG", env=None):
+        return self.invoke(
+            "antigravity", "--json", "--cd", self.cwd, "--prompt", prompt, *args, env=env
+        )
+
+    def test_fresh_run_without_caller_keeps_only_the_answer(self):
+        result, data = self.run_agy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(RESULT_KEYS - set(data), set())
+        self.assertEqual(data["status"], "succeeded")
+        self.assertEqual(data["last_message"], "PONG")
+        self.assertEqual(data["native_policy"], ["--mode", "plan"])
+        self.assertEqual(data["usage"]["num_turns"], 1)
+        self.assertEqual(data["usage"]["total_tokens"], 12)
+        tid = data["thread_id"]
+        # The id came from the init event: the pending dir was renamed to it.
+        self.assertEqual([d.name for d in self.run_dirs("antigravity")], [tid])
+        run_dir = self.run_dirs("antigravity")[0]
+        self.assertEqual((run_dir / "answer-01.md").read_text().strip(), "PONG")
+        argv = self.stub_calls()[0]["argv"]
+        self.assertEqual(
+            argv[1:6],
+            ["--output-format", "stream-json", "--print-timeout", "0", "--disable-slash-commands"],
+        )
+        self.assertIn("--mode", argv)
+        self.assertTrue(argv[-1].startswith("-p=[cairn invoke] You are antigravity"))
+        self.assertNotIn("--conversation", argv)
+        # The conversation agy recorded is exported at once; with no caller the
+        # exchange document anchors on the peer document's folder.
+        peer_doc = Path(data["peer_session_doc"])
+        self.assertTrue(peer_doc.is_file())
+        self.assertEqual(peer_doc.parent, self.root / "data/antigravity-sessions")
+        fm = parse_frontmatter(peer_doc.read_text())
+        self.assertEqual(fm["type"], "antigravity-session")
+        self.assertEqual(fm["session_id"], tid)
+        self.assertEqual(fm["title"], "Stub Conversation Title")
+        self.assertEqual(fm["run_status"], "IDLE")
+        body = peer_doc.read_text()
+        self.assertIn("### User", body)
+        self.assertIn("Say PONG", body)
+        self.assertNotIn("<USER_REQUEST>", body)
+        self.assertNotIn("ADDITIONAL_METADATA", body)
+        self.assertIn('<tool name="read_file" status="done">', body)
+        self.assertIn("<details><summary>Reasoning</summary>", body)
+        exchange = Path(data["exchange_doc"])
+        self.assertEqual(exchange.parent, session_dir_of(peer_doc))
+        self.assertTrue(data["indexed"])
+        # The only warning is the operator run's unknown caller; no publication step failed.
+        self.assertEqual(len(data["warnings"]), 1)
+        self.assertIn("caller unknown", data["warnings"][0])
+        state = self.thread(tid, "antigravity")
+        round_ = state["rounds"][0]
+        self.assertEqual(round_["argv"][-1], "-p=<prompt>")
+        self.assertEqual(
+            set(round_["publication"]),
+            {"answer_saved", "exported", "exchange_written", "indexed", "pending"},
+        )
+        self.assertEqual(round_["publication"]["pending"], {})
+        self.assertEqual(
+            round_["transcript_path"],
+            str(self.agy_store / "brain" / tid / ".system_generated/logs/transcript_full.jsonl"),
+        )
+        self.assertEqual(state["resume_command"], f"agy --conversation {tid}")
+        self.assertIn('tool: read_file {"Path": "a.py"}', round_["progress"])
+        self.assertIn("message: Looking.", round_["progress"][0])
+
+    def test_caller_anchors_the_exchange_and_resume_continues_the_conversation(self):
+        sid = "c0ffee00-1111-4222-8333-444455557777"
+        self.native("claude", sid)
+        result, data = self.run_agy("--parent", f"claude:{sid}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        tid = data["thread_id"]
+        caller_doc = Path(data["caller_session_doc"])
+        exchange = Path(data["exchange_doc"])
+        self.assertEqual(exchange.parent, session_dir_of(caller_doc))
+        self.assertTrue(exchange.name.startswith("exchange-antigravity-"))
+        fm = parse_frontmatter(exchange.read_text())
+        self.assertEqual(fm["thread_id"], tid)
+        self.assertEqual(fm["anchor_session"], f"claude:{sid}")
+        self.assertIn("PONG", exchange.read_text())
+        self.assertTrue(data["indexed"])
+        self.assertEqual(data["warnings"], [])
+        peer_doc = Path(data["peer_session_doc"])
+        self.assertEqual(parse_frontmatter(peer_doc.read_text())["links"], [f"parent claude:{sid}"])
+        self.assertEqual(
+            parse_frontmatter(caller_doc.read_text())["links"], [f"child antigravity:{tid}"]
+        )
+        publication = self.thread(tid, "antigravity")["rounds"][0]["publication"]
+        self.assertEqual(
+            set(publication),
+            {
+                "answer_saved",
+                "exported",
+                "caller_exported",
+                "linked",
+                "exchange_written",
+                "indexed",
+                "pending",
+            },
+        )
+        self.assertIn(
+            f"invoked by claude session claude:{sid}", self.stub_calls()[0]["prompt_head"]
+        )
+
+        result2, data2 = self.invoke(
+            "antigravity", "--json", "--resume", tid, "--prompt", "Again", "--effort", "high"
+        )
+        self.assertEqual(result2.returncode, 0, result2.stderr)
+        assert data2 is not None
+        self.assertEqual(data2["round"], 2)
+        self.assertEqual(data2["thread_id"], tid)
+        argv2 = self.stub_calls()[-1]["argv"]
+        self.assertEqual(argv2[argv2.index("--conversation") + 1], tid)
+        self.assertEqual(argv2[argv2.index("--effort") + 1], "high")
+        self.assertIn("plan", argv2)  # the profile's flags are re-sent on a resume
+        self.assertEqual(parse_frontmatter(exchange.read_text())["rounds"], "2")
+        # One conversation, one document: the second round re-exports it in place.
+        self.assertEqual(data2["peer_session_doc"], str(peer_doc))
+        self.assertEqual(parse_frontmatter(peer_doc.read_text())["messages"], "2")
+        # One session document in the peer collection; the exchange lives with the caller.
+        self.assertEqual(len(list((self.root / "data/antigravity-sessions").rglob("*.md"))), 1)
+        resumed, _ = self.invoke("--help", check_json=False)  # parser smoke
+        self.assertEqual(resumed.returncode, 0)
+        result = subprocess.run(
+            [sys.executable, "-m", "cairn", "resume", f"antigravity:{tid}"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"agy --conversation {tid}")
+
+    def test_unconfigured_collection_skips_export_with_one_warning(self):
+        data = json.loads(self.config.read_text())
+        del data["collections"]["antigravity-sessions"]
+        self.config.write_text(json.dumps(data))
+        config.get_config.cache_clear()
+        result, data = self.run_agy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "succeeded")
+        self.assertIsNone(data["peer_session_doc"])
+        self.assertIsNone(data["exchange_doc"])  # no caller and no peer document: no anchor
+        self.assertTrue(any("not configured" in w for w in data["warnings"]))
+        publication = self.thread(data["thread_id"], "antigravity")["rounds"][0]["publication"]
+        self.assertEqual(set(publication), {"answer_saved", "pending"})
+        self.assertEqual(publication["pending"], {})
+
+    def test_native_mode_and_large_prompt_via_ndjson_stdin(self):
+        prompt_file = self.root / "big.txt"
+        prompt_file.write_text("orchard " * 9000)
+        result, data = self.invoke(
+            "antigravity",
+            "--json",
+            "--cd",
+            self.cwd,
+            "--prompt-file",
+            str(prompt_file),
+            "--mode",
+            "auto",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["native_policy"], ["--mode", "auto"])
+        call = self.stub_calls()[0]
+        self.assertTrue(call["stdin"])
+        self.assertGreater(call["prompt_len"], 72000)
+        argv = call["argv"]
+        self.assertEqual(argv[-3:], ["--input-format", "stream-json", "-p="])
+        self.assertEqual(argv[argv.index("--mode") + 1], "auto")
+
+    def test_bad_model_fails_and_is_not_retryable(self):
+        result, data = self.invoke(
+            "antigravity",
+            "--json",
+            "--cd",
+            self.cwd,
+            "--prompt",
+            "x",
+            "--model",
+            "bogus",
+            env={"STUB_MODE": "badmodel"},
+        )
+        self.assertEqual(result.returncode, 1)
+        assert data is not None
+        self.assertEqual(data["status"], "failed")
+        self.assertIsNone(data["thread_id"])
+        self.assertIn("invalid model selection", data["error"])
+        self.assertFalse(data["retryable"])
+
+    def write_adc(self, quota_project="adc-project"):
+        adc = self.root / "home" / ".config" / "gcloud" / "application_default_credentials.json"
+        adc.parent.mkdir(parents=True, exist_ok=True)
+        body = {"type": "authorized_user", "refresh_token": "x"}
+        if quota_project:
+            body["quota_project_id"] = quota_project
+        adc.write_text(json.dumps(body))
+        return adc
+
+    def test_default_route_inherits_the_host_environment(self):
+        result, data = self.run_agy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["billing"]["route"], "inherit")
+        self.assertIsNone(data["billing"]["project"])
+        self.assertIsNone(data["billing"]["problem"])
+        self.assertEqual(data["billing"]["observed"]["auth_method"], "gcp")  # the stub's login
+        env = self.stub_calls()[0]["env"]
+        self.assertNotIn("AGY_ADC_AUTH", env)
+        run_dir = self.run_dirs("antigravity")[0]
+        self.assertTrue((run_dir / "peer-01.log").is_file())  # moved in from .logs/
+        self.assertEqual(list((self.root / "data/logs/invoke/antigravity/.logs").iterdir()), [])
+        result, data = self.run_agy(env={"AGY_ADC_AUTH": "true"})
+        assert data is not None
+        self.assertEqual(self.stub_calls()[-1]["env"]["AGY_ADC_AUTH"], "true")  # passed through
+        self.assertEqual(data["billing"]["observed"]["auth_method"], "adc")
+        self.assertIsNone(data["billing"]["problem"])
+
+    def test_gcp_route_sets_adc_env_and_verifies_from_the_log(self):
+        self.write_adc("adc-project")
+        self.write_config(
+            antigravity={"billing": {"route": "gcp", "project": "cfg-project", "location": "eu"}}
+        )
+        result, data = self.run_agy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        env = self.stub_calls()[0]["env"]
+        self.assertEqual(env["AGY_ADC_AUTH"], "true")
+        self.assertEqual(env["GOOGLE_CLOUD_QUOTA_PROJECT"], "cfg-project")
+        self.assertEqual(env["GOOGLE_CLOUD_LOCATION"], "eu")
+        self.assertIn("--log-file", self.stub_calls()[0]["argv"])
+        billing = data["billing"]
+        self.assertEqual(
+            {k: billing[k] for k in ("route", "project", "location", "problem")},
+            {"route": "gcp", "project": "cfg-project", "location": "eu", "problem": None},
+        )
+        self.assertEqual(billing["observed"]["auth_method"], "adc")
+        self.assertEqual(billing["observed"]["quota_project"], "cfg-project")
+        self.assertEqual(billing["observed"]["vertex_projects"], ["cfg-project"])
+        self.assertEqual([w for w in data["warnings"] if "billing" in w], [])
+        text, _ = self.invoke("antigravity", "--cd", self.cwd, "--prompt", "x")
+        self.assertIn("billing: route=gcp project=cfg-project auth=adc", text.stdout)
+        self.assertIn("verified", text.stdout)
+        # Without a configured project the ADC file's quota project is the one billed.
+        self.write_config(antigravity={"billing": {"route": "gcp"}})
+        _, data2 = self.run_agy()
+        assert data2 is not None
+        self.assertEqual(data2["billing"]["project"], "adc-project")
+        self.assertNotIn("GOOGLE_CLOUD_QUOTA_PROJECT", self.stub_calls()[-1]["env"])
+        self.assertEqual(data2["billing"]["observed"]["quota_project"], "stub-project")
+        self.assertIn("quotaProject=stub-project", data2["billing"]["problem"])
+        self.assertTrue(any(w.startswith("billing: ") for w in data2["warnings"]))
+
+    def test_gcp_route_refuses_to_spawn_without_adc(self):
+        self.write_config(antigravity={"billing": {"route": "gcp"}})
+        result, _ = self.run_agy()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("billing check failed", result.stderr)
+        self.assertIn("application_default_credentials.json", result.stderr)
+        self.assertEqual(self.stub_calls(), [])
+        self.assertEqual(self.run_dirs("antigravity"), [])
+        self.write_adc(quota_project=None)
+        result, _ = self.run_agy()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no quota project", result.stderr)
+        self.assertEqual(self.stub_calls(), [])
+        # --skip-self-check never skips the billing check.
+        result, _ = self.run_agy("--skip-self-check")
+        self.assertEqual(result.returncode, 2)
+        # A project from the environment satisfies it.
+        result, data = self.run_agy(env={"GOOGLE_CLOUD_QUOTA_PROJECT": "env-project"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["billing"]["project"], "env-project")
+        self.assertIsNone(data["billing"]["problem"])
+
+    def test_billing_flag_overrides_the_route_per_round(self):
+        self.write_adc()
+        self.write_config(antigravity={"billing": {"route": "gcp"}})
+        result, data = self.run_agy("--billing", "plan", env={"AGY_ADC_AUTH": "true"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["billing"]["route"], "plan")
+        self.assertNotIn("AGY_ADC_AUTH", self.stub_calls()[0]["env"])  # stripped
+        self.assertIsNone(data["billing"]["problem"])
+        # A resume takes today's route, not the recorded one.
+        result, data2 = self.invoke(
+            "antigravity", "--json", "--resume", data["thread_id"], "--prompt", "again"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data2 is not None
+        self.assertEqual(data2["billing"]["route"], "gcp")
+        self.assertEqual(self.stub_calls()[-1]["env"]["AGY_ADC_AUTH"], "true")
+        exchange = Path(self.run_dirs("antigravity")[0] / "thread.json")
+        rounds = json.loads(exchange.read_text())["rounds"]
+        self.assertEqual([r["billing"]["route"] for r in rounds], ["plan", "gcp"])
+        result, _ = self.invoke("codex", "--cd", self.cwd, "--prompt", "x", "--billing", "gcp")
+        self.assertEqual(result.returncode, 2)  # argparse: codex has no --billing
+
+    def test_usage_refusals(self):
+        result, _ = self.run_agy("--fast")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Codex-only", result.stderr)
+        result, data = self.run_agy()
+        assert data is not None
+        result, _ = self.invoke(
+            "antigravity", "--resume", data["thread_id"], "--fork", "--prompt", "f"
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot fork", result.stderr)
+        result, _ = self.invoke("codex", "--cd", self.cwd, "--prompt", "x", "--mode", "plan")
+        self.assertEqual(result.returncode, 2)  # argparse: --mode is not a codex flag
+        result, _ = self.invoke(
+            "antigravity", "--cd", self.cwd, "--prompt", "x", "--permission-mode", "plan"
+        )
+        self.assertEqual(result.returncode, 2)
+
+
+# ---------------------------------------------------------------------------
 # status, publish, drain, list-models
 # ---------------------------------------------------------------------------
 
@@ -880,7 +1215,7 @@ class TestStatusAndPublish(InvokeFixture):
         ):
             invoke.publish_round(cfg, state, round_)
         self.assertEqual(calls, ["exported", "x", "indexed"])
-        self.assertEqual(invoke.pending_steps(round_), ("exported",))
+        self.assertEqual(invoke.pending_steps(cfg, round_, "codex"), ("exported",))
         calls.clear()
         with (
             patch.dict(
@@ -889,9 +1224,11 @@ class TestStatusAndPublish(InvokeFixture):
             ),
             fake_index,
         ):
-            invoke.publish_round(cfg, state, round_, steps=invoke.pending_steps(round_))
+            invoke.publish_round(
+                cfg, state, round_, steps=invoke.pending_steps(cfg, round_, "codex")
+            )
         self.assertEqual(calls, ["exported", "x", "indexed"])  # downstream redone
-        self.assertEqual(invoke.pending_steps(round_), ())
+        self.assertEqual(invoke.pending_steps(cfg, round_, "codex"), ())
         self.assertEqual(round_["publication"]["pending"], {})
 
     def test_late_caller_export_moves_the_exchange_to_the_caller_folder(self):

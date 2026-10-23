@@ -21,7 +21,9 @@ from pathlib import Path
 
 from . import __version__
 from .config import (
+    BILLING_PEERS,
     INVOKE_PEERS,
+    BillingPolicy,
     CairnConfig,
     Collection,
     ConfigError,
@@ -136,11 +138,16 @@ def _invoke_view(cfg: CairnConfig) -> dict:
 
 def _peer_summary(policy: PeerPolicy) -> str:
     """One-line human summary of a peer's invoke defaults."""
-    return (
+    text = (
         f"model={policy.model or '(peer default)'} effort={policy.effort or '(peer default)'} "
         f"profile={policy.profile} timeout={policy.timeout_s}s idle={policy.idle_timeout_s}s "
         f"quiet={policy.quiet_after_s}s stall={policy.stall_after_s}s"
     )
+    if policy.billing is not None:
+        text += f" billing={policy.billing.route}"
+        if policy.billing.project:
+            text += f" project={policy.billing.project}"
+    return text
 
 
 def _config_show(as_json: bool) -> int:
@@ -192,9 +199,12 @@ def _config_show(as_json: bool) -> int:
 _TOP_LEVEL_KEYS = {"data_root", "qmd_binary"}
 _COLLECTION_SYNC_FIELDS = {"enabled", "since", "on_hook"}
 _BOOL_FIELDS = {"enabled", "on_hook"}
-_INVOKE_FIELDS = {f.name for f in fields(PeerPolicy)}
+_INVOKE_FIELDS = {f.name for f in fields(PeerPolicy)} - {"billing"}
 _INVOKE_INT_FIELDS = {"timeout_s", "idle_timeout_s", "quiet_after_s", "stall_after_s"}
 _INVOKE_NULLABLE = {"model", "effort"}
+_BILLING_FIELDS = {f.name for f in fields(BillingPolicy)}
+_BILLING_NULLABLE = {"project", "location"}
+_BILLING_KEY_HINT = "invoke.antigravity.billing.route|project|location"
 
 
 def _coerce_invoke(field: str, value: str) -> object:
@@ -231,10 +241,24 @@ def _set_dotted(data: dict, key: str, value: str) -> None:
         return
 
     parts = key.split(".")
+    if len(parts) == 4 and parts[0] == "invoke" and parts[2] == "billing":
+        _, peer, _, field = parts
+        if peer not in BILLING_PEERS:
+            raise ValueError(
+                f"billing is a {', '.join(BILLING_PEERS)}-only setting; use {_BILLING_KEY_HINT}"
+            )
+        if field not in _BILLING_FIELDS:
+            raise ValueError(f"unknown billing field {field!r}; use {_BILLING_KEY_HINT}")
+        billing = data.setdefault("invoke", {}).setdefault(peer, {}).setdefault("billing", {})
+        null = field in _BILLING_NULLABLE and value.strip().lower() in ("null", "none")
+        billing[field] = None if null else value
+        return
     if len(parts) == 3 and parts[0] == "invoke":
         _, peer, field = parts
         if peer not in INVOKE_PEERS:
             raise ValueError(f"unknown invoke peer {peer!r}; known: {', '.join(INVOKE_PEERS)}")
+        if field == "billing":
+            raise ValueError(f"billing is an object; set {_BILLING_KEY_HINT}")
         if field not in _INVOKE_FIELDS:
             known = ", ".join(sorted(_INVOKE_FIELDS))
             raise ValueError(f"unknown invoke field {field!r}; known: {known}")
@@ -258,8 +282,9 @@ def _set_dotted(data: dict, key: str, value: str) -> None:
 
     raise ValueError(
         f"unsupported key {key!r}. Use data_root, qmd_binary, cron.schedule, "
-        "<collection>.store|enabled|since|on_hook, or invoke.<codex|claude>."
-        "model|effort|profile|timeout_s|idle_timeout_s|quiet_after_s|stall_after_s"
+        "<collection>.store|enabled|since|on_hook, invoke.<codex|claude|antigravity>."
+        "model|effort|profile|timeout_s|idle_timeout_s|quiet_after_s|stall_after_s, or "
+        f"{_BILLING_KEY_HINT}"
     )
 
 
@@ -400,7 +425,7 @@ def config_main(argv: list[str] | None = None) -> int:
         metavar="KEY",
         help=(
             "data_root | qmd_binary | cron.schedule | <collection>.store|enabled|since|on_hook"
-            " | invoke.<codex|claude>.<field>"
+            f" | invoke.<codex|claude|antigravity>.<field> | {_BILLING_KEY_HINT}"
         ),
     )
     p_set.add_argument("value", metavar="VALUE")
@@ -692,12 +717,36 @@ def _check_invoke(config: CairnConfig) -> None:
         f"{peer}: {_peer_summary(config.invoke.for_peer(peer))}" for peer in INVOKE_PEERS
     )
     _ok("invoke defaults", summary)
+    _check_antigravity_billing(config)
     if shutil.which("codex") and not models_cache_path().is_file():
         _warn(
             "codex model cache",
             f"{models_cache_path()} not found - run 'codex' once so 'cairn invoke codex' "
             "can check models (or pass --skip-self-check)",
         )
+
+
+def _check_antigravity_billing(config: CairnConfig) -> None:
+    """Report the Antigravity billing route and, for ``gcp``, whether the ADC file and
+    quota project it needs are in place (the same check ``cairn invoke`` runs before a
+    spawn). Warn-only; the route is optional."""
+    from .harnesses.antigravity import ADC_AUTH_ENV, billing_problems, resolved_project
+
+    billing = config.invoke.antigravity.billing
+    if billing is None:
+        return
+    if billing.route == "gcp":
+        problems = billing_problems(billing, os.environ)
+        if problems:
+            _warn("antigravity billing", f"route gcp is not ready: {problems[0]}")
+        else:
+            _ok(
+                "antigravity billing",
+                f"route gcp via ADC, quota project {resolved_project(billing, os.environ)}",
+            )
+        return
+    host = f"; the host shell exports {ADC_AUTH_ENV}" if os.environ.get(ADC_AUTH_ENV) else ""
+    _ok("antigravity billing", f"route {billing.route}{host}")
 
 
 def doctor_main(argv: list[str] | None = None) -> int:
@@ -707,7 +756,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="path to the plugin's plugin.json (else $CLAUDE_PLUGIN_ROOT) for a drift check",
     )
-    parser.add_argument("--harness", choices=("claude", "codex"))
+    parser.add_argument("--harness", choices=("claude", "codex", "antigravity"))
     parser.add_argument(
         "--strict-index",
         action="store_true",

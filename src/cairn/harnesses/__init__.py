@@ -2,8 +2,11 @@
 
 Each adapter also knows how to run its CLI headlessly as a peer agent for
 ``cairn invoke``: the exact native argv for a request, the native flags behind a
-shared permission profile, how to read one line of its JSON event stream, where
-its native transcript lands, and how to check a model/effort choice up front.
+shared permission profile, the bytes a prompt takes on the child's stdin, how to
+read one line of its JSON event stream, where its native transcript lands, and how
+to check a model/effort choice up front. Claude and Codex are hosts and peers;
+Antigravity (``agy``) is a peer whose conversations reach cairn through its
+``Stop`` hook (:mod:`cairn.harnesses.antigravity_registration`).
 """
 
 from __future__ import annotations
@@ -24,6 +27,9 @@ CLIENT_ERROR_MARKERS: tuple[str, ...] = (
     "invalid_request_error",
     "model is not support",
     "authentication",
+    # agy: an unknown --model, or no cached login (verified live on 1.4.6)
+    "invalid model selection",
+    "not logged into antigravity",
 )
 
 
@@ -52,6 +58,8 @@ class InvokeRequest:
     derive them from ``profile``. ``resume`` is the thread id to continue, or
     ``None`` for a fresh run. ``session_id`` is the id chosen up front (Claude
     only). With ``prompt_via_stdin`` the prompt is not put on the command line.
+    ``log_path`` is where the peer writes its own diagnostic log when its CLI can
+    be told to (agy ``--log-file``); ``None`` leaves the peer's default.
     """
 
     peer: str
@@ -69,6 +77,7 @@ class InvokeRequest:
     last_message_path: Path | None
     prompt_via_stdin: bool
     extra: tuple[str, ...]
+    log_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +108,7 @@ class Harness(Protocol):
     def current_id(self) -> str | None: ...
     def resume(self, session_id: str, fork: bool = False) -> list[str]: ...
     def exec_argv(self, request: InvokeRequest) -> list[str]: ...
+    def stdin_payload(self, prompt: str) -> bytes: ...
     def policy_argv(self, profile: str, native: tuple[str, ...] = ()) -> tuple[str, ...]: ...
     def parse_event(self, line: str) -> list[Event]: ...
     def transcript_path(
@@ -128,12 +138,17 @@ def decode_event(name: str, payload: object) -> SessionEvent:
 
 
 def get_harness(name: str) -> Harness:
+    from .antigravity import Antigravity
     from .claude import Claude
     from .codex import Codex
 
-    adapters: dict[str, Harness] = {"claude": Claude(), "codex": Codex()}
+    adapters: dict[str, Harness] = {
+        "claude": Claude(),
+        "codex": Codex(),
+        "antigravity": Antigravity(),
+    }
     if name not in adapters:
-        raise ValueError(f"unsupported harness {name!r}; choose claude or codex")
+        raise ValueError(f"unsupported harness {name!r}; choose claude, codex or antigravity")
     return adapters[name]
 
 

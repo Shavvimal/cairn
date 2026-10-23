@@ -22,6 +22,7 @@ _ROLE_HEADERS = {
     "assistant": "### Assistant",
     "tool": "### Tool",
     "agent": "### Agent",  # a message between agents (subagent -> parent, Codex collab)
+    "system": "### System",  # injected by the host (agy SYSTEM_MESSAGE steps)
 }
 
 # Unpaired UTF-16 surrogate code points. A correctly-paired emoji is a single

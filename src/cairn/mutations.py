@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Final
 
 from .frontmatter import FrontmatterParseError, rewrite_preserved_tail
+from .registry import SOURCES
 from .storage import atomic_write, document_lock, locked
 
 # The session lifecycle vocabulary. Declared here, at the mutation boundary, so an
@@ -32,7 +33,8 @@ FindFile = Callable[[str], "Path | None"]
 # Lineage roles a ``links:`` entry can carry, and the ``<source>:<id>`` reference
 # shape it points at. Declared here so every writer validates links identically.
 LINK_ROLES: Final[frozenset[str]] = frozenset({"parent", "child", "peer"})
-_LINK_REF: Final[re.Pattern[str]] = re.compile(r"^(claude|codex|cursor|granola):\S+$")
+_LINK_SOURCES: Final[tuple[str, ...]] = tuple(s.source for s in SOURCES if s.session_type)
+_LINK_REF: Final[re.Pattern[str]] = re.compile(rf"^({'|'.join(_LINK_SOURCES)}):\S+$")
 
 
 def is_valid_status(status: str) -> bool:
@@ -162,7 +164,7 @@ def add_link(find_file: FindFile, session_id: str, role: str, ref: str) -> bool:
         return False
     if not _LINK_REF.match(ref):
         print(
-            f"Error: invalid link reference {ref!r}. Expected <claude|codex|cursor|granola>:<id>",
+            f"Error: invalid link reference {ref!r}. Expected <{'|'.join(_LINK_SOURCES)}>:<id>",
             file=sys.stderr,
         )
         return False

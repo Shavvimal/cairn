@@ -43,6 +43,7 @@ sources (each forwards its remaining args to that source's CLI):
   cairn claude export [--since 7d | --all]   export Claude Code sessions
   cairn claude resume --pick                 resume a Claude session (interactive)
   cairn codex export                         export Codex CLI sessions (last 24h)
+  cairn antigravity export [--all]           export Google Antigravity (agy) conversations
   cairn cursor export --all                  export Cursor IDE sessions
   cairn granola export --since 2w            export Granola meetings + transcripts
   cairn service-docs export [--clean]        mirror service docs into one collection
@@ -60,10 +61,12 @@ recall (temporal view over shared exported sessions; topic search is qmd's job):
 peer agents (one foreground round per call; run it in the background):
   cairn invoke codex --prompt TEXT [--effort E] [--profile review|edit|full] [--json]
   cairn invoke claude --prompt-file FILE [--model M] [--permission-mode MODE]
+  cairn invoke antigravity --prompt TEXT [--model M] [--mode plan|accept-edits|auto]
   cairn invoke codex --resume THREAD_ID --prompt TEXT   follow up in the same thread
   cairn invoke status THREAD_ID [--follow] [--json]     health, progress and answer
   cairn invoke cancel THREAD_ID                         stop a running round
   cairn invoke publish THREAD_ID                        finish pending exports/index
+  cairn hook install --harness claude|codex|antigravity  register the session-end hook
   cairn invoke list-models [--json]                     the Codex model catalogue
 
 agents (peer runs and subagents of a session):

@@ -65,6 +65,7 @@ class TestConfigShow(_ConfigFixture):
         enabled = {c["name"]: c["enabled"] for c in data["collections"]}
         self.assertTrue(enabled["claude-code-sessions"])
         self.assertTrue(enabled["codex-sessions"])
+        self.assertFalse(enabled["antigravity-sessions"])
         self.assertFalse(enabled["cursor-sessions"])
         sd = next(c for c in data["collections"] if c["name"] == "service-docs")
         self.assertEqual(sd["type"], "service-docs")
@@ -128,9 +129,56 @@ class TestConfigSetInvoke(_ConfigFixture):
         self.assertIn("invoke      :", out)
         self.assertIn("model=gpt-6-astra effort=high profile=review", out)
         self.assertIn("model=(peer default)", out)
+        self.assertIn("billing=inherit", out)
+
+    def test_set_antigravity_billing(self):
+        before = self.cfg_path.read_text(encoding="utf-8")
+        self.assertEqual(admin._config_set("invoke.antigravity.billing.route", "gcp"), 0)
+        self.assertEqual(admin._config_set("invoke.antigravity.billing.project", "my-proj"), 0)
+        config.get_config.cache_clear()
+        billing = self._show_json()["invoke"]["antigravity"]["billing"]
+        self.assertEqual(billing, {"route": "gcp", "project": "my-proj", "location": None})
+        self.assertIsNone(self._show_json()["invoke"]["codex"]["billing"])
+        self.assertEqual(admin._config_set("invoke.antigravity.billing.project", "null"), 0)
+        config.get_config.cache_clear()
+        self.assertIsNone(self._show_json()["invoke"]["antigravity"]["billing"]["project"])
+        _, out = _capture(admin._config_show, False)
+        self.assertIn("billing=gcp", out)
+        after = self.cfg_path.read_text(encoding="utf-8")
+        for key, value in (
+            ("invoke.codex.billing.route", "gcp"),
+            ("invoke.antigravity.billing", "gcp"),
+            ("invoke.antigravity.billing.route", "free"),
+            ("invoke.antigravity.billing.bogus", "1"),
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(admin._config_set(key, value), 1)
+        self.assertEqual(self.cfg_path.read_text(encoding="utf-8"), after)
+        self.assertNotEqual(after, before)
 
 
 class TestDoctorInvoke(_ConfigFixture):
+    def test_reports_antigravity_billing_readiness(self):
+        with TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "adc.json")
+            env = {"GOOGLE_APPLICATION_CREDENTIALS": missing, "CODEX_HOME": tmp}
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(admin.shutil, "which", return_value=None),
+            ):
+                _, out = _capture(admin._check_invoke, config.get_config())
+                self.assertIn("ok   antigravity billing - route inherit", out)
+                self.assertEqual(admin._config_set("invoke.antigravity.billing.route", "gcp"), 0)
+                config.get_config.cache_clear()
+                _, out = _capture(admin._check_invoke, config.get_config())
+                self.assertIn("warn antigravity billing - route gcp is not ready", out)
+                self.assertIn("adc.json does not exist", out)
+                Path(missing).write_text('{"type":"authorized_user","quota_project_id":"q-p"}')
+                _, out = _capture(admin._check_invoke, config.get_config())
+                self.assertIn(
+                    "ok   antigravity billing - route gcp via ADC, quota project q-p", out
+                )
+
     def test_reports_defaults_and_missing_codex_cache(self):
         with (
             TemporaryDirectory() as codex_home,

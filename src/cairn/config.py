@@ -150,6 +150,27 @@ class Collection:
         return self.store
 
 
+BILLING_ROUTES = ("inherit", "plan", "gcp")
+
+
+@dataclass(frozen=True)
+class BillingPolicy:
+    """Which billing route ``cairn invoke antigravity`` runs ``agy`` under (antigravity only).
+
+    ``inherit`` passes the host environment through unchanged: whatever that shell's
+    ``agy`` would bill. ``plan`` strips ``AGY_ADC_AUTH`` so the run bills the consumer
+    plan quota. ``gcp`` sets ``AGY_ADC_AUTH=true`` (Vertex AI through Application
+    Default Credentials, billed to the GCP quota project) and refuses to spawn unless
+    the ADC file and a quota project exist. ``project`` and ``location`` are exported
+    as ``GOOGLE_CLOUD_QUOTA_PROJECT`` / ``GOOGLE_CLOUD_LOCATION`` when set; ``None``
+    leaves the ADC file's ``quota_project_id`` and agy's default location in charge.
+    """
+
+    route: str = "inherit"
+    project: str | None = None
+    location: str | None = None
+
+
 @dataclass(frozen=True)
 class PeerPolicy:
     """Defaults for ``cairn invoke <peer>``: one peer agent's model, profile and clocks.
@@ -158,6 +179,8 @@ class PeerPolicy:
     :data:`PROFILES`. All durations are in seconds: ``timeout_s`` is the wall clock,
     ``idle_timeout_s`` kills a run with no activity, and ``quiet_after_s`` /
     ``stall_after_s`` are the activity thresholds ``cairn invoke status`` reports.
+    ``billing`` is set for antigravity only (:class:`BillingPolicy`); ``None`` means the
+    peer has no billing route to choose.
     """
 
     model: str | None = None
@@ -167,6 +190,7 @@ class PeerPolicy:
     idle_timeout_s: int = 900
     quiet_after_s: int = 120
     stall_after_s: int = 600
+    billing: BillingPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -175,6 +199,7 @@ class InvokePolicy:
 
     codex: PeerPolicy = PeerPolicy()
     claude: PeerPolicy = PeerPolicy()
+    antigravity: PeerPolicy = PeerPolicy(billing=BillingPolicy())
 
     def for_peer(self, peer: str) -> PeerPolicy:
         """The policy for ``peer``, failing loudly for a peer cairn cannot invoke."""
@@ -182,6 +207,8 @@ class InvokePolicy:
             return self.codex
         if peer == "claude":
             return self.claude
+        if peer == "antigravity":
+            return self.antigravity
         raise ConfigError(f"No invoke policy for peer {peer!r}. Known: {', '.join(INVOKE_PEERS)}")
 
 
@@ -314,16 +341,50 @@ def _parse_collection(name: str, spec: dict) -> Collection:
     )
 
 
-INVOKE_PEERS = ("codex", "claude")
+INVOKE_PEERS = ("codex", "claude", "antigravity")
+BILLING_PEERS = ("antigravity",)
 _PEER_FIELDS = tuple(f.name for f in fields(PeerPolicy))
 _PEER_NULLABLE = frozenset({"model", "effort"})
 _PEER_INT_FIELDS = frozenset({"timeout_s", "idle_timeout_s", "quiet_after_s", "stall_after_s"})
+_BILLING_FIELDS = tuple(f.name for f in fields(BillingPolicy))
+_BILLING_NULLABLE = frozenset({"project", "location"})
+
+
+def _parse_billing(peer: str, spec: object) -> BillingPolicy:
+    if not isinstance(spec, dict):
+        raise ConfigError(f"invoke.{peer}.billing must be an object, got {type(spec).__name__}")
+    values = {k: v for k, v in spec.items() if not k.startswith("//")}
+    unknown = set(values) - set(_BILLING_FIELDS)
+    if unknown:
+        raise ConfigError(
+            f"invoke.{peer}.billing has unknown keys: {', '.join(sorted(unknown))}. "
+            f"Allowed keys: {', '.join(_BILLING_FIELDS)}."
+        )
+    route = values.get("route", "inherit")
+    if route not in BILLING_ROUTES:
+        raise ConfigError(
+            f"invoke.{peer}.billing.route must be one of {', '.join(BILLING_ROUTES)}, got {route!r}"
+        )
+    for key in _BILLING_NULLABLE & set(values):
+        value = values[key]
+        if value is not None and not (isinstance(value, str) and value.strip()):
+            raise ConfigError(f"invoke.{peer}.billing.{key} must be a non-empty string or null")
+    return BillingPolicy(**values)
 
 
 def _parse_peer(peer: str, spec: object) -> PeerPolicy:
     if not isinstance(spec, dict):
         raise ConfigError(f"invoke.{peer} must be an object, got {type(spec).__name__}")
     values = {k: v for k, v in spec.items() if not k.startswith("//")}
+    if "billing" in values:
+        if peer not in BILLING_PEERS:
+            raise ConfigError(
+                f"invoke.{peer}.billing is not supported; only "
+                f"{', '.join(BILLING_PEERS)} selects a billing route"
+            )
+        values["billing"] = _parse_billing(peer, values["billing"])
+    elif peer in BILLING_PEERS:
+        values["billing"] = BillingPolicy()
     unknown = set(values) - set(_PEER_FIELDS)
     if unknown:
         raise ConfigError(
@@ -429,12 +490,15 @@ def get_config() -> CairnConfig:
 
 
 __all__ = [
+    "BILLING_PEERS",
+    "BILLING_ROUTES",
     "CONFIG_FILENAME",
     "DEFAULT_CRON_SCHEDULE",
     "ENV_OVERRIDE",
     "EXAMPLE_FILENAME",
     "INVOKE_PEERS",
     "PROFILES",
+    "BillingPolicy",
     "CairnConfig",
     "Collection",
     "ConfigError",

@@ -12,11 +12,21 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import ClassVar
 from unittest.mock import patch
 
 from cairn import config, hooks, qmd
 from cairn.frontmatter import parse_frontmatter, preserved_tail, rewrite_preserved_tail
 from cairn.harnesses import Event, InvokeRequest, get_harness, is_client_error
+from cairn.harnesses.antigravity import (
+    MODE_BY_PROFILE,
+    billing_env,
+    billing_problem,
+    billing_problems,
+    observe_billing,
+    resolved_project,
+    transcript_conversation_id,
+)
 from cairn.harnesses.claude import KEYCHAIN_GUIDANCE, KEYCHAIN_MARKERS, keychain_failure
 from cairn.harnesses.codex_models import (
     check_codex_invocation,
@@ -721,6 +731,392 @@ class TestClaudeTranscriptAndSelfCheck(unittest.TestCase):
         self.assertEqual(self.claude.self_check(None, None, False), [])
         self.assertIn("not supported by claude", self.claude.self_check(None, "ultra", False)[0])
         self.assertEqual(self.claude.self_check(None, None, True), ["fast mode is Codex-only"])
+
+
+# ---------------------------------------------------------------------------
+# Antigravity adapter
+# ---------------------------------------------------------------------------
+
+# Vendored from real agy 1.4.6 `agy --output-format stream-json -p=...` runs
+# (2026-10-23), with the tool list and paths shortened.
+AGY_STREAM = [
+    '{"event":"init","conversation_id":"236f2e5b-0d6f-4fe5-9faa-738226a9c8b8","init":{"cwd":'
+    '"/w","tools":["read_file","write_file"],"permission_mode":"request-review"}}',
+    '{"event":"step_update","step_update":{"conversation_id":"236f2e5b","step_index":0,'
+    '"state":"DONE","step_type":"user_input"}}',
+    '{"event":"step_update","step_update":{"conversation_id":"236f2e5b","step_index":1,'
+    '"state":"ACTIVE","step_type":"agent_response","text_delta":"I will start by reading "}}',
+    '{"event":"step_update","step_update":{"conversation_id":"236f2e5b","step_index":1,'
+    '"state":"ACTIVE","step_type":"agent_response","text_delta":"a.txt."}}',
+    '{"event":"step_update","step_update":{"conversation_id":"236f2e5b","step_index":1,'
+    '"state":"DONE","step_type":"agent_response","text_delta":"\\n","duration_seconds":22.1,'
+    '"usage":{"input_tokens":7760,"output_tokens":1661,"thinking_tokens":1503,'
+    '"cache_read_tokens":0,"total_tokens":9421}}}',
+    '{"event":"step_update","step_update":{"conversation_id":"236f2e5b","step_index":2,'
+    '"state":"ACTIVE","step_type":"tool","tool_name":"read_file","tool_info":{"name":'
+    '"read_file","parameters":{"Path":"/w/a.txt"}}}}',
+    '{"event":"step_update","step_update":{"conversation_id":"236f2e5b","step_index":2,'
+    '"state":"DONE","step_type":"tool","tool_name":"read_file","duration_seconds":0.08,'
+    '"tool_info":{"name":"read_file","parameters":{"Path":"/w/a.txt"},"output":"1 lines"}}}',
+    '{"event":"step_update","step_update":{"conversation_id":"236f2e5b","step_index":3,'
+    '"state":"DONE","step_type":"system_message","duration_seconds":0.0001}}',
+    '{"event":"step_update","step_update":{"conversation_id":"236f2e5b","step_index":4,'
+    '"state":"DONE","step_type":"agent_response","duration_seconds":22.3}}',
+    '{"event":"step_update","step_update":{"conversation_id":"236f2e5b","step_index":5,'
+    '"state":"ACTIVE","step_type":"agent_response","text_delta":"pong"}}',
+    '{"event":"step_update","step_update":{"conversation_id":"236f2e5b","step_index":5,'
+    '"state":"DONE","step_type":"agent_response","text_delta":"\\n","duration_seconds":3.2}}',
+    '{"event":"result","result":{"conversation_id":"236f2e5b-0d6f-4fe5-9faa-738226a9c8b8",'
+    '"status":"SUCCESS","response":"I will start by reading a.txt.\\npong\\n",'
+    '"duration_seconds":3.24,"num_turns":1,"usage":{"input_tokens":6930,"output_tokens":27,'
+    '"thinking_tokens":22,"cache_read_tokens":0,"total_tokens":6957}}}',
+]
+# agy 1.4.6 with --model bogus-model: no init, an ERROR result, exit 1 (verified live).
+AGY_BAD_MODEL = (
+    '{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"",'
+    '"error":"invalid model selection (--model \\"bogus-model\\" --effort \\"\\"): model '
+    'bogus-model is not recognized as a known model or custom model in settings",'
+    '"duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,'
+    '"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}'
+)
+
+
+class TestAntigravityArgv(unittest.TestCase):
+    agy = get_harness("antigravity")
+    HEAD: ClassVar[list[str]] = [
+        "agy",
+        "--output-format",
+        "stream-json",
+        "--print-timeout",
+        "0",
+        "--disable-slash-commands",
+    ]
+
+    def test_fresh_with_schema_model_effort_and_extra(self):
+        with TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text('{"type":"object"}')
+            argv = self.agy.exec_argv(
+                _request(
+                    "antigravity",
+                    model="gemini-3.1-pro-high",
+                    effort="high",
+                    output_schema=schema,
+                    extra=("--add-dir", "/x"),
+                )
+            )
+        self.assertEqual(
+            argv,
+            [
+                *self.HEAD,
+                "--mode",
+                "plan",
+                "--model",
+                "gemini-3.1-pro-high",
+                "--effort",
+                "high",
+                "--json-schema",
+                str(schema),
+                "--add-dir",
+                "/x",
+                "-p=Review this",
+            ],
+        )
+
+    def test_profiles_native_override_and_stdin(self):
+        edit = self.agy.exec_argv(_request("antigravity", profile="edit", prompt_via_stdin=True))
+        self.assertEqual(
+            edit,
+            [*self.HEAD, "--mode", "accept-edits", "--input-format", "stream-json", "-p="],
+        )
+        full = self.agy.exec_argv(_request("antigravity", profile="full"))
+        self.assertEqual(full[6:], ["--dangerously-skip-permissions", "-p=Review this"])
+        native = self.agy.exec_argv(_request("antigravity", native_policy=("--mode", "auto")))
+        self.assertEqual(native[6:8], ["--mode", "auto"])
+        self.assertEqual(self.agy.policy_argv("review"), MODE_BY_PROFILE["review"])
+        with self.assertRaises(ValueError):
+            self.agy.policy_argv("bogus")
+
+    def test_resume_re_sends_the_policy(self):
+        argv = self.agy.exec_argv(_request("antigravity", resume="236f", model="m"))
+        self.assertEqual(
+            argv,
+            [
+                *self.HEAD,
+                "--mode",
+                "plan",
+                "--conversation",
+                "236f",
+                "--model",
+                "m",
+                "-p=Review this",
+            ],
+        )
+        self.assertEqual(self.agy.resume("236f"), ["agy", "--conversation", "236f"])
+        with self.assertRaises(ValueError):
+            self.agy.resume("236f", fork=True)
+
+    def test_stdin_payload_is_one_ndjson_user_message(self):
+        payload = self.agy.stdin_payload("hello\nworld")
+        self.assertTrue(payload.endswith(b"\n"))
+        self.assertEqual(
+            json.loads(payload), {"event": "user", "message": {"content": "hello\nworld"}}
+        )
+        self.assertEqual(payload.count(b"\n"), 1)
+        for peer in ("claude", "codex"):
+            self.assertEqual(get_harness(peer).stdin_payload("x y"), b"x y")
+
+
+class TestAntigravityEvents(unittest.TestCase):
+    def test_vendored_stream(self):
+        agy = get_harness("antigravity")
+        events = [e for line in AGY_STREAM for e in agy.parse_event(line)]
+        self.assertEqual(
+            [e.kind for e in events], ["thread_started", "message", "progress", "message", "done"]
+        )
+        self.assertEqual(events[0].thread_id, "236f2e5b-0d6f-4fe5-9faa-738226a9c8b8")
+        self.assertEqual(events[1].text, "I will start by reading a.txt.")  # deltas joined
+        self.assertEqual(events[2].text, 'tool: read_file {"Path": "/w/a.txt"}')
+        self.assertEqual(events[3].text, "pong")
+        done = events[-1]
+        self.assertEqual(done.status, "succeeded")
+        self.assertEqual(done.text, "I will start by reading a.txt.\npong")
+        self.assertIsNone(done.error)
+        assert done.usage is not None
+        self.assertEqual(done.usage["num_turns"], 1)
+        self.assertEqual(done.usage["total_tokens"], 6957)
+
+    def test_tool_failure_and_subagents(self):
+        agy = get_harness("antigravity")
+        failed = agy.parse_event(
+            '{"event":"step_update","step_update":{"step_index":7,"state":"DONE","step_type":'
+            '"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":'
+            '{"CommandLine":"rm -rf /"},"error":{"type":"PERMISSION_DENIED","message":"denied"}}}}'
+        )
+        self.assertEqual(
+            [e.text for e in failed],
+            ['tool: run_command {"CommandLine": "rm -rf /"}', "tool failed: run_command: denied"],
+        )
+        sub = agy.parse_event(
+            '{"event":"step_update","step_update":{"step_index":8,"state":"DONE","step_type":'
+            '"tool","tool_name":"invoke_subagent","subagent_info":{"subagents":[{"type_name":'
+            '"researcher","role":"worker","conversation_id":"c2"}]}}}'
+        )
+        self.assertEqual(sub[-1].text, "subagents: researcher (worker)")
+
+    def test_bad_model_is_a_failed_done_and_a_client_error(self):
+        agy = get_harness("antigravity")
+        events = agy.parse_event(AGY_BAD_MODEL)
+        self.assertEqual(len(events), 1)
+        done = events[0]
+        self.assertEqual((done.kind, done.status, done.text), ("done", "failed", None))
+        assert done.error is not None
+        self.assertTrue(done.error.startswith("ERROR: invalid model selection"))
+        self.assertTrue(is_client_error(done.error))
+        self.assertTrue(is_client_error("You are not logged into Antigravity."))
+        other = agy.parse_event('{"event":"result","result":{"status":"INTERRUPTED"}}')[0]
+        self.assertEqual(other.error, "INTERRUPTED: agy ended with status INTERRUPTED")
+        self.assertEqual(agy.parse_event("garbage")[0].kind, "notice")
+        self.assertEqual(agy.parse_event('{"event":"unknown"}'), [])
+
+    def test_transcript_path_and_self_check(self):
+        agy = get_harness("antigravity")
+        with TemporaryDirectory() as tmp:
+            store = Path(tmp)
+            self.assertIsNone(agy.transcript_path(store, "236f", None))
+            logs = store / "brain" / "236f" / ".system_generated" / "logs"
+            logs.mkdir(parents=True)
+            compact = logs / "transcript.jsonl"
+            compact.write_text("{}\n")
+            self.assertEqual(agy.transcript_path(store, "236f", None), compact)
+            full = logs / "transcript_full.jsonl"
+            full.write_text("{}\n")
+            self.assertEqual(agy.transcript_path(store, "236f", None), full)  # full wins
+            self.assertEqual(transcript_conversation_id(compact), "236f")
+            self.assertIsNone(transcript_conversation_id(store / "x" / "transcript.jsonl"))
+        self.assertEqual(agy.self_check("gemini-3.1-pro-high", "xhigh", False), [])
+        self.assertEqual(agy.self_check(None, None, False), [])
+        self.assertIn("not supported by antigravity", agy.self_check(None, "ultra", False)[0])
+        self.assertEqual(agy.self_check(None, None, True), ["fast mode is Codex-only"])
+        self.assertIsNone(agy.current_id())
+
+
+class TestAntigravityBilling(unittest.TestCase):
+    """The billing route: config parsing, the child environment, the pre-spawn check and
+    the post-run reading of agy's log (line shapes vendored from agy 1.4.6)."""
+
+    LOG = (
+        "I1023 10:53:39.862890       1 server_oauth.go:224] applyAuthResult: "
+        "email=s@x.com, authMethod=adc, quotaProject=gen-lang-client-0002376644\n"
+        "I1023 10:53:43.468255      63 http_helpers.go:349] URL: https://aiplatform."
+        "googleapis.com/v1/projects/gen-lang-client-0002376644/locations/global/publishers/"
+        "google/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse ResponseID: a\n"
+        "I1023 10:53:45.166799     433 http_helpers.go:349] URL: https://aiplatform."
+        "googleapis.com/v1/projects/gen-lang-client-0002376644/locations/global/publishers/"
+        "google/models/gemini-4-argon:streamGenerateContent?alt=sse ResponseID: b\n"
+    )
+
+    def test_config_parsing(self):
+        policy = config._parse_invoke(
+            {"antigravity": {"billing": {"route": "gcp", "project": "p"}}}
+        )
+        self.assertEqual(policy.antigravity.billing, config.BillingPolicy("gcp", "p", None))
+        self.assertEqual(config._parse_invoke({}).antigravity.billing, config.BillingPolicy())
+        self.assertIsNone(config._parse_invoke({}).codex.billing)
+        for bad in (
+            {"codex": {"billing": {"route": "gcp"}}},
+            {"antigravity": {"billing": {"route": "free"}}},
+            {"antigravity": {"billing": {"project": ""}}},
+            {"antigravity": {"billing": {"bogus": 1}}},
+            {"antigravity": {"billing": "gcp"}},
+        ):
+            with self.subTest(bad=bad), self.assertRaises(config.ConfigError):
+                config._parse_invoke(bad)
+
+    def test_child_environment(self):
+        host = {"PATH": "/bin", "AGY_ADC_AUTH": "true", "GOOGLE_CLOUD_QUOTA_PROJECT": "host-p"}
+        self.assertEqual(billing_env(config.BillingPolicy(), host), host)
+        plan = billing_env(config.BillingPolicy("plan"), host)
+        self.assertNotIn("AGY_ADC_AUTH", plan)
+        self.assertEqual(plan["GOOGLE_CLOUD_QUOTA_PROJECT"], "host-p")
+        gcp = billing_env(config.BillingPolicy("gcp", "cfg-p", "eu"), {"PATH": "/bin"})
+        self.assertEqual(
+            gcp,
+            {
+                "PATH": "/bin",
+                "AGY_ADC_AUTH": "true",
+                "GOOGLE_CLOUD_QUOTA_PROJECT": "cfg-p",
+                "GOOGLE_CLOUD_LOCATION": "eu",
+            },
+        )
+        bare = billing_env(config.BillingPolicy("gcp"), host)
+        self.assertEqual(bare["GOOGLE_CLOUD_QUOTA_PROJECT"], "host-p")  # untouched
+        self.assertIsNot(bare, host)
+
+    def test_pre_spawn_check_and_project_resolution(self):
+        gcp = config.BillingPolicy("gcp")
+        with TemporaryDirectory() as tmp:
+            env = {"HOME": tmp}
+            self.assertEqual(billing_problems(config.BillingPolicy(), env), [])
+            self.assertEqual(billing_problems(config.BillingPolicy("plan"), env), [])
+            missing = billing_problems(gcp, env)
+            self.assertEqual(len(missing), 1)
+            self.assertIn("application_default_credentials.json does not exist", missing[0])
+            self.assertIn("gcloud auth application-default login", missing[0])
+            adc = Path(tmp) / ".config/gcloud/application_default_credentials.json"
+            adc.parent.mkdir(parents=True)
+            adc.write_text("not json")
+            self.assertIn("unreadable", billing_problems(gcp, env)[0])
+            adc.write_text('{"type":"authorized_user"}')
+            self.assertIn("no quota project", billing_problems(gcp, env)[0])
+            self.assertIsNone(resolved_project(gcp, env))
+            self.assertEqual(
+                billing_problems(gcp, {**env, "GOOGLE_CLOUD_QUOTA_PROJECT": "env-p"}), []
+            )
+            self.assertEqual(billing_problems(config.BillingPolicy("gcp", "cfg-p"), env), [])
+            adc.write_text('{"type":"authorized_user","quota_project_id":"adc-p"}')
+            self.assertEqual(billing_problems(gcp, env), [])
+            self.assertEqual(resolved_project(gcp, env), "adc-p")
+            self.assertEqual(
+                resolved_project(gcp, {**env, "GOOGLE_CLOUD_QUOTA_PROJECT": "env-p"}), "env-p"
+            )
+            self.assertEqual(resolved_project(config.BillingPolicy("gcp", "cfg-p"), env), "cfg-p")
+            self.assertIsNone(resolved_project(config.BillingPolicy("plan"), env))
+            # GOOGLE_APPLICATION_CREDENTIALS and CLOUDSDK_CONFIG relocate the file.
+            elsewhere = Path(tmp) / "elsewhere.json"
+            self.assertIn(
+                "elsewhere.json",
+                billing_problems(gcp, {**env, "GOOGLE_APPLICATION_CREDENTIALS": str(elsewhere)})[0],
+            )
+            self.assertIn(
+                str(Path(tmp) / "sdk"),
+                billing_problems(gcp, {**env, "CLOUDSDK_CONFIG": str(Path(tmp) / "sdk")})[0],
+            )
+
+    def test_log_observation_and_verification(self):
+        with TemporaryDirectory() as tmp:
+            log = Path(tmp) / "peer-01.log"
+            self.assertEqual(
+                observe_billing(log),
+                {"auth_method": None, "quota_project": None, "vertex_projects": []},
+            )
+            log.write_text(self.LOG)
+            observed = observe_billing(log)
+        project = "gen-lang-client-0002376644"
+        self.assertEqual(
+            observed,
+            {"auth_method": "adc", "quota_project": project, "vertex_projects": [project]},
+        )
+        self.assertIsNone(billing_problem("gcp", project, observed))
+        self.assertIsNone(billing_problem("gcp", None, observed))
+        self.assertIsNone(billing_problem("inherit", None, observed))
+        self.assertIn("plan route requested", billing_problem("plan", None, observed) or "")
+        self.assertIn(
+            "quotaProject=gen-lang", billing_problem("gcp", "other-project", observed) or ""
+        )
+        consumer = {"auth_method": "gcp", "quota_project": project, "vertex_projects": []}
+        self.assertIn("authMethod=gcp", billing_problem("gcp", project, consumer) or "")
+        self.assertIsNone(billing_problem("plan", None, consumer))
+        self.assertIn(
+            "unverified",
+            billing_problem("gcp", project, {"auth_method": None, "vertex_projects": []}) or "",
+        )
+        elsewhere = {**observed, "vertex_projects": [project, "leak-project"]}
+        self.assertIn("requests went to", billing_problem("gcp", project, elsewhere) or "")
+
+    def test_argv_carries_the_log_file(self):
+        agy = get_harness("antigravity")
+        argv = agy.exec_argv(_request("antigravity", log_path=Path("/r/.logs/x.log")))
+        self.assertEqual(argv[argv.index("--log-file") + 1], "/r/.logs/x.log")
+        self.assertNotIn("--log-file", agy.exec_argv(_request("antigravity")))
+
+
+class TestAntigravityStopHook(unittest.TestCase):
+    """agy's ``Stop`` payload (camelCase protojson, agy 1.4.6 embedded docs)."""
+
+    PAYLOAD: ClassVar[dict] = {
+        "conversationId": "236f2e5b-0d6f-4fe5-9faa-738226a9c8b8",
+        "workspacePaths": ["/w/repo"],
+        "transcriptPath": "/h/.gemini/antigravity-cli/brain/236f2e5b-0d6f-4fe5-9faa-738226a9c8b8/"
+        ".system_generated/logs/transcript.jsonl",
+        "artifactDirectoryPath": "/h/.gemini/antigravity-cli/brain/236f2e5b-0d6f-4fe5-9faa-738226a9c8b8",
+        "modelName": "gemini-4-argon-high",
+        "executionNum": 1,
+        "terminationReason": "NO_TOOL_CALL",
+        "error": "",
+        "fullyIdle": True,
+    }
+
+    def test_decode(self):
+        event = get_harness("antigravity").decode(self.PAYLOAD)
+        self.assertEqual((event.harness, event.source), ("antigravity", "antigravity"))
+        self.assertEqual(event.session_id, self.PAYLOAD["conversationId"])
+        self.assertEqual(event.transcript_path, self.PAYLOAD["transcriptPath"])
+        self.assertEqual(event.cwd, "/w/repo")
+        self.assertEqual(event.event, "Stop")
+        # No workspace: the app-data directory stands in for the cwd.
+        bare = get_harness("antigravity").decode({**self.PAYLOAD, "workspacePaths": []})
+        self.assertEqual(bare.cwd, "/h/.gemini/antigravity-cli")
+        minimal = get_harness("antigravity").decode({"conversationId": "abc"})
+        self.assertIsNone(minimal.transcript_path)
+
+    def test_rejects_malformed_payloads(self):
+        agy = get_harness("antigravity")
+        bad: object
+        for bad in (
+            [],
+            {},
+            {**self.PAYLOAD, "conversationId": ""},
+            {**self.PAYLOAD, "conversationId": "a/b"},
+            {**self.PAYLOAD, "conversationId": "a\nb"},
+            {**self.PAYLOAD, "workspacePaths": "relative"},
+            {**self.PAYLOAD, "workspacePaths": ["relative"]},
+            {**self.PAYLOAD, "transcriptPath": 1},
+            {**self.PAYLOAD, "transcriptPath": "relative.jsonl"},
+            {"hook_event_name": "SessionEnd", "session_id": "x", "cwd": "/w"},  # a Claude payload
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                agy.decode(bad)
 
 
 if __name__ == "__main__":

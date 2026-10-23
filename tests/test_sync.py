@@ -49,7 +49,7 @@ if spawn and not (spec.get("once") and (here / "spawned").exists()):
     (here / "spawned").touch()
     subprocess.run([sys.executable, "-m", "cairn", "sync", spawn], check=True)
 if command == "collection list":
-    print("qmd://codex-sessions/\\nqmd://claude-code-sessions/")
+    print("qmd://codex-sessions/\\nqmd://claude-code-sessions/\\nqmd://antigravity-sessions/")
 sys.stdout.write(spec.get("out", ""))
 sys.stderr.write(spec.get("err", ""))
 sys.exit(spec.get("rc", 0))

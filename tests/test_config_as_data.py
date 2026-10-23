@@ -131,6 +131,7 @@ class TestSyncPlan(unittest.TestCase):
             {
                 "claude-code-sessions": {"store": "~/.claude/projects"},
                 "codex-sessions": {"store": "~/.codex/sessions"},
+                "antigravity-sessions": {"store": "~/.gemini/antigravity-cli"},
                 "cursor-sessions": {"store": "~/cursor"},
                 "granola-sessions": {"store": "~/granola"},
                 "service-docs": {},

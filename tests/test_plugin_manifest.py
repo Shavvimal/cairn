@@ -84,7 +84,7 @@ class TestPortablePackage(unittest.TestCase):
                 "disable-model-invocation: true", (cache / "skills/setup/SKILL.md").read_text()
             )
             self.assertTrue((cache / "references/peer-review.md").is_file())
-            for name in ("invoke-codex", "invoke-claude"):
+            for name in ("invoke-codex", "invoke-claude", "invoke-antigravity"):
                 skill = cache / "skills" / name
                 policy = (skill / "agents/openai.yaml").read_text()
                 self.assertIn("allow_implicit_invocation: true", policy)

@@ -18,6 +18,7 @@ from cairn.sources.base import ConversationSource
 CONVERSATION_SOURCES = {
     "claude": "ClaudeSource",
     "codex": "CodexSource",
+    "antigravity": "AntigravitySource",
     "cursor": "CursorSource",
     "granola": "GranolaSource",
 }

@@ -23,6 +23,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 from cairn import config
+from cairn.frontmatter import parse_frontmatter
 from cairn.schema import SessionData
 
 
@@ -445,6 +446,274 @@ class TestGranolaHelpers(unittest.TestCase):
         ):
             rc = self.granola.GranolaSource().run_export(argparse.Namespace(all=True, quiet=True))
         self.assertEqual(rc, 1)
+
+
+# ---------------------------------------------------------------------------
+# Antigravity (agy): brain transcripts + conversation_summaries.db
+# ---------------------------------------------------------------------------
+
+# Record shapes vendored from agy 1.4.6 transcripts (2026-10-23), paths anonymised.
+AGY_CONVERSATION = "0ccaac42-fa89-4d4f-8d55-236fe26b984a"
+AGY_STEPS = [
+    {
+        "step_index": 0,
+        "source": "USER_EXPLICIT",
+        "type": "USER_INPUT",
+        "status": "DONE",
+        "created_at": "2026-10-23T09:30:11Z",
+        "content": "<USER_REQUEST>\nhelp me find out if Antigravity is using my GCP credits\n"
+        "</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-10-23T10:30:11"
+        "+01:00.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting "
+        "`Model Selection` from None to Gemini 4 Argon (High).\n</USER_SETTINGS_CHANGE>",
+    },
+    {
+        "step_index": 1,
+        "source": "MODEL",
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "created_at": "2026-10-23T09:30:11Z",
+        "input_tokens": 8045,
+        "cache_read_tokens": 0,
+        "output_tokens": 192,
+        "thinking": "**Checking Antigravity Usage**\n\nI will read the guide first.",
+        "tool_calls": [
+            {"name": "read_file", "args": {"Path": "/w/SKILL.md"}},
+            {"name": "run_command", "args": {"CommandLine": "gcloud billing projects describe p"}},
+        ],
+    },
+    {
+        "step_index": 2,
+        "source": "MODEL",
+        "type": "GENERIC",
+        "status": "DONE",
+        "created_at": "2026-10-23T09:30:18Z",
+        "content": "Created At: 2026-10-23T10:30:18+01:00\nCompleted At: 2026-10-23T10:30:18+01:00\n"
+        "Showing lines 1-2 of 2\n1: ---\n2: name: antigravity-guide",
+    },
+    {
+        "step_index": 3,
+        "source": "MODEL",
+        "type": "GENERIC",
+        "status": "ERROR",
+        "error": "permission check failed for run_command",
+        "created_at": "2026-10-23T09:30:30Z",
+        "content": "Created At: 2026-10-23T10:30:30+01:00\nCompleted At: 2026-10-23T10:31:06+01:00\n"
+        "Encountered error in step execution: permission check failed for run_command",
+    },
+    {
+        "step_index": 4,
+        "source": "SYSTEM",
+        "type": "SYSTEM_MESSAGE",
+        "status": "DONE",
+        "created_at": "2026-10-23T09:39:38Z",
+        "content": "The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n"
+        "<SYSTEM_MESSAGE>\n[Message] sender=task-19 content=Task was canceled\n</SYSTEM_MESSAGE>",
+    },
+    {
+        "step_index": 5,
+        "source": "MODEL",
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "created_at": "2026-10-23T09:40:00Z",
+        "input_tokens": 100,
+        "cache_read_tokens": 50,
+        "output_tokens": 20,
+        "content": "You are billed through Vertex AI on project p.",
+        "media": [{"mime_type": "image/png", "uri": "/w/shot.png"}],
+    },
+]
+AGY_COLUMNS = (
+    "conversation_id text primary key, title text, preview text, step_count integer, "
+    "last_modified_time text, last_user_input_time text, workspace_uris text, status text, "
+    "source text, agent_name text, parent_conversation_id text, nesting_depth integer"
+)
+
+
+class TestAntigravityExport(_AdapterFixture):
+    module_name = "cairn.sources.antigravity"
+
+    def setUp(self):
+        super().setUp()
+        self.store = self.root / "agy"
+        (self.store / "brain").mkdir(parents=True)
+        self.workspace = self.root / "home" / "Code" / "demo"
+        self.workspace.mkdir(parents=True)
+
+    def transcript(self, conversation_id, steps=AGY_STEPS, compact_only=False):
+        logs = self.store / "brain" / conversation_id / ".system_generated" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        body = "".join(json.dumps(step) + "\n" for step in steps)
+        (logs / "transcript.jsonl").write_text(body)
+        if not compact_only:
+            (logs / "transcript_full.jsonl").write_text(body)
+        return logs / ("transcript.jsonl" if compact_only else "transcript_full.jsonl")
+
+    def row(
+        self,
+        conversation_id,
+        title="Checking GCP Credits Usage",
+        last="2026-10-23 09:42:57.132013+00:00",
+        parent="",
+        depth=0,
+        status="CASCADE_RUN_STATUS_IDLE",
+    ):
+        db = sqlite3.connect(self.store / "conversation_summaries.db")
+        db.execute(f"create table if not exists conversation_summaries ({AGY_COLUMNS})")
+        db.execute(
+            "insert or replace into conversation_summaries values (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                conversation_id,
+                title,
+                "preview",
+                6,
+                last,
+                last,
+                json.dumps([self.workspace.as_uri()]),
+                status,
+                "",
+                "",
+                parent,
+                depth,
+            ),
+        )
+        db.commit()
+        db.close()
+
+    def activate(self):
+        return self._activate({"antigravity-sessions": str(self.store)})
+
+    def documents(self):
+        return sorted((self.root / ".context" / "antigravity-sessions").rglob("*.md"))
+
+    def test_transcript_parses_and_renders(self):
+        self.transcript(AGY_CONVERSATION)
+        mod = self.activate()
+        # First export before agy names the conversation: the prompt is the title.
+        self.assertEqual(mod.AntigravitySource().export_conversations(quiet=True), 1)
+        docs = self.documents()
+        self.assertEqual(
+            parse_frontmatter(docs[0].read_text())["title"],
+            "help me find out if Antigravity is using my GCP credits",
+        )
+        self.row(AGY_CONVERSATION)
+        self.assertEqual(mod.AntigravitySource().export_conversations(quiet=True), 1)
+        self.assertEqual(len(docs), 1)
+        text = docs[0].read_text(encoding="utf-8")
+        fm = parse_frontmatter(text)
+        self.assertEqual(fm["type"], "antigravity-session")
+        self.assertEqual(fm["session_id"], AGY_CONVERSATION)
+        self.assertEqual(fm["date"], "2026-10-23")
+        self.assertEqual(fm["title"], "Checking GCP Credits Usage")
+        self.assertEqual(fm["run_status"], "IDLE")
+        self.assertEqual(fm["messages"], "1")
+        self.assertEqual(fm["steps"], "6")
+        self.assertEqual(fm["step_errors"], "1")
+        self.assertEqual(fm["tokens"], "in=8145 out=212 cached=50")
+        self.assertEqual(fm["source"], "antigravity")
+        self.assertEqual(fm["native_id"], AGY_CONVERSATION)
+        self.assertEqual(fm["cwd"], str(self.workspace))
+        self.assertEqual(fm["activity_dates"], ["2026-10-23"])
+        self.assertEqual(fm["status"], "active")  # the preserved tail, not agy's run status
+        # Body: the prompt without its wrapper, thinking folded, paired tool results.
+        self.assertIn("### User - 2026-10-23T09:30:11Z", text)
+        self.assertIn("help me find out if Antigravity is using my GCP credits", text)
+        for leaked in (
+            "<USER_REQUEST>",
+            "ADDITIONAL_METADATA",
+            "USER_SETTINGS_CHANGE",
+            "Created At:",
+        ):
+            self.assertNotIn(leaked, text)
+        self.assertIn("<details><summary>Reasoning</summary>", text)
+        self.assertIn('<tool name="read_file" status="done">', text)
+        self.assertIn("2: name: antigravity-guide", text)
+        self.assertIn('<tool name="run_command" status="error">', text)
+        self.assertIn("permission check failed for run_command", text)
+        self.assertIn("### System - 2026-10-23T09:39:38Z", text)
+        self.assertIn("[Message] sender=task-19 content=Task was canceled", text)
+        self.assertNotIn("not actually sent by the user", text)
+        self.assertIn("You are billed through Vertex AI on project p.", text)
+        self.assertIn("[media image/png](/w/shot.png)", text)
+        # Re-export is a no-op until the native snapshot changes.
+        self.assertEqual(mod.AntigravitySource().export_conversations(quiet=True), 0)
+        # A later index change re-renders, but a title that is no longer the prompt is
+        # treated as the user's and preserved.
+        self.row(AGY_CONVERSATION, title="Renamed by agy", last="2026-10-23 09:50:00+00:00")
+        self.assertEqual(mod.AntigravitySource().export_conversations(quiet=True), 1)
+        self.assertEqual(
+            parse_frontmatter(docs[0].read_text())["title"], "Checking GCP Credits Usage"
+        )
+
+    def test_without_an_index_row_or_full_transcript(self):
+        self.transcript("bbbbbbbb-0000-4000-8000-000000000001", compact_only=True)
+        (self.store / "brain" / "cccccccc-0000-4000-8000-000000000002").mkdir()  # no transcript
+        mod = self.activate()
+        source = mod.AntigravitySource()
+        self.assertEqual(source.export_conversations(quiet=True), 1)
+        docs = self.documents()
+        self.assertEqual(len(docs), 1)
+        fm = parse_frontmatter(docs[0].read_text())
+        self.assertEqual(fm["title"], "help me find out if Antigravity is using my GCP credits")
+        self.assertNotIn("run_status", fm)
+        self.assertEqual(docs[0].parent.name, "antigravity-sessions")  # no workspace: root
+        self.assertEqual(
+            source.conversations(),
+            {
+                "bbbbbbbb-0000-4000-8000-000000000001": self.transcript(
+                    "bbbbbbbb-0000-4000-8000-000000000001", compact_only=True
+                )
+            },
+        )
+
+    def test_window_uses_the_index_time(self):
+        self.transcript(AGY_CONVERSATION)
+        self.row(AGY_CONVERSATION, last="2026-01-01 00:00:00+00:00")
+        mod = self.activate()
+        cutoff = datetime(2026, 6, 1, tzinfo=UTC).timestamp()
+        self.assertEqual(
+            mod.AntigravitySource().export_conversations(date_filter=cutoff, quiet=True), 0
+        )
+        self.assertEqual(
+            mod.AntigravitySource().export_conversations(date_filter=None, quiet=True), 1
+        )
+
+    def test_export_target_prefers_the_full_sibling_and_checks_identity(self):
+        compact = self.transcript(AGY_CONVERSATION).with_name("transcript.jsonl")
+        self.row(AGY_CONVERSATION)
+        mod = self.activate()
+        source = mod.AntigravitySource()
+        document = source.export_target(AGY_CONVERSATION, str(compact))
+        self.assertTrue(document.is_file())
+        self.assertEqual(source.export_target(AGY_CONVERSATION, None), document)
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            source.export_target("other-id", str(compact))
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            source.export_target("dddddddd-0000-4000-8000-000000000004", None)
+
+    def test_child_conversation_lands_in_the_parent_folder(self):
+        child = "eeeeeeee-0000-4000-8000-000000000005"
+        self.transcript(AGY_CONVERSATION)
+        self.row(AGY_CONVERSATION)
+        self.transcript(child, steps=AGY_STEPS[:2])
+        self.row(child, title="Worker: billing check", parent=AGY_CONVERSATION, depth=1)
+        mod = self.activate()
+        self.assertEqual(mod.AntigravitySource().export_conversations(quiet=True), 2)
+        docs = self.documents()
+        parent_doc = next(d for d in docs if d.name.endswith(f"{AGY_CONVERSATION[:8]}.md"))
+        child_doc = next(d for d in docs if d.name == f"agent-{child[:8]}.md")
+        self.assertEqual(child_doc.parent, parent_doc.with_suffix(""))
+        child_fm = parse_frontmatter(child_doc.read_text())
+        self.assertEqual(child_fm["type"], "antigravity-subagent")
+        self.assertEqual(child_fm["parent_session_id"], AGY_CONVERSATION)
+        self.assertEqual(child_fm["spawn_depth"], "1")
+        parent_text = parent_doc.read_text()
+        self.assertIn("## Subagents", parent_text)
+        self.assertIn(
+            f"[Worker: billing check](./{parent_doc.stem}/agent-{child[:8]}.md)", parent_text
+        )
+        # A targeted export of the child refreshes the whole family.
+        source = mod.AntigravitySource()
+        self.assertEqual(source.export_target(child, None), child_doc)
 
 
 if __name__ == "__main__":

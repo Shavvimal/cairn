@@ -119,6 +119,10 @@ class Claude:
             argv += ["--", request.prompt]
         return argv
 
+    def stdin_payload(self, prompt: str) -> bytes:
+        """``claude -p`` with no prompt argument reads the raw prompt from stdin."""
+        return prompt.encode("utf-8")
+
     def parse_event(self, line: str) -> list[Event]:
         """Map one ``claude -p --output-format stream-json`` line to zero or more events."""
         line = line.strip()

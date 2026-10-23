@@ -184,6 +184,10 @@ class Codex:
             prompt,
         ]
 
+    def stdin_payload(self, prompt: str) -> bytes:
+        """A ``-`` prompt makes ``codex exec`` read the raw prompt from stdin."""
+        return prompt.encode("utf-8")
+
     def parse_event(self, line: str) -> list[Event]:
         """Map one ``codex exec --json`` stdout line to zero or more events."""
         line = line.strip()
