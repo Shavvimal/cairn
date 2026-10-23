@@ -189,9 +189,9 @@ cairn codex note "progress"      # add a timestamped note
 Service docs is a verbatim mirror with no `--since`/`--all`:
 `cairn service-docs export [--clean]`.
 
-### `/invoke-codex` and `/invoke-claude` — ask the other agent
+### `/invoke-codex`, `/invoke-claude` and `/invoke-antigravity` — ask another agent
 
-Run the other agent headlessly from either host, for an adversarial review, a plan review or
+Run another agent headlessly from either host, for an adversarial review, a plan review or
 an independent pass, and keep the whole exchange searchable:
 
 ```bash
@@ -199,6 +199,7 @@ cairn invoke codex --json --prompt-file brief.md --effort high   # background it
 cairn invoke status <thread-id>                             # health line, progress, answer so far
 cairn invoke codex --resume <thread-id> --prompt "…"         # continue the same thread, days later too
 cairn invoke claude --prompt "…" --profile review            # the mirror direction
+cairn invoke antigravity --prompt "…" --model gemini-3.1-pro-high   # Google Antigravity (agy), a Gemini opinion
 cairn agents list                                           # peer runs and subagents of this session, with health
 cairn agents wait --session claude:<id>                     # one completion notice for a whole fan-out
 ```
@@ -207,8 +208,14 @@ Each run captures the peer's real thread id, streams its events to a per-thread 
 `<data_root>/logs/invoke/`, exports the peer session at once, writes `links:` on both
 session documents, and records an exchange document (prompt, progress, answer and result
 per round) in the calling session's folder. Profiles `review` (read-only), `edit` and
-`full` map to each host's native sandbox or permission flags, and the record stores the
-exact flags that ran. The doctrine for adversarial review and the bounded debate loop is
+`full` map to each peer's native sandbox, permission or mode flags, and the record stores the
+exact flags that ran. Antigravity is a peer only for now: `agy` must be logged in once
+interactively, its conversation is resumable, and the exchange document is the record (no
+Antigravity session document is exported or linked until it gets a source adapter). Which
+credits a headless `agy` run bills is a per-machine choice (`invoke.antigravity.billing`):
+`inherit` the host environment, force the consumer `plan` quota, or `gcp` (Vertex AI through
+Application Default Credentials on a named quota project, checked before the spawn and read
+back from agy's log afterwards). `cairn invoke antigravity --billing ROUTE` overrides one round. The doctrine for adversarial review and the bounded debate loop is
 in [references/peer-review.md](references/peer-review.md); the design is in
 [docs/agent-exchange-plan.md](docs/agent-exchange-plan.md).
 
@@ -350,7 +357,7 @@ on the same inode.
 ```
 src/cairn/                 # the engine (config, schema, renderer, sources, CLI, sync)
 src/cairn/__main__.py      # the `cairn` dispatcher
-skills/                    # plugin skills (setup, cairn, recall, search, invoke-codex, invoke-claude)
+skills/                    # plugin skills (setup, cairn, recall, search, invoke-codex, invoke-claude, invoke-antigravity)
 .claude-plugin/            # plugin.json + marketplace.json (this repo is both)
 plugin.json                # portable manifest (authoritative OpenAI settings)
 .agents/plugins/           # Codex GitHub marketplace

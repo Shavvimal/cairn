@@ -60,6 +60,7 @@ recall (temporal view over shared exported sessions; topic search is qmd's job):
 peer agents (one foreground round per call; run it in the background):
   cairn invoke codex --prompt TEXT [--effort E] [--profile review|edit|full] [--json]
   cairn invoke claude --prompt-file FILE [--model M] [--permission-mode MODE]
+  cairn invoke antigravity --prompt TEXT [--model M] [--mode plan|accept-edits|auto]
   cairn invoke codex --resume THREAD_ID --prompt TEXT   follow up in the same thread
   cairn invoke status THREAD_ID [--follow] [--json]     health, progress and answer
   cairn invoke cancel THREAD_ID                         stop a running round

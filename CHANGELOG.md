@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0]
+
+### Added
+- `cairn invoke antigravity`: run Google Antigravity's `agy` CLI headlessly as a peer, the
+  way `codex` and `claude` already run. Verified against agy 1.4.6: `-p=<prompt>` with
+  `--output-format stream-json`, the conversation id captured from the `init` event,
+  `--resume` continuing the same conversation with `--conversation`, large prompts through
+  `--input-format stream-json`, and `--json-schema` for structured answers. Profiles map
+  to `--mode plan` (review: writes and shell commands deferred), `--mode accept-edits`
+  (edit) and `--dangerously-skip-permissions` (full); `--mode` passes a native mode
+  directly. An unknown model or a missing login is reported as not retryable. Defaults
+  live under `invoke.antigravity` in the config.
+- Skill `invoke-antigravity` for both hosts.
+- `invoke.antigravity.billing` (`route`, `project`, `location`): which credits a headless
+  `agy` run bills. `inherit` (default) passes the host environment through; `plan` strips
+  `AGY_ADC_AUTH` so the consumer plan quota pays; `gcp` sets `AGY_ADC_AUTH=true` and the
+  `GOOGLE_CLOUD_QUOTA_PROJECT` / `GOOGLE_CLOUD_LOCATION` exports, refuses to spawn (exit 2)
+  unless the Application Default Credentials file and a quota project exist, and after the
+  run reads agy's own log (`--log-file`, kept as `peer-NN.log`) to record the auth method,
+  quota project and request projects as `billing.observed`; a mismatch is a `billing:`
+  warning. `cairn invoke antigravity --billing ROUTE` overrides one round,
+  `cairn config set invoke.antigravity.billing.route gcp` sets the machine default, and
+  `cairn doctor` reports whether the `gcp` route is ready.
+
+### Changed
+- Publication steps are decided per peer: a peer without a cairn source adapter
+  (Antigravity, for now) has no session document to export or link, so those steps are
+  not applicable to its rounds instead of pending forever. With a known caller the
+  exchange document still lands in the caller's folder and is indexed; without one, only
+  the answer is kept under the run directory.
+- Harness adapters own the bytes a large prompt takes on the peer's stdin
+  (`stdin_payload`), and the recorded argv masks a prompt glued to a flag.
+
 ## [2.5.1]
 
 ### Fixed

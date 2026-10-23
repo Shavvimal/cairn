@@ -285,6 +285,11 @@ def _round_lines(round_: dict) -> list[str]:
         f"- peer session: {round_.get('peer_session_doc') or 'n/a'}",
         f"- usage: {_usage_text(round_.get('usage'))}",
     ]
+    billing = round_.get("billing")
+    if isinstance(billing, dict):
+        from .invoke import billing_text
+
+        lines.append(f"- billing: {billing_text(billing)}")
     if round_.get("error"):
         lines.append(f"- error: {' '.join(str(round_['error']).split())[:500]}")
     lines.append("")

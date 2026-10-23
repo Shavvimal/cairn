@@ -1,4 +1,4 @@
-"""``cairn invoke``: run Codex or Claude headlessly as a peer agent (plan Part B, Part D).
+"""``cairn invoke``: run Codex, Claude or Antigravity headlessly as a peer agent (plan Part B, Part D).
 
 One invocation runs one round of one thread in the foreground; the host runs it
 in the background and reads progress with ``cairn invoke status`` (D2). The run
@@ -28,7 +28,10 @@ Round lifecycle:
    (peer export, caller export, links, exchange document, index). Pipeline
    failures never change the outcome (D11); each step lands in the round's
    publication ledger (D24) so ``cairn invoke publish`` or the next
-   ``cairn sync`` can finish it without running the peer again.
+   ``cairn sync`` can finish it without running the peer again. A peer without
+   a cairn source adapter (Antigravity, for now) has no session to export or
+   link, so those steps are not applicable to its rounds; with a known caller
+   the exchange document still lands in the caller's folder.
 """
 
 from __future__ import annotations
@@ -45,14 +48,31 @@ import sys
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import FrameType
 from typing import Any
 
-from .config import INVOKE_PEERS, PROFILES, CairnConfig, ConfigError, PeerPolicy, get_config
+from .config import (
+    BILLING_ROUTES,
+    INVOKE_PEERS,
+    PROFILES,
+    BillingPolicy,
+    CairnConfig,
+    ConfigError,
+    PeerPolicy,
+    get_config,
+)
 from .exchange import ThreadState, now_iso, write_exchange
 from .harnesses import Event, Harness, InvokeRequest, detect_harness, get_harness, is_client_error
+from .harnesses.antigravity import (
+    ANTIGRAVITY_MODES,
+    billing_env,
+    billing_problem,
+    billing_problems,
+    observe_billing,
+    resolved_project,
+)
 from .harnesses.claude import KEYCHAIN_GUIDANCE, keychain_failure
 from .health import Health, classify, heartbeat, identity_alive, parse_iso, process_identity
 from .registry import BY_NAME
@@ -134,7 +154,12 @@ def _round_files(run_dir: Path, number: int) -> dict[str, Path]:
         "stderr_path": run_dir / f"stderr-{nn}.log",
         "answer_path": run_dir / f"answer-{nn}.md",
         "result_path": run_dir / f"result-{nn}.json",
+        "peer_log_path": run_dir / f"peer-{nn}.log",  # the peer's own log, when it writes one
     }
+
+
+# Round files whose path is only recorded once the file exists.
+_LATE_FILES = ("result_path", "peer_log_path")
 
 
 def _tail(path: Path | None, limit: int = STDERR_TAIL) -> str:
@@ -365,7 +390,7 @@ def _collection_of(config: CairnConfig, path: Path) -> str | None:
 
 
 def _touched_collections(config: CairnConfig, state: ThreadState) -> list[str]:
-    names = {BY_NAME[state.peer].collection}
+    names = {BY_NAME[state.peer].collection} if state.peer in BY_NAME else set()
     for round_ in state.rounds:
         caller = round_.get("caller_session")
         if caller:
@@ -489,32 +514,44 @@ DOWNSTREAM: dict[str, tuple[str, ...]] = {
 NOT_ATTEMPTED = "not attempted yet"
 
 
-def _applicable(step: str, round_: dict) -> bool:
-    if step in ("caller_exported", "linked"):
-        return bool(round_.get("caller_session"))
-    return True
+def _applicable(step: str, round_: dict, peer: str) -> bool:
+    """Whether ``step`` applies to a round of ``peer``.
+
+    A peer with no cairn source adapter has no session document to export or link.
+    Without a caller either, nothing anchors an exchange document and nothing lands
+    in a collection, so only the answer is kept.
+    """
+    exportable = peer in BY_NAME
+    caller = bool(round_.get("caller_session"))
+    if step == "exported":
+        return exportable
+    if step == "caller_exported":
+        return caller
+    if step == "linked":
+        return exportable and caller
+    return exportable or caller  # exchange_written, indexed
 
 
-def applicable_steps(round_: dict) -> tuple[str, ...]:
-    return tuple(step for step in PUBLICATION_STEPS if _applicable(step, round_))
+def applicable_steps(round_: dict, peer: str) -> tuple[str, ...]:
+    return tuple(step for step in PUBLICATION_STEPS if _applicable(step, round_, peer))
 
 
-def init_ledger(round_: dict) -> None:
+def init_ledger(round_: dict, peer: str) -> None:
     """Record every applicable step without a completion timestamp as pending, so a
     runner killed between steps leaves an explicit to-do list behind."""
     publication = round_.setdefault("publication", {})
     pending = publication.setdefault("pending", {})
-    for step in applicable_steps(round_):
+    for step in applicable_steps(round_, peer):
         if step not in publication:
             pending.setdefault(step, NOT_ATTEMPTED)
 
 
-def pending_steps(round_: dict) -> tuple[str, ...]:
+def pending_steps(round_: dict, peer: str) -> tuple[str, ...]:
     """Applicable steps of a finished round that have no completion timestamp."""
     if not round_.get("finished_at"):
         return ()
     publication = round_.get("publication") or {}
-    return tuple(step for step in applicable_steps(round_) if step not in publication)
+    return tuple(step for step in applicable_steps(round_, peer) if step not in publication)
 
 
 def publish_round(
@@ -534,10 +571,10 @@ def publish_round(
     returned as warnings; they never raise and never touch the outcome (D11).
     """
     warnings = warnings if warnings is not None else []
-    todo = set(applicable_steps(round_) if steps is None else steps)
-    init_ledger(round_)
+    todo = set(applicable_steps(round_, state.peer) if steps is None else steps)
+    init_ledger(round_, state.peer)
     for step in PUBLICATION_STEPS:
-        if step not in todo or not _applicable(step, round_):
+        if step not in todo or not _applicable(step, round_, state.peer):
             continue
         try:
             if step == "indexed":
@@ -556,7 +593,7 @@ def publish_round(
         else:
             _mark(round_, step, None)
             for later in DOWNSTREAM[step]:
-                if _applicable(later, round_) and later not in todo:
+                if _applicable(later, round_, state.peer) and later not in todo:
                     _mark(round_, later, f"redo after {step}")
                     todo.add(later)
         state.save()
@@ -588,9 +625,21 @@ def _finish(
     target = Path(round_["answer_target"]) if round_.get("answer_target") else None
     if target is not None and target.is_file():
         os.replace(target, answer_path)  # the peer has exited: its -o file is final
+    log_target = Path(round_["log_target"]) if round_.get("log_target") else None
+    if log_target is not None and log_target.is_file():
+        os.replace(log_target, files["peer_log_path"])  # same reason: written outside the run dir
+        round_["peer_log_path"] = str(files["peer_log_path"])
+    billing = round_.get("billing")
+    if isinstance(billing, dict) and round_.get("peer_log_path"):
+        billing["observed"] = observe_billing(Path(round_["peer_log_path"]))
+        billing["problem"] = billing_problem(
+            str(billing.get("route")), billing.get("project"), billing["observed"]
+        )
     answer = _read_text(answer_path).strip()
     done = replay.done
-    if state.peer == "claude" or not answer:
+    if target is None or not answer:
+        # Only Codex writes an answer file (-o); the others end with the answer in
+        # their final event, else the last message stands in.
         answer = (done.text if done and done.text else None) or replay.last_message or ""
         if answer:
             atomic_write(answer_path, answer + "\n")
@@ -611,7 +660,7 @@ def _finish(
         answer_path=str(answer_path) if answer_path.exists() else None,
     )
     _mark(round_, "answer_saved", None)
-    init_ledger(round_)
+    init_ledger(round_, state.peer)
 
 
 def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str | None = None):
@@ -793,6 +842,7 @@ def observation_json(obs: Observation) -> dict:
         "last_event": obs.last_event,
         "progress": progress,
         "last_message": round_.get("last_message") or obs.replay.last_message,
+        "billing": round_.get("billing"),
         "publication": round_.get("publication") or {},
         "events_path": round_.get("events_path"),
         "transcript_path": round_.get("transcript_path"),
@@ -897,17 +947,29 @@ class Runner:
         self.round: dict
         self.run_dir: Path
         self.thread_id: str | None = None
+        self.billing: BillingPolicy | None = None
 
     # ---- settings -------------------------------------------------------
 
     def _native(self) -> tuple[str, ...]:
         sandbox = getattr(self.args, "sandbox", None)
-        mode = getattr(self.args, "permission_mode", None)
+        permission_mode = getattr(self.args, "permission_mode", None)
+        mode = getattr(self.args, "mode", None)
         if self.peer == "codex" and sandbox:
             return ("-s", str(sandbox))
-        if self.peer == "claude" and mode:
-            return ("--permission-mode", str(mode))
+        if self.peer == "claude" and permission_mode:
+            return ("--permission-mode", str(permission_mode))
+        if self.peer == "antigravity" and mode:
+            return ("--mode", str(mode))
         return ()
+
+    def _billing(self) -> BillingPolicy | None:
+        """The billing route for this round: ``--billing`` over the config's, antigravity
+        only. A route is a runtime choice, so a resume takes today's, not the recorded one."""
+        if self.policy.billing is None:
+            return None
+        route = getattr(self.args, "billing", None)
+        return replace(self.policy.billing, route=route) if route else self.policy.billing
 
     def settings(self, recorded: ThreadState | None) -> Settings:
         args = self.args
@@ -986,6 +1048,7 @@ class Runner:
             "caller_session_doc": round_.get("caller_session_doc"),
             "last_message": round_.get("last_message"),
             "usage": round_.get("usage"),
+            "billing": round_.get("billing"),
             "indexed": "indexed" in publication,
             "publication": publication,
             "error": round_.get("error"),
@@ -1005,12 +1068,20 @@ class Runner:
                 f"refusing a nested invoke ({DEPTH_ENV}={depth}); a peer must not invoke "
                 "another peer unless --allow-nested is passed"
             )
-        if self.peer == "codex" and getattr(args, "permission_mode", None):
-            raise UsageError("--permission-mode is Claude-only; use --sandbox or --profile")
-        if self.peer == "claude" and getattr(args, "sandbox", None):
-            raise UsageError("--sandbox is Codex-only; use --permission-mode or --profile")
+        if self.peer != "claude" and getattr(args, "permission_mode", None):
+            raise UsageError("--permission-mode is Claude-only; use --profile or the peer's flag")
+        if self.peer != "codex" and getattr(args, "sandbox", None):
+            raise UsageError("--sandbox is Codex-only; use --profile or the peer's flag")
+        if self.peer != "antigravity" and getattr(args, "mode", None):
+            raise UsageError("--mode is Antigravity-only; use --profile or the peer's flag")
+        if self.peer != "antigravity" and getattr(args, "billing", None):
+            raise UsageError("--billing is Antigravity-only")
         if args.fork and not args.resume:
             raise UsageError("--fork needs --resume THREAD_ID (the thread to fork)")
+        if args.fork and self.peer == "antigravity":
+            raise UsageError(
+                "--fork is not supported by antigravity (agy cannot fork a conversation)"
+            )
         caller, caller_warnings = resolve_caller(args.parent)
         prompt = _read_prompt(args)
 
@@ -1034,6 +1105,12 @@ class Runner:
             problems = self.harness.self_check(settings.model, settings.effort, settings.fast)
             if problems:
                 raise UsageError("self-check failed: " + "; ".join(problems))
+        # The billing check is never skipped: a run on the wrong credits is not recoverable.
+        self.billing = self._billing()
+        if self.billing is not None:
+            problems = billing_problems(self.billing, os.environ)
+            if problems:
+                raise UsageError("billing check failed: " + "; ".join(problems))
 
         root = invoke_root(self.config) / self.peer
         session_id: str | None = None
@@ -1122,6 +1199,18 @@ class Runner:
         if self.peer == "codex":
             answer_target = invoke_root(self.config) / self.peer / ".answers" / f"{uuid.uuid4()}.md"
             answer_target.parent.mkdir(parents=True, exist_ok=True)
+        # agy writes its own log where told; it lives outside the run directory for the
+        # same rename reason and moves to peer-NN.log once the peer has exited.
+        log_target: Path | None = None
+        billing: dict | None = None
+        if self.billing is not None:
+            log_target = invoke_root(self.config) / self.peer / ".logs" / f"{uuid.uuid4()}.log"
+            log_target.parent.mkdir(parents=True, exist_ok=True)
+            billing = {
+                "route": self.billing.route,
+                "project": resolved_project(self.billing, os.environ),
+                "location": self.billing.location if self.billing.route == "gcp" else None,
+            }
         request = InvokeRequest(
             peer=self.peer,
             prompt=full_prompt,
@@ -1138,6 +1227,7 @@ class Runner:
             last_message_path=answer_target,
             prompt_via_stdin=via_stdin,
             extra=extra,
+            log_path=log_target,
         )
         argv = self.harness.exec_argv(request)
         if self.args.fork and self.peer == "codex":
@@ -1145,9 +1235,13 @@ class Runner:
             if argv[1:3] != ["exec", "resume"]:
                 raise RuntimeError(f"unexpected codex resume argv: {argv[:3]}")
             argv[2] = "fork"
-        recorded_argv = list(argv)
-        if not via_stdin and recorded_argv and recorded_argv[-1] == full_prompt:
-            recorded_argv[-1] = "<prompt>"
+        # The round keeps the prompt once, under "prompt"; mask it in the recorded
+        # argv whether it rides as a bare argument (codex, claude) or glued to a
+        # flag (agy -p=...).
+        recorded_argv = [
+            arg[: -len(full_prompt)] + "<prompt>" if arg.endswith(full_prompt) else arg
+            for arg in argv
+        ]
         runner = process_identity(os.getpid())
         self.round = {
             "round": number,
@@ -1173,8 +1267,10 @@ class Runner:
             "peer_pid": None,
             "peer_pgid": None,
             "peer_started": None,
-            **{key: str(path) for key, path in files.items() if key != "result_path"},
+            **{key: str(path) for key, path in files.items() if key not in _LATE_FILES},
             "answer_target": str(answer_target) if answer_target else None,
+            "log_target": str(log_target) if log_target else None,
+            "billing": billing,
             "publication": {"pending": {}},
         }
         state.rounds.append(self.round)
@@ -1225,10 +1321,13 @@ class Runner:
                             file=sys.stderr,
                             flush=True,
                         )
+                    env = scrubbed_env(depth, caller)
+                    if self.billing is not None:
+                        env = billing_env(self.billing, env)
                     process = subprocess.Popen(
                         argv,
                         cwd=str(request.cwd),
-                        env=scrubbed_env(depth, caller),
+                        env=env,
                         stdin=subprocess.PIPE if request.prompt_via_stdin else subprocess.DEVNULL,
                         stdout=events,
                         stderr=stderr,
@@ -1292,7 +1391,7 @@ class Runner:
         self.state.resume_command = " ".join(self.harness.resume(thread_id))
         number = int(self.round["round"])
         for key, path in _round_files(target, number).items():
-            if key != "result_path":
+            if key not in _LATE_FILES:
                 self.round[key] = str(path)
         self.state.save()
         self.lock.release()
@@ -1320,7 +1419,9 @@ class Runner:
         running whatever the peer does with its stdout.
         """
         replay = Replay()
-        pending_input = request.prompt.encode("utf-8") if request.prompt_via_stdin else b""
+        pending_input = (
+            self.harness.stdin_payload(request.prompt) if request.prompt_via_stdin else b""
+        )
         stdin_fd: int | None = None
         if process.stdin is not None:
             stdin_fd = process.stdin.fileno()
@@ -1516,6 +1617,9 @@ class Runner:
             retryable=retryable,
         )
         self.round["peer_returncode"] = rc
+        billing_issue = (self.round.get("billing") or {}).get("problem")
+        if billing_issue:
+            self.warnings.append(f"billing: {billing_issue}")
         self.state.save()
         if self.state.thread_id:
             publish_round(
@@ -1558,7 +1662,7 @@ def publish_thread(config: CairnConfig, run_dir: Path, *, index: bool = True) ->
         for round_ in state.rounds:
             if not round_.get("finished_at"):
                 continue
-            steps = pending_steps(round_)
+            steps = pending_steps(round_, state.peer)
             if not steps:
                 continue
             publish_round(config, state, round_, steps=steps, index=index, warnings=warnings)
@@ -1586,7 +1690,7 @@ def drain_publications(config: CairnConfig) -> list[dict]:
             continue
         last = state.last_round
         open_round = bool(last and not last.get("finished_at"))
-        if not open_round and not any(pending_steps(r) for r in state.rounds):
+        if not open_round and not any(pending_steps(r, state.peer) for r in state.rounds):
             continue
         reports.append(publish_thread(config, run_dir))
     return reports
@@ -1745,7 +1849,8 @@ def cmd_list_models(config: CairnConfig, as_json: bool) -> int:
     print(format_models(catalog, config.invoke.codex.model, as_json))
     print(
         "note: claude has no model catalogue; pass any model name it accepts "
-        "(efforts: low, medium, high, xhigh, max)",
+        "(efforts: low, medium, high, xhigh, max). antigravity lists its slugs with "
+        "'agy models' (efforts: low, medium, high, xhigh, max)",
         file=sys.stderr,
     )
     return EXIT_OK
@@ -1759,7 +1864,9 @@ def cmd_list_models(config: CairnConfig, as_json: bool) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cairn invoke",
-        description="Run Codex or Claude headlessly as a peer agent, one round per call.",
+        description=(
+            "Run Codex, Claude or Antigravity headlessly as a peer agent, one round per call."
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
     run = argparse.ArgumentParser(add_help=False)
@@ -1790,6 +1897,20 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("default", "plan", "acceptEdits", "bypassPermissions", "dontAsk", "auto"),
     )
     claude.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="native args")
+    antigravity = sub.add_parser(
+        "antigravity", parents=[run], help="run agy -p (Google Antigravity CLI) as a peer"
+    )
+    antigravity.add_argument(
+        "--mode",
+        choices=ANTIGRAVITY_MODES,
+        help="native agy execution mode (overrides the profile's)",
+    )
+    antigravity.add_argument(
+        "--billing",
+        choices=BILLING_ROUTES,
+        help="billing route for this round (overrides invoke.antigravity.billing.route)",
+    )
+    antigravity.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="native args")
     for name, text in (
         ("status", "health, progress and answer of a thread"),
         ("cancel", "stop the running round of a thread"),
@@ -1805,6 +1926,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def billing_text(billing: dict) -> str:
+    """One line for a round's billing record: the route asked for and what agy did."""
+    parts = [f"route={billing.get('route')}"]
+    if billing.get("project"):
+        parts.append(f"project={billing['project']}")
+    observed = billing.get("observed") or {}
+    if observed.get("auth_method"):
+        parts.append(f"auth={observed['auth_method']}")
+    if observed.get("quota_project"):
+        parts.append(f"quota_project={observed['quota_project']}")
+    problem = billing.get("problem")
+    if problem:
+        parts.append(f"PROBLEM: {problem}")
+    elif observed and billing.get("route") == "gcp":
+        parts.append("verified")
+    return " ".join(parts)
+
+
 def _summary(result: dict, run_dir: Path | None) -> str:
     lines = [
         f"{result['peer']} thread {result.get('thread_id')} round {result.get('round')}: "
@@ -1816,6 +1955,8 @@ def _summary(result: dict, run_dir: Path | None) -> str:
         lines.append(f"error: {result['error']}")
     if result.get("last_message"):
         lines += ["", str(result["last_message"]), ""]
+    if isinstance(result.get("billing"), dict):
+        lines.append(f"billing: {billing_text(result['billing'])}")
     for key in ("exchange_doc", "peer_session_doc", "events_path"):
         if result.get(key):
             lines.append(f"{key}: {result[key]}")
@@ -1831,7 +1972,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         config = get_config()
-        if args.command in ("codex", "claude"):
+        if args.command in INVOKE_PEERS:
             runner = Runner(config, args.command, args)
             result, code = runner.run()
             if args.json:
@@ -1867,6 +2008,7 @@ __all__ = [
     "Observation",
     "Replay",
     "adopt",
+    "billing_text",
     "drain_publications",
     "invoke_root",
     "iter_run_dirs",

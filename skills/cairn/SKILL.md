@@ -106,6 +106,7 @@ its own skill (`/cairn:recall`); `cairn recall --help` shows its args.
 ```bash
 cairn invoke codex --prompt-file brief.md --effort high   # run Codex headlessly, record the exchange
 cairn invoke claude --prompt "…" --profile review          # the mirror direction
+cairn invoke antigravity --prompt "…" --model <slug>       # Google Antigravity (agy); slugs from `agy models`
 cairn invoke status <thread-id> [--follow]                 # health line, progress, answer
 cairn invoke codex --resume <thread-id> --prompt "…"        # continue the same thread, any time later
 cairn invoke cancel | publish <thread-id>                  # stop a run; finish pending export/link/index
@@ -114,7 +115,7 @@ cairn agents list [--session SOURCE:ID] [--all]            # peer runs plus Clau
 cairn agents wait --session SOURCE:ID [--timeout-s N]      # block until the fan-out has exited
 ```
 
-The `invoke-codex` and `invoke-claude` skills drive these; the doctrine for adversarial
+The `invoke-codex`, `invoke-claude` and `invoke-antigravity` skills drive these; the doctrine for adversarial
 review lives in `references/peer-review.md`. Defaults (model, effort, profile, timeouts) are
 config as data under the `invoke` block: `cairn config set invoke.codex.effort medium`.
 
