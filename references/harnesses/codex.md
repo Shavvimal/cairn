@@ -86,7 +86,9 @@ text, without waiting for cron. The three-second callback hands work to a detach
 Run `cairn invoke <peer> … --json` with `exec_command` and a long `yield_time_ms`, keep the
 session handle, and poll with `write_stdin` (an empty write returns new output) until it
 exits; the last stdout line is the JSON result. Read the first stderr line for the thread id
-and poll `cairn invoke status <id>` between writes. Run invoke with escalated permissions:
+and poll `cairn invoke status <id>` between writes, or run `cairn invoke wait <id> --json`
+for one blocking call that prints the result line; `cairn invoke tail <id> --no-follow`
+dumps the events so far, one line each. Run invoke with escalated permissions:
 the sandbox hides the login keychain (`claude -p` reports "Not logged in"), blocks the peer's
 network, and denies writes under `~/.codex` and `~/.claude`. Never start a nested
 `codex exec` inside the sandbox; the engine refuses depth 1 without `--allow-nested`.

@@ -404,7 +404,11 @@ def main(argv: list[str] | None = None) -> int:
     install.add_argument(
         "--grant-commands",
         action="store_true",
-        help="antigravity: also allow cairn's read-only and test shell commands in agy's settings",
+        help=(
+            "antigravity: also write cairn's allow rules (read-only and test commands) and "
+            "deny rules (cloud, database, network, interpreters, history-moving git) to "
+            "agy's settings, printing every rule added"
+        ),
     )
     uninstall = sub.add_parser("uninstall", help="remove owned registration; preserve shared data")
     uninstall.add_argument("--harness", choices=HOOK_HARNESSES)

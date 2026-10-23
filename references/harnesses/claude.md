@@ -80,10 +80,16 @@ handler is not host lifecycle verification.
 
 Start `cairn invoke <peer> … --json` with `Bash` `run_in_background: true` and keep the task
 id; the JSON result line arrives on the task's stdout when it exits, and the host sends a
-completion notice. Read the first stderr line for the thread id. Mid-run, read
-`cairn invoke status <id>`; with `Monitor` available, watch the thread's `events-NN.jsonl`
-under `<data_root>/logs/invoke/<peer>/<id>/`. Stop the monitor afterwards. Silence proves
-nothing: a `silent` activity label past the stall threshold means a probable hang.
+completion notice. The caller is read from `CLAUDE_CODE_SESSION_ID`, so `--parent` is not
+needed. Read the first stderr line for the thread id (it also names the run directory and
+the events path). Mid-run, read `cairn invoke status <id>`; with `Monitor` available, make
+`cairn invoke tail <id>` the monitored command: it prints one line per event (`CMD`,
+`WRITE`, `DENIED`, `MSG`) and exits on `RESULT <outcome>`, so it needs no filter and no
+guess at the events file name. `cairn invoke wait <id> --json` blocks until the round exits
+and prints its result line, when one completion handle is wanted instead of the task
+notice. Silence proves nothing: a `silent` activity label past the stall threshold means a
+probable hang. Quote every shell variable in a helper command (`"$FILES"`, or `xargs`), and
+never write a bare `====` separator: the host shell is zsh.
 
 For a fan-out of `Agent` subagents plus peer runs, `cairn agents list` shows every item the
 current session spawned with its execution state, activity and outcome. Run

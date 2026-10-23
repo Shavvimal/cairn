@@ -47,33 +47,50 @@ exit 1 and the available models in `error`.
 
 ## 3. Profile
 
-Default `--profile review`: `agy --mode plan`, which reads the workspace but defers every
-file write and shell command until a human approves the plan, so a headless run cannot
-change anything. Ask before `edit` (`--mode accept-edits`: file writes apply, shell commands
-stay denied unless the user's `agy` settings allow them) or `full`
-(`--dangerously-skip-permissions`: every tool call approved). `--mode` passes a native agy
-mode directly (`plan`, `accept-edits`, `auto`) and overrides the profile. The record stores
-the exact flags that ran.
+Default `--profile review`: `agy --mode plan`, which reads the workspace and defers every
+file write until a human approves the plan, so a headless run cannot change anything. Ask
+before `edit` (`--mode accept-edits`: file writes apply) or `full`
+(`--dangerously-skip-permissions`: every tool call approved). In `plan` and `accept-edits` a
+shell command runs only when an allow rule covers it (section 3a); `full` needs no rules.
+`--mode` passes a native agy mode directly (`plan`, `accept-edits`, `auto`) and overrides the
+profile. The record stores the exact flags that ran.
 
 ## 3a. Shell permissions (check once per machine)
 
-Headless `agy` cannot prompt, so a shell command without an allow rule in
-`~/.gemini/antigravity-cli/settings.json` is soft-denied and the run continues without it. A
-review that cannot run `grep`, `rg` or `git diff` ends early with nothing useful; the result
-then carries a `permissions:` warning. Fix it once:
+Headless `agy` cannot prompt, so a tool call that needs approval is auto-denied and the turn
+goes on without it; agy still reports success. A review that cannot run `grep`, `rg` or
+`git diff` is weak, and an implementation that cannot run its tests is unverified. Check
+once, before the first run on a machine:
 
 ```bash
-cairn hook install --harness antigravity --grant-commands   # read-only commands + test runners
-agy -p='/permissions'                                        # list what agy allows and denies
+cairn doctor                                                # "antigravity permissions": both rule lists
+cairn hook install --harness antigravity --grant-commands   # write cairn's allow and deny sets
 ```
 
-The grant adds `command(...)` allow rules only (rg, grep, ls, cat, head, tail, find, echo,
+The grant writes `command(...)` allow rules (rg, grep, ls, cat, head, tail, find, echo,
 `sed -n`, read-only `git` subcommands, pytest / ruff / mypy / `uv run` and `make` equivalents)
-and never touches deny rules. A compound command (`a && b`, pipes) runs only when every segment
-has a rule. When agy still denies a call, the result's `usage.denied_actions` names it and the
-`warnings` carry a `permissions:` line; add the missing rule to `permissions.allow` by hand
-when it is not one of the defaults. `cairn doctor` reports the state as `antigravity permissions`. Writes stay
-governed by the profile: `plan` defers them, `accept-edits` applies them.
+and a deny set (`supabase`, `psql`, `terraform`, `aws`, `gcloud`, `kubectl`, `curl`, `wget`,
+`python`, `python3`, `git commit|push|checkout|stash|reset`, `read_file(.env*)`) to
+`~/.gemini/antigravity-cli/settings.json`, keeps every existing rule, skips a deny the user
+allows explicitly, and prints each rule it added. Tell the user what it wrote. A rule matches
+word by word (`command(git log)` covers `git log -3`, not `git` alone), every segment of a
+compound command (`a && b`, pipes) needs its own rule, and a deny rule beats an allow rule.
+
+The engine enforces this per run:
+
+- `--profile edit` or `--mode accept-edits` with no command rule is refused before the
+  spawn: exit 2, `permissions check failed`, the `--grant-commands` line in the message.
+  `--skip-permission-check` starts it anyway for a task that needs no shell.
+- `review` (plan) and `auto` start and carry a `permissions:` warning instead.
+- A round whose peer was refused calls and ended with an empty answer is `status: denied`
+  (exit 2, `retryable: true`); `error` names each refused command and the rule it needs.
+  A refusal beside a real answer stays `succeeded` with a `permissions:` warning that
+  carries the same verdicts; `denied` in the result lists the tool and target of each.
+- The result records `permissions` (the allow and deny rules in force when the round
+  started). A resume after a rule change tells the peer what changed (section 7).
+
+When a project needs a command outside the defaults (`poetry run pytest`, `make format`),
+add it to `permissions.allow` by hand, never to `full`.
 
 ## 3b. Billing route (optional)
 
@@ -118,26 +135,40 @@ cairn invoke antigravity --json --prompt-file <brief.md> [--model <slug>] [--eff
 ```
 
 `agy` chooses the conversation id and reports it in its first event; the engine prints it on
-stderr as soon as it is known. Nested runs are refused at depth 1 unless the user asks for
-`--allow-nested`.
+stderr as soon as it is known, with the run directory and the events path on the same line.
+On Claude the caller is detected from `CLAUDE_CODE_SESSION_ID`, so `--parent` is redundant;
+pass it only from a shell that has no host session. Nested runs are refused at depth 1
+unless the user asks for `--allow-nested`.
 
 ## 5. Watch
 
 ```bash
-cairn invoke status <conversation_id>
+cairn invoke tail <conversation_id>      # one line per event, until the final event
+cairn invoke status <conversation_id>    # health line, progress bullets, answer so far
+cairn invoke wait <conversation_id> --json   # block until the round exits; print its result line
 ```
 
-After the identity line, the health line shows execution state, activity with its age, and
-the last event. Then the progress bullets (tool calls and messages). `silent` beyond the
-stall threshold means a probable hang: wait one more interval, then
+`tail` replays and follows the round's event stream: `START <id> <model>`, `TOOL <name>
+<args>`, `CMD <command>`, `WRITE <path>`, `DENIED <tool> <target>`, `MSG <text>`, and ends
+with `RESULT <outcome>` (exit 0 on `succeeded`, else the round's exit code). On Claude it is
+the whole `Monitor` command; no filter and no guess at the events file name. `wait` is the
+one completion handle: it prints the same JSON line the runner prints and exits with its
+code, so a second waiter loop is never needed.
+
+`status` shows execution state, activity with its age, and the last event, then the progress
+bullets (`run:`, `wrote:`, `denied:`, `tool:`, `message:`). `silent` beyond the stall
+threshold means a probable hang: wait one more interval, then
 `cairn invoke cancel <conversation_id>` and resume with a narrower task, or report. Silence
 from the host task is never completion.
 
 ## 6. Read the result
 
 One JSON line on the task's stdout. Lead with `last_message`. Then check `status`,
-`outcome`, `exit_code`, `retryable`, `warnings` and `publication`. Evaluate critically per
-the doctrine. Exit codes: 0 succeeded; 2 self-check, depth or usage refusal; 75 thread busy;
+`outcome`, `exit_code`, `retryable`, `warnings` and `publication`. Check every claim in
+`last_message` against `files_written` (the paths the peer's write tools finished, from the
+event stream) and the diff: the peer's report can describe a design it abandoned. `denied`
+lists every call agy refused. Evaluate critically per the doctrine. Exit codes: 0 succeeded;
+2 self-check, depth, permissions or usage refusal, or a `denied` round; 75 thread busy;
 124 wall-clock timeout; 125 idle timeout; 130 cancelled; otherwise the `agy` exit code.
 
 ## 7. Debate
@@ -147,8 +178,12 @@ cairn invoke antigravity --json --resume <conversation_id> --prompt "This is <ho
 ```
 
 Resume inherits the recorded cwd, profile, model and effort and continues the same `agy`
-conversation. `agy` cannot fork a conversation, so `--fork` is refused. At most three rounds
-per thread, then escalate to the user with the accepted, dismissed and unresolved lists.
+conversation. When the agy rules changed since the previous round, or that round had
+refusals, cairn prepends a note to the prompt: the rules added and removed, and for each
+refused command whether it is now allowed, still denied, or still unmatched. Nothing to
+restate by hand. `agy` cannot fork a conversation, so `--fork` is refused. At most three
+rounds per thread, then escalate to the user with the accepted, dismissed and unresolved
+lists.
 
 ## 8. Close
 
@@ -162,8 +197,14 @@ session now; if `indexed` is false, `rg` finds them at once and `/search` after
 
 ## Errors
 
-- `warnings` with `permissions:`: agy has no command allow rules, so the run could not use
-  the shell. Run `cairn hook install --harness antigravity --grant-commands` and start again.
+- Exit 2 with `permissions check failed` before any run: an `accept-edits` run with no
+  command rule. Run `cairn hook install --harness antigravity --grant-commands`, then start
+  again; `--skip-permission-check` only for a task that needs no shell.
+- `status: denied` (exit 2, `retryable: true`): agy refused the calls in `denied` and the
+  peer answered nothing. Add the rule `error` names to `permissions.allow` (or run the
+  grant), then `--resume`; the peer is told what changed.
+- `warnings` with `permissions:`: the run answered, but agy refused the calls listed, or no
+  command rule exists at all. Read the verdicts; fix the rules before the next round.
 - Exit 2 before any run: an unknown effort, `--fast` (Codex only), `--fork`, a nested run
   refused, or `billing check failed` (route `gcp` without ADC or a quota project: run the
   `gcloud` command in the message, or set `invoke.antigravity.billing.project`).

@@ -22,7 +22,10 @@ from ..storage import atomic_write, lock_path, locked
 from .antigravity import (
     READ_ONLY_COMMANDS,
     TEST_COMMANDS,
-    grant_commands,
+    command_rules,
+    default_deny_rules,
+    grant_rules,
+    needs_shell_rules,
     permission_rules,
     settings_path,
     shell_rules_present,
@@ -75,33 +78,67 @@ def agy_settings(config: CairnConfig | None) -> Path:
 
 
 def grant_read_only_commands(config: CairnConfig | None, *, tests: bool = True) -> str:
-    """Allow cairn's review (and test-gate) shell commands in agy's settings."""
+    """Allow cairn's review (and test-gate) shell commands in agy's settings and deny
+    the cloud, database, network, interpreter and history-moving commands next to
+    them. Every rule written is printed, so the operator sees the exact diff."""
     path = agy_settings(config)
     commands = READ_ONLY_COMMANDS + (TEST_COMMANDS if tests else ())
     with locked(lock_path(path, "permissions")):
-        added = grant_commands(path, commands)
-    if not added:
-        return f"agy already allows cairn's read-only and test commands ({path})."
-    return (
-        f"Allowed {len(added)} shell commands for headless agy runs in {path} "
-        "(deny rules untouched). List them with: agy -p='/permissions'"
-    )
+        grant = grant_rules(path, command_rules(commands), default_deny_rules())
+    lines = []
+    if not grant["added_allow"] and not grant["added_deny"]:
+        lines.append(f"agy already allows and denies cairn's default rules ({path}).")
+    else:
+        lines.append(
+            f"Wrote {len(grant['added_allow'])} allow and {len(grant['added_deny'])} deny "
+            f"rules for headless agy runs to {path} (existing rules untouched):"
+        )
+        lines += [f"  + allow {rule}" for rule in grant["added_allow"]]
+        lines += [f"  + deny  {rule}" for rule in grant["added_deny"]]
+    lines += [
+        f"  - skipped deny {rule}: it is in permissions.allow, which you chose"
+        for rule in grant["skipped_deny"]
+    ]
+    lines.append("Review them with: agy -p='/permissions'")
+    return "\n".join(lines)
+
+
+def permission_report(config: CairnConfig | None) -> dict:
+    """``{"path", "allow", "deny", "error"}``: the rules agy applies to a headless run."""
+    path = agy_settings(config)
+    try:
+        allow, deny = permission_rules(path)
+    except (OSError, ValueError) as exc:
+        return {"path": str(path), "allow": [], "deny": [], "error": str(exc)}
+    return {"path": str(path), "allow": allow, "deny": deny, "error": None}
 
 
 def permission_warning(config: CairnConfig | None) -> str | None:
-    """Why a headless review would stall, or ``None`` when shell commands may run."""
-    path = agy_settings(config)
-    try:
-        allow, _deny = permission_rules(path)
-    except (OSError, ValueError) as exc:
-        return f"cannot read agy permissions in {path}: {exc}"
-    if shell_rules_present(allow):
+    """Why a headless run would stall, or ``None`` when shell commands may run."""
+    report = permission_report(config)
+    if report["error"]:
+        return f"cannot read agy permissions in {report['path']}: {report['error']}"
+    if shell_rules_present(report["allow"]):
         return None
     return (
-        f"agy has no command allow rules in {path}; a headless run soft-denies every shell "
-        "command (grep, git diff, tests) and a review ends early. Run: cairn hook install "
-        "--harness antigravity --grant-commands"
+        f"agy has no command allow rules in {report['path']}; a headless run auto-denies "
+        "every shell command (grep, git diff, tests). Run: cairn hook install --harness "
+        "antigravity --grant-commands"
     )
+
+
+def permission_problem(
+    config: CairnConfig | None, policy: tuple[str, ...]
+) -> tuple[bool, str | None]:
+    """``(refuse, message)`` for a run under native ``policy``: ``refuse`` when the mode
+    cannot do useful work without a command rule and none exists; a message alone is a
+    warning. ``--dangerously-skip-permissions`` needs no rules at all."""
+    if tuple(policy) == ("--dangerously-skip-permissions",):
+        return False, None
+    message = permission_warning(config)
+    if message is None:
+        return False, None
+    return needs_shell_rules(policy), message
 
 
 def _load(path: Path) -> dict:

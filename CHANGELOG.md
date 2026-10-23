@@ -5,22 +5,56 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.6.1]
+## [2.7.0]
+
+The fix for the dead round in `docs/antigravity-invoke-postmortem.md`: a headless `agy`
+run that was refused one shell command, gave up with an empty answer and still reported
+success, after an 8-minute detour through settings files and hand-written log filters.
 
 ### Added
-- `cairn hook install --harness antigravity --grant-commands` adds `command(...)` allow rules
-  for the read-only commands a review needs (rg, grep, ls, cat, head, tail, find, `sed -n`,
-  read-only `git` subcommands) and the usual test runners to agy's `settings.json`, keeping
-  existing and deny rules. Headless agy soft-denies every shell command without such a rule,
-  so a review ended early with nothing useful. `cairn invoke antigravity` results and
-  `cairn doctor` now warn when no command rule exists, and a result whose agy run
-  soft-denied a tool carries `usage.denied_actions` plus a `permissions:` warning.
+- `cairn invoke antigravity` refuses an `accept-edits` run (`--profile edit`, `--mode
+  accept-edits`) before anything is spawned when agy has no `command(...)` allow rule
+  (exit 2, `permissions check failed`, the `--grant-commands` line in the message), like
+  the billing check. Plan and auto runs still start and carry a `permissions:` warning.
+  `--skip-permission-check` starts an edit run that needs no shell.
+- Outcome `denied` (exit 2, `retryable: true`): a round whose peer refused tool calls for
+  want of a permission and ended with an empty answer. The `error` names each refused
+  command and the exact rule it needs (`command(git log)`, judged against the rules
+  recorded for the round; a compound command lists its unmatched segments). A refusal
+  beside a real answer stays `succeeded` with a `permissions:` warning that carries the
+  same verdicts. The result and `thread.json` carry `denied` (tool and target per
+  refusal) and `permissions` (the allow and deny rules in force when the round started).
+- `cairn hook install --harness antigravity --grant-commands` now also writes a deny set
+  (`supabase`, `psql`, `terraform`, `aws`, `gcloud`, `kubectl`, `curl`, `wget`, `python`,
+  `python3`, `git commit|push|checkout|stash|reset`, `read_file(.env*)` by name), prints
+  every rule it added, and skips a default deny whose target the user allows explicitly
+  (deny beats allow in agy). `cairn doctor` lists both rule sets.
+- `cairn invoke tail <id>`: one line per event of the last round (`START`, `TOOL`, `CMD`,
+  `WRITE`, `DENIED`, `MSG`, `RESULT <outcome>`), replayed from `events-NN.jsonl` and
+  followed until the final event; `--round N`, `--no-follow`, `--json`. Exit 0 on
+  `succeeded`, else the round's exit code. Works for every peer.
+- `cairn invoke wait <id>`: block until the last round exits, print the same result line
+  the runner printed (from `result-NN.json`; an abandoned round is adopted first) and exit
+  with its code. One completion handle instead of a second waiter loop.
+- The result carries `files_written`: every path the peer's write tools finished, from the
+  event stream (antigravity; `null` for peers that do not report writes), so a peer's
+  claims can be checked against what it did. The human summary and the exchange document
+  list them; progress bullets read `run: <cmd>`, `wrote: <path>`, `denied: <tool> <target>`.
+- On `--resume`, cairn prepends a permissions note to the prompt when the agy rules changed
+  since the previous round or that round had refusals: the rules added and removed, and
+  for each refused command whether it is now allowed, still denied by a rule, or still
+  unmatched (so the peer does not retry it). The note is recorded as `permissions.note`.
+- The first stderr line now carries the events path next to the run directory.
+- A `succeeded` round with no final message carries an `empty answer` warning.
 
 ### Fixed
-- `cairn invoke antigravity` passed `--disable-slash-commands`, which agy 1.4.6 treats as
-  disabling `--mode` too ("--mode plan has no effect while slash command expansion is
-  disabled"), so the review profile ran without plan mode and was not read-only. The flag is
-  no longer passed; the prompt starts with cairn's preamble and cannot expand as a command.
+- `cairn invoke antigravity` passed `--disable-slash-commands`, which agy 1.4.6 refuses to
+  combine with `--mode plan` ("--mode plan has no effect while slash command expansion is
+  disabled"), so the review profile ran without plan mode. `accept-edits` was unaffected
+  (the run logs show it applied). The flag is no longer passed; the prompt starts with
+  cairn's preamble and cannot expand as a command.
+- A tool step agy ends in state `ERROR` (how a refusal is reported) was ignored; it now
+  yields the `denied` event, or a `tool failed` bullet for any other error.
 
 ## [2.6.0]
 

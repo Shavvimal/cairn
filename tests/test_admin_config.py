@@ -176,10 +176,19 @@ class TestDoctorInvoke(_ConfigFixture):
                 self.assertIn("warn antigravity permissions - agy has no command allow rules", out)
                 self.assertIn("--grant-commands", out)
                 (store / "settings.json").write_text(
-                    json.dumps({"permissions": {"allow": ["command(rg)"]}})
+                    json.dumps(
+                        {
+                            "permissions": {
+                                "allow": ["command(rg)", "command(git diff)"],
+                                "deny": ["command(curl)"],
+                            }
+                        }
+                    )
                 )
                 _, out = _capture(admin._check_invoke, config.get_config())
-                self.assertIn("ok   antigravity permissions - command allow rules present", out)
+                self.assertIn("ok   antigravity permissions - 2 allow and 1 deny rules in", out)
+                self.assertIn("allow: command(rg), command(git diff)", out)
+                self.assertIn("deny:  command(curl)", out)
             with mock.patch.object(admin.shutil, "which", return_value=None):
                 _, out = _capture(admin._check_invoke, config.get_config())
                 self.assertNotIn("antigravity permissions", out)  # no agy, nothing to check
@@ -206,16 +215,22 @@ class TestDoctorInvoke(_ConfigFixture):
                 )
 
     def test_reports_defaults_and_missing_codex_cache(self):
+        # Only codex is "installed": with agy on PATH the permissions line would read the
+        # developer's real agy settings (the fixture scrubs config, not HOME).
+        def only_codex(name):
+            return "/bin/codex" if name == "codex" else None
+
         with (
             TemporaryDirectory() as codex_home,
             mock.patch.dict(os.environ, {"CODEX_HOME": codex_home}),
         ):
-            with mock.patch.object(admin.shutil, "which", return_value="/bin/codex"):
+            with mock.patch.object(admin.shutil, "which", side_effect=only_codex):
                 _, out = _capture(admin._check_invoke, config.get_config())
             self.assertIn("ok   invoke defaults - codex: model=gpt-6-astra", out)
             self.assertIn("warn codex model cache", out)
+            self.assertNotIn("antigravity permissions", out)
             Path(codex_home, "models_cache.json").write_text("{}")
-            with mock.patch.object(admin.shutil, "which", return_value="/bin/codex"):
+            with mock.patch.object(admin.shutil, "which", side_effect=only_codex):
                 _, out = _capture(admin._check_invoke, config.get_config())
             self.assertNotIn("warn", out)
 

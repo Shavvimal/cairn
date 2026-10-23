@@ -384,20 +384,38 @@ class TestAntigravityHook(StoreFixture):
         self.assertFalse(reg.registration()["registered"])
         self.assertFalse(reg.ownership_path().exists())
 
-    def test_grant_commands_writes_the_store_settings(self):
-        from cairn.harnesses.antigravity import TEST_COMMANDS, permission_rules
+    def test_grant_commands_writes_allow_and_deny_rules_and_prints_them(self):
+        from cairn.harnesses.antigravity import DENY_FILES, TEST_COMMANDS, permission_rules
 
         settings = self.antigravity / "settings.json"
-        settings.write_text(json.dumps({"permissions": {"deny": ["command(git push)"]}}))
+        settings.write_text(
+            json.dumps(
+                {"permissions": {"allow": ["command(python)"], "deny": ["command(git push)"]}}
+            )
+        )
         out = self.run_cli("hook", "install", "--harness", "antigravity", "--grant-commands").stdout
-        self.assertIn("Allowed", out)
+        self.assertIn("Wrote", out)
+        self.assertIn("  + allow command(rg)", out)
+        self.assertIn("  + deny  command(curl)", out)
+        self.assertIn("  + deny  read_file(.env.prod)", out)
+        self.assertNotIn("+ deny  command(git push)", out)  # it was there already
+        # The user allows python explicitly; the default deny must not reverse that.
+        self.assertIn("  - skipped deny command(python): it is in permissions.allow", out)
+        self.assertIn("agy -p='/permissions'", out)
         allow, deny = permission_rules(settings)
+        self.assertEqual(allow[0], "command(python)")
         self.assertIn("command(rg)", allow)
         self.assertIn("command(uv run pytest)", allow)
-        self.assertEqual(deny, ["command(git push)"])
         self.assertGreaterEqual(len(allow), len(TEST_COMMANDS))
+        self.assertEqual(deny[0], "command(git push)")
+        self.assertIn("command(supabase)", deny)
+        self.assertIn("command(git reset)", deny)
+        self.assertNotIn("command(python)", deny)
+        for name in DENY_FILES:
+            self.assertIn(f"read_file({name})", deny)
         out = self.run_cli("hook", "install", "--harness", "antigravity", "--grant-commands").stdout
-        self.assertIn("already allows", out)
+        self.assertIn("already allows and denies", out)
+        self.assertIn("skipped deny command(python)", out)
         result = self.run_cli(
             "hook", "install", "--harness", "codex", "--grant-commands", check=False
         )

@@ -57,7 +57,9 @@ asks for `--allow-nested`.
 ## 5. Watch
 
 ```bash
-cairn invoke status <thread_id>
+cairn invoke status <thread_id>              # health line, progress, answer so far
+cairn invoke tail <thread_id>                # one line per event, until RESULT <outcome>
+cairn invoke wait <thread_id> --json         # block until the round exits; its result line
 ```
 
 After the identity line, the health line shows execution state (`running`, `orphaned`, `exited`), activity

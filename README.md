@@ -198,6 +198,8 @@ an independent pass, and keep the whole exchange searchable:
 ```bash
 cairn invoke codex --json --prompt-file brief.md --effort high   # background it; --json gives one result line
 cairn invoke status <thread-id>                             # health line, progress, answer so far
+cairn invoke tail <thread-id>                               # one line per tool call, until the final event
+cairn invoke wait <thread-id> --json                        # block until the round exits; its result line
 cairn invoke codex --resume <thread-id> --prompt "…"         # continue the same thread, days later too
 cairn invoke claude --prompt "…" --profile review            # the mirror direction
 cairn invoke antigravity --prompt "…" --model gemini-3.1-pro-high   # Google Antigravity (agy), a Gemini opinion
@@ -269,8 +271,10 @@ To change later, edit `sync.enabled` per collection and re-run `cairn doctor` �
 
 Configure with `cairn hook install --harness claude|codex|antigravity`. The Antigravity
 installer writes one named hook (`cairn`) into the global `~/.gemini/config/hooks.json`,
-shared by the agy CLI, the IDE and the Antigravity 2.0 app; `--grant-commands` also allows
-the read-only and test shell commands a headless review needs in agy's `settings.json`. The Codex installer inspects
+shared by the agy CLI, the IDE and the Antigravity 2.0 app; `--grant-commands` also writes
+the allow rules (read-only and test shell commands) and deny rules (cloud, database, network,
+interpreters, history-moving git, dotenv files) a headless run needs into agy's
+`settings.json`, printing every rule it adds. The Codex installer inspects
 actual hook discovery. Codex 0.160.0/0.163.0 currently expose portable skills/onboarding
 but omit portable hooks; Cairn installs a narrowly owned user hook as a fallback. If a
 client discovers the bundled hook, setup removes the fallback instead. Unrelated host
