@@ -83,3 +83,11 @@ when it next starts.
 
 Peer runs (`cairn invoke antigravity`) export the conversation at the end of the round
 without the hook, and link it to the calling session.
+
+## Permissions for headless runs
+
+agy soft-denies any shell command without an allow rule when it cannot prompt. `cairn hook
+install --harness antigravity --grant-commands` adds `command(...)` allow rules for the
+read-only commands a review needs and the usual test runners to `<store>/settings.json`,
+keeping existing rules and every deny rule. `cairn doctor` and each `cairn invoke antigravity`
+result warn when no command rule exists.

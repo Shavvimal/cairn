@@ -27,8 +27,11 @@ class _ConfigFixture(unittest.TestCase):
 
     def setUp(self):
         self._tmp = TemporaryDirectory()
-        self._prev = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "CAIRN_CONFIG")}
-        os.environ.pop("CAIRN_CONFIG", None)
+        # The developer's shell may route agy to GCP; the billing checks must not see it.
+        scrubbed = ("AGY_ADC_AUTH", "GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_CLOUD_LOCATION")
+        self._prev = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "CAIRN_CONFIG", *scrubbed)}
+        for key in ("CAIRN_CONFIG", *scrubbed):
+            os.environ.pop(key, None)
         os.environ["XDG_CONFIG_HOME"] = self._tmp.name
         config.get_config.cache_clear()
         admin._config_init(data_root="/tmp/ctx", enable=["claude", "codex"])
@@ -158,6 +161,29 @@ class TestConfigSetInvoke(_ConfigFixture):
 
 
 class TestDoctorInvoke(_ConfigFixture):
+    def test_reports_antigravity_permissions(self):
+        with TemporaryDirectory() as tmp:
+            store = Path(tmp) / "agy"
+            store.mkdir()
+            self.assertEqual(admin._config_set("antigravity.store", str(store)), 0)
+            config.get_config.cache_clear()
+            env = {"CODEX_HOME": tmp}
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(admin.shutil, "which", return_value="/bin/agy"),
+            ):
+                _, out = _capture(admin._check_invoke, config.get_config())
+                self.assertIn("warn antigravity permissions - agy has no command allow rules", out)
+                self.assertIn("--grant-commands", out)
+                (store / "settings.json").write_text(
+                    json.dumps({"permissions": {"allow": ["command(rg)"]}})
+                )
+                _, out = _capture(admin._check_invoke, config.get_config())
+                self.assertIn("ok   antigravity permissions - command allow rules present", out)
+            with mock.patch.object(admin.shutil, "which", return_value=None):
+                _, out = _capture(admin._check_invoke, config.get_config())
+                self.assertNotIn("antigravity permissions", out)  # no agy, nothing to check
+
     def test_reports_antigravity_billing_readiness(self):
         with TemporaryDirectory() as tmp:
             missing = str(Path(tmp) / "adc.json")

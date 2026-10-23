@@ -384,6 +384,26 @@ class TestAntigravityHook(StoreFixture):
         self.assertFalse(reg.registration()["registered"])
         self.assertFalse(reg.ownership_path().exists())
 
+    def test_grant_commands_writes_the_store_settings(self):
+        from cairn.harnesses.antigravity import TEST_COMMANDS, permission_rules
+
+        settings = self.antigravity / "settings.json"
+        settings.write_text(json.dumps({"permissions": {"deny": ["command(git push)"]}}))
+        out = self.run_cli("hook", "install", "--harness", "antigravity", "--grant-commands").stdout
+        self.assertIn("Allowed", out)
+        allow, deny = permission_rules(settings)
+        self.assertIn("command(rg)", allow)
+        self.assertIn("command(uv run pytest)", allow)
+        self.assertEqual(deny, ["command(git push)"])
+        self.assertGreaterEqual(len(allow), len(TEST_COMMANDS))
+        out = self.run_cli("hook", "install", "--harness", "antigravity", "--grant-commands").stdout
+        self.assertIn("already allows", out)
+        result = self.run_cli(
+            "hook", "install", "--harness", "codex", "--grant-commands", check=False
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("applies to --harness antigravity", result.stderr)
+
     def test_install_and_uninstall_commands(self):
         from cairn.harnesses import antigravity_registration as reg
 

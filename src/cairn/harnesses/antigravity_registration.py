@@ -16,9 +16,17 @@ import shlex
 import sys
 from pathlib import Path
 
-from ..config import CairnConfig, user_config_path
+from ..config import CairnConfig, ConfigError, user_config_path
 from ..runtime import background_environment
 from ..storage import atomic_write, lock_path, locked
+from .antigravity import (
+    READ_ONLY_COMMANDS,
+    TEST_COMMANDS,
+    grant_commands,
+    permission_rules,
+    settings_path,
+    shell_rules_present,
+)
 
 HOOK_NAME = "cairn"
 HOOKS_FILE_ENV = "CAIRN_ANTIGRAVITY_HOOKS_FILE"
@@ -52,6 +60,47 @@ def hook_command(config: CairnConfig) -> str:
             "--harness",
             "antigravity",
         ]
+    )
+
+
+def agy_settings(config: CairnConfig | None) -> Path:
+    """The settings file of the configured agy store (the CLI's by default)."""
+    store = None
+    if config is not None:
+        try:
+            store = config.collection("antigravity-sessions").require_store()
+        except ConfigError:
+            store = None
+    return settings_path(store)
+
+
+def grant_read_only_commands(config: CairnConfig | None, *, tests: bool = True) -> str:
+    """Allow cairn's review (and test-gate) shell commands in agy's settings."""
+    path = agy_settings(config)
+    commands = READ_ONLY_COMMANDS + (TEST_COMMANDS if tests else ())
+    with locked(lock_path(path, "permissions")):
+        added = grant_commands(path, commands)
+    if not added:
+        return f"agy already allows cairn's read-only and test commands ({path})."
+    return (
+        f"Allowed {len(added)} shell commands for headless agy runs in {path} "
+        "(deny rules untouched). List them with: agy -p='/permissions'"
+    )
+
+
+def permission_warning(config: CairnConfig | None) -> str | None:
+    """Why a headless review would stall, or ``None`` when shell commands may run."""
+    path = agy_settings(config)
+    try:
+        allow, _deny = permission_rules(path)
+    except (OSError, ValueError) as exc:
+        return f"cannot read agy permissions in {path}: {exc}"
+    if shell_rules_present(allow):
+        return None
+    return (
+        f"agy has no command allow rules in {path}; a headless run soft-denies every shell "
+        "command (grep, git diff, tests) and a review ends early. Run: cairn hook install "
+        "--harness antigravity --grant-commands"
     )
 
 

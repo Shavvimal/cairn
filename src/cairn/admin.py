@@ -718,6 +718,7 @@ def _check_invoke(config: CairnConfig) -> None:
     )
     _ok("invoke defaults", summary)
     _check_antigravity_billing(config)
+    _check_antigravity_permissions(config)
     if shutil.which("codex") and not models_cache_path().is_file():
         _warn(
             "codex model cache",
@@ -747,6 +748,19 @@ def _check_antigravity_billing(config: CairnConfig) -> None:
         return
     host = f"; the host shell exports {ADC_AUTH_ENV}" if os.environ.get(ADC_AUTH_ENV) else ""
     _ok("antigravity billing", f"route {billing.route}{host}")
+
+
+def _check_antigravity_permissions(config: CairnConfig) -> None:
+    """Warn when headless agy would soft-deny every shell command (no allow rules)."""
+    from .harnesses.antigravity_registration import agy_settings, permission_warning
+
+    if not shutil.which("agy"):
+        return
+    warning = permission_warning(config)
+    if warning:
+        _warn("antigravity permissions", warning)
+    else:
+        _ok("antigravity permissions", f"command allow rules present in {agy_settings(config)}")
 
 
 def doctor_main(argv: list[str] | None = None) -> int:

@@ -76,6 +76,64 @@ def _clip(text: str, limit: int) -> str:
 
 
 TRANSCRIPT_NAMES = ("transcript_full.jsonl", "transcript.jsonl")
+SETTINGS_NAME = "settings.json"
+# Headless agy cannot prompt, so a shell command without an allow rule in
+# ``<app data>/settings.json`` is soft-denied and the run goes on without it; a
+# review that cannot grep or read the diff ends early with nothing. These are the
+# read-only commands a review profile needs, then the test runners a test gate needs.
+# A compound command (``a && b``, pipes) runs only when every segment is allowed, so
+# the plain helpers agents chain in (echo, head, wc) are listed too.
+READ_ONLY_COMMANDS: tuple[str, ...] = (
+    "rg",
+    "grep",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "find",
+    "tree",
+    "stat",
+    "file",
+    "diff",
+    "which",
+    "pwd",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "echo",
+    "printf",
+    "basename",
+    "dirname",
+    "realpath",
+    "jq",
+    "regex:sed -n .*",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git grep",
+    "git blame",
+    "git branch",
+    "git rev-parse",
+    "git ls-files",
+)
+TEST_COMMANDS: tuple[str, ...] = (
+    "pytest",
+    "ruff",
+    "mypy",
+    "uv run pytest",
+    "uv run ruff",
+    "uv run mypy",
+    "make test",
+    "make lint",
+    "make typecheck",
+    "make check",
+    "npm test",
+    "pnpm test",
+)
+DEFAULT_APP_DATA = Path.home() / ".gemini" / "antigravity-cli"
 STOP_EVENT = "Stop"
 
 
@@ -183,10 +241,13 @@ class Antigravity:
         """The headless ``agy`` argv: ``--conversation`` on a resume, a fresh conversation
         otherwise (agy picks the id; the ``init`` event reports it).
 
-        ``--print-timeout 0`` hands the clock to cairn's watchdogs, and
-        ``--disable-slash-commands`` keeps a prompt from expanding as a command. A
-        resume re-sends the permission flags: agy does not keep them with the
-        conversation.
+        ``--print-timeout 0`` hands the clock to cairn's watchdogs. Slash-command
+        expansion stays on: ``--disable-slash-commands`` also disables ``--mode``
+        (agy 1.4.6 warns "--mode plan has no effect while slash command expansion is
+        disabled"), which would silently drop the review profile's read-only mode.
+        The prompt always starts with cairn's preamble, so it cannot expand as a
+        command. A resume re-sends the permission flags: agy does not keep them with
+        the conversation.
         """
         argv = [
             self.executable,
@@ -194,7 +255,6 @@ class Antigravity:
             "stream-json",
             "--print-timeout",
             "0",
-            "--disable-slash-commands",
             *self.policy_argv(request.profile, request.native_policy),
         ]
         if request.resume:
@@ -315,6 +375,15 @@ class Antigravity:
         tokens = result.get("usage")
         if isinstance(tokens, dict):
             usage.update(tokens)
+        # Headless agy soft-denies a tool it could not ask about and still reports
+        # SUCCESS; the result names what was denied.
+        denied = result.get("denied_actions")
+        if isinstance(denied, list) and denied:
+            usage["denied_actions"] = [
+                str(item.get("action") or item.get("display_name") or "tool")
+                for item in denied
+                if isinstance(item, dict)
+            ]
         if status == _SUCCESS:
             return [Event("done", text=text, status="succeeded", usage=usage, raw_type="result")]
         error = result.get("error")
@@ -393,6 +462,58 @@ def resolved_project(billing: BillingPolicy, env: Mapping[str, str]) -> str | No
         return adc_quota_project(path)
     except ValueError:
         return None
+
+
+def settings_path(store: Path | None) -> Path:
+    """agy's user settings (permission rules live under ``permissions.allow``)."""
+    return (store or DEFAULT_APP_DATA) / SETTINGS_NAME
+
+
+def permission_rules(path: Path) -> tuple[list[str], list[str]]:
+    """``(allow, deny)`` rules from an agy settings file; empty when there is none."""
+    if not path.is_file():
+        return [], []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must hold a JSON object")
+    permissions = data.get("permissions") or {}
+    if not isinstance(permissions, dict):
+        raise ValueError(f"{path}: permissions must be an object")
+    allow = [r for r in permissions.get("allow") or [] if isinstance(r, str)]
+    deny = [r for r in permissions.get("deny") or [] if isinstance(r, str)]
+    return allow, deny
+
+
+def shell_rules_present(allow: list[str]) -> bool:
+    """Whether any shell command at all may run headlessly."""
+    return any(rule.startswith("command(") for rule in allow)
+
+
+def command_rules(commands: tuple[str, ...]) -> list[str]:
+    return [f"command({command})" for command in commands]
+
+
+def grant_commands(path: Path, commands: tuple[str, ...]) -> list[str]:
+    """Add ``command(...)`` allow rules to an agy settings file, keeping every other
+    setting and rule (deny rules included) as they are. Returns the rules added."""
+    data: dict = {}
+    if path.is_file():
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{path} must hold a JSON object")
+        data = loaded
+    permissions = data.setdefault("permissions", {})
+    if not isinstance(permissions, dict):
+        raise ValueError(f"{path}: permissions must be an object")
+    allow = permissions.setdefault("allow", [])
+    if not isinstance(allow, list):
+        raise ValueError(f"{path}: permissions.allow must be a list")
+    added = [rule for rule in command_rules(commands) if rule not in allow]
+    if added:
+        allow.extend(added)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return added
 
 
 def billing_problems(billing: BillingPolicy, env: Mapping[str, str]) -> list[str]:

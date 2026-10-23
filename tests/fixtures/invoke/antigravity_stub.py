@@ -241,6 +241,11 @@ emit(
             "duration_seconds": 1.5,
             "num_turns": 1,
             "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+            **(
+                {"denied_actions": [{"action": "command", "display_name": "RunCommand"}]}
+                if os.environ.get("STUB_DENY")
+                else {}
+            ),
         },
     }
 )

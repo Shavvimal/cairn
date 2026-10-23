@@ -1120,6 +1120,14 @@ class Runner:
             problems = billing_problems(self.billing, os.environ)
             if problems:
                 raise UsageError("billing check failed: " + "; ".join(problems))
+        if self.peer == "antigravity":
+            from .harnesses.antigravity_registration import permission_warning
+
+            # Not a refusal: the run still answers, but a review without shell access
+            # ends early, so the result says why before anyone reads the answer.
+            warning = permission_warning(self.config)
+            if warning:
+                self.warnings.append(f"permissions: {warning}")
 
         root = invoke_root(self.config) / self.peer
         session_id: str | None = None
@@ -1630,6 +1638,14 @@ class Runner:
         billing_issue = (self.round.get("billing") or {}).get("problem")
         if billing_issue:
             self.warnings.append(f"billing: {billing_issue}")
+        denied = (self.round.get("usage") or {}).get("denied_actions")
+        if denied:
+            kinds = ", ".join(sorted(set(denied)))
+            self.warnings.append(
+                f"permissions: agy soft-denied {len(denied)} tool call(s) ({kinds}); the answer "
+                "may be incomplete. Allow the commands it needs: cairn hook install --harness "
+                "antigravity --grant-commands (every segment of a compound command needs a rule)"
+            )
         if self.peer in BY_NAME and not _exportable(self.config, self.peer):
             self.warnings.append(
                 f"{BY_NAME[self.peer].collection} is not configured; the peer session was "

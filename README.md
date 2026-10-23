@@ -269,7 +269,8 @@ To change later, edit `sync.enabled` per collection and re-run `cairn doctor` â€
 
 Configure with `cairn hook install --harness claude|codex|antigravity`. The Antigravity
 installer writes one named hook (`cairn`) into the global `~/.gemini/config/hooks.json`,
-shared by the agy CLI, the IDE and the Antigravity 2.0 app. The Codex installer inspects
+shared by the agy CLI, the IDE and the Antigravity 2.0 app; `--grant-commands` also allows
+the read-only and test shell commands a headless review needs in agy's `settings.json`. The Codex installer inspects
 actual hook discovery. Codex 0.160.0/0.163.0 currently expose portable skills/onboarding
 but omit portable hooks; Cairn installs a narrowly owned user hook as a fallback. If a
 client discovers the bundled hook, setup removes the fallback instead. Unrelated host

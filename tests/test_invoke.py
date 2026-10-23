@@ -53,6 +53,12 @@ HOST_HINTS = (
     "CLAUDE_PLUGIN_ROOT",
     "PLUGIN_ROOT",
     "CLAUDE_CODE_SESSION_ID",
+    # The developer's shell may route agy to GCP; the billing tests set these themselves.
+    "AGY_ADC_AUTH",
+    "GOOGLE_CLOUD_QUOTA_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "CLOUDSDK_CONFIG",
 )
 EXPECTED_CODEX_TYPES = [
     "thread.started",
@@ -107,6 +113,10 @@ class InvokeFixture(StoreFixture):
         self.sessions.mkdir(parents=True)
         self.agy_store = self.root / "agy"
         self.agy_store.mkdir()
+        # agy allows one shell command, so runs carry no permissions warning by default.
+        (self.agy_store / "settings.json").write_text(
+            json.dumps({"permissions": {"allow": ["command(rg)"]}})
+        )
         shutil.copy(FIXTURES / "models_cache.json", self.codex_home / "models_cache.json")
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -796,10 +806,8 @@ class TestAntigravityRun(InvokeFixture):
         run_dir = self.run_dirs("antigravity")[0]
         self.assertEqual((run_dir / "answer-01.md").read_text().strip(), "PONG")
         argv = self.stub_calls()[0]["argv"]
-        self.assertEqual(
-            argv[1:6],
-            ["--output-format", "stream-json", "--print-timeout", "0", "--disable-slash-commands"],
-        )
+        self.assertEqual(argv[1:5], ["--output-format", "stream-json", "--print-timeout", "0"])
+        self.assertNotIn("--disable-slash-commands", argv)  # it would cancel --mode plan
         self.assertIn("--mode", argv)
         self.assertTrue(argv[-1].startswith("-p=[cairn invoke] You are antigravity"))
         self.assertNotIn("--conversation", argv)
@@ -1075,6 +1083,26 @@ class TestAntigravityRun(InvokeFixture):
         self.assertEqual([r["billing"]["route"] for r in rounds], ["plan", "gcp"])
         result, _ = self.invoke("codex", "--cd", self.cwd, "--prompt", "x", "--billing", "gcp")
         self.assertEqual(result.returncode, 2)  # argparse: codex has no --billing
+
+    def test_warns_until_agy_allows_shell_commands(self):
+        settings = self.agy_store / "settings.json"
+        settings.unlink()
+        result, data = self.run_agy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "succeeded")
+        self.assertTrue(any(w.startswith("permissions: ") for w in data["warnings"]))
+        self.assertIn("--grant-commands", " ".join(data["warnings"]))
+        settings.write_text(json.dumps({"permissions": {"allow": ["command(grep)"]}}))
+        _, data = self.run_agy()
+        assert data is not None
+        self.assertFalse(any(w.startswith("permissions: ") for w in data["warnings"]))
+        # agy reports what it soft-denied even on a SUCCESS result; the warning says so.
+        _, data = self.run_agy(env={"STUB_DENY": "1"})
+        assert data is not None
+        self.assertEqual(data["status"], "succeeded")
+        self.assertEqual(data["usage"]["denied_actions"], ["command"])
+        self.assertTrue(any("soft-denied 1 tool call(s) (command)" in w for w in data["warnings"]))
 
     def test_usage_refusals(self):
         result, _ = self.run_agy("--fast")

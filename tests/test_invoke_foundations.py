@@ -20,11 +20,16 @@ from cairn.frontmatter import parse_frontmatter, preserved_tail, rewrite_preserv
 from cairn.harnesses import Event, InvokeRequest, get_harness, is_client_error
 from cairn.harnesses.antigravity import (
     MODE_BY_PROFILE,
+    READ_ONLY_COMMANDS,
+    TEST_COMMANDS,
     billing_env,
     billing_problem,
     billing_problems,
+    grant_commands,
     observe_billing,
+    permission_rules,
     resolved_project,
+    shell_rules_present,
     transcript_conversation_id,
 )
 from cairn.harnesses.claude import KEYCHAIN_GUIDANCE, KEYCHAIN_MARKERS, keychain_failure
@@ -783,14 +788,7 @@ AGY_BAD_MODEL = (
 
 class TestAntigravityArgv(unittest.TestCase):
     agy = get_harness("antigravity")
-    HEAD: ClassVar[list[str]] = [
-        "agy",
-        "--output-format",
-        "stream-json",
-        "--print-timeout",
-        "0",
-        "--disable-slash-commands",
-    ]
+    HEAD: ClassVar[list[str]] = ["agy", "--output-format", "stream-json", "--print-timeout", "0"]
 
     def test_fresh_with_schema_model_effort_and_extra(self):
         with TemporaryDirectory() as tmp:
@@ -830,9 +828,11 @@ class TestAntigravityArgv(unittest.TestCase):
             [*self.HEAD, "--mode", "accept-edits", "--input-format", "stream-json", "-p="],
         )
         full = self.agy.exec_argv(_request("antigravity", profile="full"))
-        self.assertEqual(full[6:], ["--dangerously-skip-permissions", "-p=Review this"])
+        self.assertEqual(full[5:], ["--dangerously-skip-permissions", "-p=Review this"])
         native = self.agy.exec_argv(_request("antigravity", native_policy=("--mode", "auto")))
-        self.assertEqual(native[6:8], ["--mode", "auto"])
+        self.assertEqual(native[5:7], ["--mode", "auto"])
+        # --disable-slash-commands would cancel --mode (agy 1.4.6), so it is never passed.
+        self.assertNotIn("--disable-slash-commands", full)
         self.assertEqual(self.agy.policy_argv("review"), MODE_BY_PROFILE["review"])
         with self.assertRaises(ValueError):
             self.agy.policy_argv("bogus")
@@ -916,6 +916,14 @@ class TestAntigravityEvents(unittest.TestCase):
         self.assertTrue(is_client_error("You are not logged into Antigravity."))
         other = agy.parse_event('{"event":"result","result":{"status":"INTERRUPTED"}}')[0]
         self.assertEqual(other.error, "INTERRUPTED: agy ended with status INTERRUPTED")
+        # A soft-denied tool still ends in SUCCESS (verified live); the denial is kept.
+        denied = agy.parse_event(
+            '{"event":"result","result":{"conversation_id":"b85d","status":"SUCCESS","response":"",'
+            '"num_turns":1,"denied_actions":[{"action":"command","display_name":"RunCommand"}]}}'
+        )[0]
+        self.assertEqual(denied.status, "succeeded")
+        assert denied.usage is not None
+        self.assertEqual(denied.usage["denied_actions"], ["command"])
         self.assertEqual(agy.parse_event("garbage")[0].kind, "notice")
         self.assertEqual(agy.parse_event('{"event":"unknown"}'), [])
 
@@ -1117,6 +1125,43 @@ class TestAntigravityStopHook(unittest.TestCase):
         ):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 agy.decode(bad)
+
+
+class TestAntigravityPermissions(unittest.TestCase):
+    """agy soft-denies shell commands without ``permissions.allow`` rules; the grant adds
+    cairn's read-only and test commands and keeps everything else."""
+
+    def test_grant_merges_and_preserves(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store" / "settings.json"
+            self.assertEqual(permission_rules(path), ([], []))
+            self.assertFalse(shell_rules_present([]))
+            added = grant_commands(path, READ_ONLY_COMMANDS)
+            self.assertEqual(len(added), len(READ_ONLY_COMMANDS))
+            allow, deny = permission_rules(path)
+            self.assertIn("command(rg)", allow)
+            self.assertIn("command(regex:sed -n .*)", allow)
+            self.assertIn("command(git diff)", allow)
+            self.assertNotIn("command(git push)", allow)
+            self.assertEqual(deny, [])
+            self.assertTrue(shell_rules_present(allow))
+            # Existing settings and deny rules survive; the grant is idempotent.
+            data = json.loads(path.read_text())
+            data["gcp"] = {"project": "p"}
+            data["permissions"]["deny"] = ["command(git push)", "read_file(.env)"]
+            data["permissions"]["allow"].insert(0, "command(poetry run pytest)")
+            path.write_text(json.dumps(data))
+            self.assertEqual(grant_commands(path, READ_ONLY_COMMANDS), [])
+            added = grant_commands(path, READ_ONLY_COMMANDS + TEST_COMMANDS)
+            self.assertEqual(added, [f"command({c})" for c in TEST_COMMANDS])
+            data = json.loads(path.read_text())
+            self.assertEqual(data["gcp"], {"project": "p"})
+            self.assertEqual(data["permissions"]["deny"], ["command(git push)", "read_file(.env)"])
+            self.assertEqual(data["permissions"]["allow"][0], "command(poetry run pytest)")
+            self.assertFalse(shell_rules_present(["read_file(src/)", "write_file(src/)"]))
+            path.write_text("[]")
+            with self.assertRaises(ValueError):
+                permission_rules(path)
 
 
 if __name__ == "__main__":

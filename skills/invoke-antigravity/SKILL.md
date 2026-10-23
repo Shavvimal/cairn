@@ -55,6 +55,26 @@ stay denied unless the user's `agy` settings allow them) or `full`
 mode directly (`plan`, `accept-edits`, `auto`) and overrides the profile. The record stores
 the exact flags that ran.
 
+## 3a. Shell permissions (check once per machine)
+
+Headless `agy` cannot prompt, so a shell command without an allow rule in
+`~/.gemini/antigravity-cli/settings.json` is soft-denied and the run continues without it. A
+review that cannot run `grep`, `rg` or `git diff` ends early with nothing useful; the result
+then carries a `permissions:` warning. Fix it once:
+
+```bash
+cairn hook install --harness antigravity --grant-commands   # read-only commands + test runners
+agy -p='/permissions'                                        # list what agy allows and denies
+```
+
+The grant adds `command(...)` allow rules only (rg, grep, ls, cat, head, tail, find, echo,
+`sed -n`, read-only `git` subcommands, pytest / ruff / mypy / `uv run` and `make` equivalents)
+and never touches deny rules. A compound command (`a && b`, pipes) runs only when every segment
+has a rule. When agy still denies a call, the result's `usage.denied_actions` names it and the
+`warnings` carry a `permissions:` line; add the missing rule to `permissions.allow` by hand
+when it is not one of the defaults. `cairn doctor` reports the state as `antigravity permissions`. Writes stay
+governed by the profile: `plan` defers them, `accept-edits` applies them.
+
 ## 3b. Billing route (optional)
 
 `agy` bills either the user's consumer plan quota or, through Application Default
@@ -142,6 +162,8 @@ session now; if `indexed` is false, `rg` finds them at once and `/search` after
 
 ## Errors
 
+- `warnings` with `permissions:`: agy has no command allow rules, so the run could not use
+  the shell. Run `cairn hook install --harness antigravity --grant-commands` and start again.
 - Exit 2 before any run: an unknown effort, `--fast` (Codex only), `--fork`, a nested run
   refused, or `billing check failed` (route `gcp` without ADC or a quota project: run the
   `gcloud` command in the message, or set `invoke.antigravity.billing.project`).

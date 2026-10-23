@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1]
+
+### Added
+- `cairn hook install --harness antigravity --grant-commands` adds `command(...)` allow rules
+  for the read-only commands a review needs (rg, grep, ls, cat, head, tail, find, `sed -n`,
+  read-only `git` subcommands) and the usual test runners to agy's `settings.json`, keeping
+  existing and deny rules. Headless agy soft-denies every shell command without such a rule,
+  so a review ended early with nothing useful. `cairn invoke antigravity` results and
+  `cairn doctor` now warn when no command rule exists, and a result whose agy run
+  soft-denied a tool carries `usage.denied_actions` plus a `permissions:` warning.
+
+### Fixed
+- `cairn invoke antigravity` passed `--disable-slash-commands`, which agy 1.4.6 treats as
+  disabling `--mode` too ("--mode plan has no effect while slash command expansion is
+  disabled"), so the review profile ran without plan mode and was not read-only. The flag is
+  no longer passed; the prompt starts with cairn's preamble and cannot expand as a command.
+
 ## [2.6.0]
 
 ### Added
