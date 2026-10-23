@@ -31,6 +31,17 @@ project is missing (agy would fail with ``authentication required`` after the
 spawn), and reads the route agy actually took from its ``--log-file``:
 ``applyAuthResult: ... authMethod=adc, quotaProject=<id>`` and the
 ``aiplatform.googleapis.com/v1/projects/<id>/`` request URLs (verified live).
+
+Permissions (``<app data>/settings.json``, key ``permissions``): headless agy cannot
+prompt, so a tool call that needs approval is auto-denied and the turn goes on without
+it; the ``result`` event then lists ``denied_actions`` and still says ``SUCCESS``. A
+``command(<prefix>)`` allow rule (word-by-word prefix match; ``command(regex:...)`` for
+a pattern) lets a shell command run in every mode but ``--dangerously-skip-permissions``,
+which needs none; every segment of a compound command (``a && b``, pipes) needs its own
+rule, and a deny rule wins over an allow rule. Verified live on agy 1.4.6: a plan-mode
+run executed ``git log`` and ``rg`` once allowed, and a compound command with one
+unlisted segment was denied. :func:`command_verdict` mirrors that matching so cairn can
+name the rule a denied command needs; it is a model of agy's matcher, not agy itself.
 """
 
 from __future__ import annotations
@@ -76,6 +87,105 @@ def _clip(text: str, limit: int) -> str:
 
 
 TRANSCRIPT_NAMES = ("transcript_full.jsonl", "transcript.jsonl")
+SETTINGS_NAME = "settings.json"
+DEFAULT_APP_DATA = Path.home() / ".gemini" / "antigravity-cli"
+# The read-only commands a review profile needs, then the test runners a test gate
+# needs. Plain helpers agents chain in (echo, head, wc) are listed because every
+# segment of a compound command needs its own rule.
+READ_ONLY_COMMANDS: tuple[str, ...] = (
+    "rg",
+    "grep",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "find",
+    "tree",
+    "stat",
+    "file",
+    "diff",
+    "which",
+    "pwd",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "echo",
+    "printf",
+    "basename",
+    "dirname",
+    "realpath",
+    "jq",
+    "regex:sed -n .*",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git grep",
+    "git blame",
+    "git branch",
+    "git rev-parse",
+    "git ls-files",
+)
+TEST_COMMANDS: tuple[str, ...] = (
+    "pytest",
+    "ruff",
+    "mypy",
+    "uv run pytest",
+    "uv run ruff",
+    "uv run mypy",
+    "make test",
+    "make lint",
+    "make typecheck",
+    "make check",
+    "npm test",
+    "pnpm test",
+)
+# What an implementation run must never reach from a headless peer: cloud and
+# database CLIs, network fetchers, bare interpreters (a test runner is allowed by
+# name; ``python -m anything`` is not), and the git verbs that move history. A deny
+# rule wins over an allow rule in agy, so these hold whatever the allow list says.
+DENY_COMMANDS: tuple[str, ...] = (
+    "supabase",
+    "psql",
+    "terraform",
+    "aws",
+    "gcloud",
+    "kubectl",
+    "curl",
+    "wget",
+    "python",
+    "python3",
+    "git commit",
+    "git push",
+    "git checkout",
+    "git stash",
+    "git reset",
+)
+# Secrets a workspace commonly keeps in dotenv files (``read_file`` targets are paths,
+# relative to the workspace; agy documents no globs, so each name is listed).
+DENY_FILES: tuple[str, ...] = (
+    ".env",
+    ".env.local",
+    ".env.dev",
+    ".env.development",
+    ".env.staging",
+    ".env.prod",
+    ".env.production",
+)
+# Launchers whose first word says nothing: the rule to suggest names the subcommand.
+SUBCOMMAND_LAUNCHERS: frozenset[str] = frozenset(
+    {"git", "uv", "make", "npm", "pnpm", "npx", "yarn", "poetry", "cargo", "go", "docker"}
+)
+# agy's tool names for file writes (``TargetFile``) and the shell (``CommandLine``).
+WRITE_TOOLS: frozenset[str] = frozenset(
+    {"write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file"}
+)
+COMMAND_TOOL = "run_command"
+_DENIAL_MARKERS = ("permission check failed", "denied permission", "user denied")
+_PATH_PARAMETERS = ("TargetFile", "AbsolutePath", "Path", "File")
+_COMPOUND_SPLIT = re.compile(r"\s*(?:&&|\|\||\||;)\s*")
 STOP_EVENT = "Stop"
 
 
@@ -116,6 +226,7 @@ class Antigravity:
     executable = "agy"
     manifest_paths: tuple[str, ...] = ()  # hooks are registered by cairn, not a plugin
     update_command = "agy update"
+    reports_files = True  # ``file_written`` events name every path a round wrote
 
     def __init__(self) -> None:
         self._text: dict[int, list[str]] = {}
@@ -183,10 +294,13 @@ class Antigravity:
         """The headless ``agy`` argv: ``--conversation`` on a resume, a fresh conversation
         otherwise (agy picks the id; the ``init`` event reports it).
 
-        ``--print-timeout 0`` hands the clock to cairn's watchdogs, and
-        ``--disable-slash-commands`` keeps a prompt from expanding as a command. A
-        resume re-sends the permission flags: agy does not keep them with the
-        conversation.
+        ``--print-timeout 0`` hands the clock to cairn's watchdogs. Slash-command
+        expansion stays on: ``--disable-slash-commands`` also disables ``--mode``
+        (agy 1.4.6 warns "--mode plan has no effect while slash command expansion is
+        disabled"), which would silently drop the review profile's read-only mode.
+        The prompt always starts with cairn's preamble, so it cannot expand as a
+        command. A resume re-sends the permission flags: agy does not keep them with
+        the conversation.
         """
         argv = [
             self.executable,
@@ -194,7 +308,6 @@ class Antigravity:
             "stream-json",
             "--print-timeout",
             "0",
-            "--disable-slash-commands",
             *self.policy_argv(request.profile, request.native_policy),
         ]
         if request.resume:
@@ -266,44 +379,67 @@ class Antigravity:
             text = "".join(self._text.pop(key, [])).strip()
             return [Event("message", text=text, raw_type=raw)] if text else []
         if step_type == "tool":
-            raw_info = step.get("tool_info")
-            info: dict = raw_info if isinstance(raw_info, dict) else {}
-            name = step.get("tool_name") or info.get("name") or "?"
-            arguments = json.dumps(info.get("parameters") or {}, ensure_ascii=False)
-            error = info.get("error")
-            events: list[Event] = []
-            if key not in self._tools_started:
-                self._tools_started.add(key)
+            return self._tool_events(step, state, key, raw)
+        return []
+
+    def _tool_events(self, step: dict, state: str, key: int, raw: str) -> list[Event]:
+        """Events for one tool step: a ``command`` when the shell is called, a generic
+        ``progress`` bullet for any other tool, then on its terminal state a ``denied``
+        (agy refused it), a ``file_written`` (a write tool succeeded) or a failure note.
+        """
+        raw_info = step.get("tool_info")
+        info: dict = raw_info if isinstance(raw_info, dict) else {}
+        name = str(step.get("tool_name") or info.get("name") or "?")
+        raw_parameters = info.get("parameters")
+        parameters: dict = raw_parameters if isinstance(raw_parameters, dict) else {}
+        command = parameters.get("CommandLine") if name == COMMAND_TOOL else None
+        command = command.strip() if isinstance(command, str) else None
+        target = tool_target(name, parameters)
+        error = info.get("error")
+        events: list[Event] = []
+        if key not in self._tools_started:
+            self._tools_started.add(key)
+            if command:
+                events.append(Event("command", text=command, raw_type=raw))
+            else:
+                arguments = json.dumps(parameters, ensure_ascii=False)
                 events.append(
                     Event("progress", text=f"tool: {name} {_clip(arguments, 120)}", raw_type=raw)
                 )
-            if state == "DONE":
-                self._tools_started.discard(key)
-                if isinstance(error, dict) and (error.get("message") or error.get("type")):
-                    detail = error.get("message") or error.get("type")
-                    events.append(
-                        Event(
-                            "progress",
-                            text=f"tool failed: {name}: {_clip(str(detail), 200)}",
-                            raw_type=raw,
-                        )
-                    )
-            subagents = (step.get("subagent_info") or {}).get("subagents")
-            if state == "DONE" and isinstance(subagents, list) and subagents:
-                names = [
-                    f"{sub.get('type_name', '?')} ({sub.get('role', '?')})"
-                    for sub in subagents
-                    if isinstance(sub, dict)
-                ]
+        if state in ("DONE", "ERROR"):
+            self._tools_started.discard(key)
+            detail = None
+            if isinstance(error, dict):
+                detail = error.get("message") or error.get("type")
+            if detail and is_denial(str(detail)):
+                events.append(
+                    Event("denied", text=command or target or name, error=name, raw_type=raw)
+                )
+            elif detail:
                 events.append(
                     Event(
                         "progress",
-                        text=f"subagents: {_clip(', '.join(names), 200)}",
+                        text=f"tool failed: {name}: {_clip(str(detail), 200)}",
                         raw_type=raw,
                     )
                 )
-            return events
-        return []
+            elif state == "DONE" and name in WRITE_TOOLS and target:
+                events.append(Event("file_written", text=target, raw_type=raw))
+        subagents = (step.get("subagent_info") or {}).get("subagents")
+        if state == "DONE" and isinstance(subagents, list) and subagents:
+            names = [
+                f"{sub.get('type_name', '?')} ({sub.get('role', '?')})"
+                for sub in subagents
+                if isinstance(sub, dict)
+            ]
+            events.append(
+                Event(
+                    "progress",
+                    text=f"subagents: {_clip(', '.join(names), 200)}",
+                    raw_type=raw,
+                )
+            )
+        return events
 
     def _result_events(self, result: dict) -> list[Event]:
         status = str(result.get("status") or "")
@@ -315,6 +451,15 @@ class Antigravity:
         tokens = result.get("usage")
         if isinstance(tokens, dict):
             usage.update(tokens)
+        # Headless agy soft-denies a tool it could not ask about and still reports
+        # SUCCESS; the result names what was denied.
+        denied = result.get("denied_actions")
+        if isinstance(denied, list) and denied:
+            usage["denied_actions"] = [
+                str(item.get("action") or item.get("display_name") or "tool")
+                for item in denied
+                if isinstance(item, dict)
+            ]
         if status == _SUCCESS:
             return [Event("done", text=text, status="succeeded", usage=usage, raw_type="result")]
         error = result.get("error")
@@ -393,6 +538,182 @@ def resolved_project(billing: BillingPolicy, env: Mapping[str, str]) -> str | No
         return adc_quota_project(path)
     except ValueError:
         return None
+
+
+def settings_path(store: Path | None) -> Path:
+    """agy's user settings (permission rules live under ``permissions.allow`` / ``deny``)."""
+    return (store or DEFAULT_APP_DATA) / SETTINGS_NAME
+
+
+def permission_rules(path: Path) -> tuple[list[str], list[str]]:
+    """``(allow, deny)`` rules from an agy settings file; empty when there is none."""
+    if not path.is_file():
+        return [], []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must hold a JSON object")
+    permissions = data.get("permissions") or {}
+    if not isinstance(permissions, dict):
+        raise ValueError(f"{path}: permissions must be an object")
+    allow = [r for r in permissions.get("allow") or [] if isinstance(r, str)]
+    deny = [r for r in permissions.get("deny") or [] if isinstance(r, str)]
+    return allow, deny
+
+
+def shell_rules_present(allow: list[str]) -> bool:
+    """Whether any shell command at all may run headlessly."""
+    return any(rule.startswith("command(") for rule in allow)
+
+
+def needs_shell_rules(policy: tuple[str, ...]) -> bool:
+    """Whether a run under these native flags is useless without a ``command`` rule.
+
+    ``--dangerously-skip-permissions`` approves everything. ``plan`` defers writes and
+    still answers from what it reads, and ``auto`` runs sandboxed commands on its own,
+    so both only warn. ``accept-edits`` is the implementation mode: a change nobody
+    could test is the dead round this check exists to prevent.
+    """
+    return tuple(policy) == ("--mode", "accept-edits")
+
+
+def command_rules(commands: tuple[str, ...]) -> list[str]:
+    return [f"command({command})" for command in commands]
+
+
+def default_deny_rules() -> list[str]:
+    """The deny set ``--grant-commands`` writes next to the allow set."""
+    return command_rules(DENY_COMMANDS) + [f"read_file({name})" for name in DENY_FILES]
+
+
+def rule_parts(rule: str) -> tuple[str, str] | None:
+    """``("command", "git push")`` for ``command(git push)``; ``None`` when malformed."""
+    match = re.fullmatch(r"\s*(\w+)\((.*)\)\s*", rule, re.DOTALL)
+    return (match.group(1), match.group(2).strip()) if match else None
+
+
+def command_segments(command: str) -> list[str]:
+    """The parts of a compound command that agy checks one by one."""
+    return [part.strip() for part in _COMPOUND_SPLIT.split(command.strip()) if part.strip()]
+
+
+def command_matches(target: str, segment: str) -> bool:
+    """Whether a ``command(<target>)`` rule covers ``segment`` the way agy matches: a
+    ``regex:`` pattern from the start of the segment, else word-by-word prefix."""
+    if target == "*":
+        return True
+    if target.startswith("regex:"):
+        try:
+            return re.match(target[len("regex:") :], segment) is not None
+        except re.error:
+            return False
+    words = segment.split()
+    wanted = target.split()
+    return bool(wanted) and words[: len(wanted)] == wanted
+
+
+def _command_targets(rules: list[str]) -> list[str]:
+    targets = []
+    for rule in rules:
+        parts = rule_parts(rule)
+        if parts and parts[0] == "command":
+            targets.append(parts[1])
+    return targets
+
+
+def command_verdict(command: str, allow: list[str], deny: list[str]) -> dict:
+    """What agy's rules say about one command line.
+
+    ``{"verdict": "allowed" | "denied" | "unmatched", "denied_by": [...],
+    "unmatched": [segments], "suggest": [rules]}``: ``denied`` when a deny rule hits
+    any segment (nothing to suggest: it is denied on purpose), ``unmatched`` when a
+    segment has no allow rule (``suggest`` names the rule that would cover each one),
+    else ``allowed``.
+    """
+    allowed, denied = _command_targets(allow), _command_targets(deny)
+    denied_by: list[str] = []
+    unmatched: list[str] = []
+    for segment in command_segments(command):
+        hits = [t for t in denied if command_matches(t, segment)]
+        if hits:
+            denied_by.extend(f"command({t})" for t in hits)
+        elif not any(command_matches(t, segment) for t in allowed):
+            unmatched.append(segment)
+    if denied_by:
+        return {"verdict": "denied", "denied_by": denied_by, "unmatched": [], "suggest": []}
+    if unmatched:
+        suggest = []
+        for segment in unmatched:
+            rule = f"command({suggested_prefix(segment)})"
+            if rule not in suggest:
+                suggest.append(rule)
+        return {"verdict": "unmatched", "denied_by": [], "unmatched": unmatched, "suggest": suggest}
+    return {"verdict": "allowed", "denied_by": [], "unmatched": [], "suggest": []}
+
+
+def suggested_prefix(segment: str) -> str:
+    """The allow-rule target for a command: its first word, or the first two for a
+    launcher whose first word says nothing (``git``, ``uv``, ``make``, ...)."""
+    words = segment.split()
+    if not words:
+        return segment.strip()
+    if words[0] in SUBCOMMAND_LAUNCHERS and len(words) > 1 and not words[1].startswith("-"):
+        return " ".join(words[:2])
+    return words[0]
+
+
+def is_denial(message: str) -> bool:
+    """Whether a tool error says agy refused the call for want of a permission."""
+    low = message.lower()
+    return any(marker in low for marker in _DENIAL_MARKERS)
+
+
+def tool_target(name: str, parameters: dict) -> str | None:
+    """The path a file tool acts on, or the command the shell tool runs."""
+    if name == COMMAND_TOOL:
+        command = parameters.get("CommandLine")
+        return command.strip() if isinstance(command, str) and command.strip() else None
+    for key in _PATH_PARAMETERS:
+        value = parameters.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def grant_rules(path: Path, allow: list[str], deny: list[str]) -> dict:
+    """Add allow and deny rules to an agy settings file, keeping every other setting
+    and every existing rule. A default deny rule whose target the user already allows
+    explicitly is skipped, because in agy deny beats allow and the grant must never
+    silently reverse a choice the user made. Returns ``{"added_allow", "added_deny",
+    "skipped_deny"}``; nothing is written when nothing changes.
+    """
+    data: dict = {}
+    if path.is_file():
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{path} must hold a JSON object")
+        data = loaded
+    permissions = data.setdefault("permissions", {})
+    if not isinstance(permissions, dict):
+        raise ValueError(f"{path}: permissions must be an object")
+    current_allow = permissions.setdefault("allow", [])
+    current_deny = permissions.setdefault("deny", [])
+    for key, value in (("allow", current_allow), ("deny", current_deny)):
+        if not isinstance(value, list):
+            raise ValueError(f"{path}: permissions.{key} must be a list")
+    added_allow = [rule for rule in allow if rule not in current_allow]
+    skipped_deny = [rule for rule in deny if rule in current_allow and rule not in current_deny]
+    added_deny = [rule for rule in deny if rule not in current_deny and rule not in skipped_deny]
+    if added_allow or added_deny:
+        current_allow.extend(added_allow)
+        current_deny.extend(added_deny)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return {"added_allow": added_allow, "added_deny": added_deny, "skipped_deny": skipped_deny}
+
+
+def grant_commands(path: Path, commands: tuple[str, ...]) -> list[str]:
+    """Add ``command(...)`` allow rules only (no deny set). Returns the rules added."""
+    return list(grant_rules(path, command_rules(commands), [])["added_allow"])
 
 
 def billing_problems(billing: BillingPolicy, env: Mapping[str, str]) -> list[str]:

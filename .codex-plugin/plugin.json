@@ -1,6 +1,6 @@
 {
   "name": "cairn",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "Local, searchable memory across Claude, Codex, Cursor and Granola.",
   "skills": "./skills/",
   "onboardingSkill": "./skills/setup/SKILL.md",

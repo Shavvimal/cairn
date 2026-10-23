@@ -32,6 +32,15 @@ Individual targets are available too: `make lint`, `make format`, `make typechec
 
 CI runs the same checks across Python 3.11, 3.12, and 3.13. A PR must be green before it can merge.
 
+## Public-repo hygiene
+
+This repository is public. Do not commit a private project or client name, a private
+repository link, an absolute home directory path, a personal email or a cloud account id,
+in files, commit messages or PR text. Anonymise a post-mortem or plan that comes from work
+on a private codebase. `tests/test_public_hygiene.py` fails the gate on the generic shapes
+and, locally, on the names you list in `$XDG_CONFIG_HOME/cairn/private-terms` (untracked,
+one per line). See `CLAUDE.md` for the full rule.
+
 ## Adding a new source
 
 Each source is a thin adapter over the shared renderer. Adding one is typically:

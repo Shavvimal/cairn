@@ -20,6 +20,9 @@ from cairn.harnesses import get_harness
 from cairn.store import SCHEMA_VERSION, SessionStore, bounded_content
 
 HOST_IDENTITY_HINTS = (
+    "AGY_ADC_AUTH",
+    "GOOGLE_CLOUD_QUOTA_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_SESSION_ID",
     "CODEX_THREAD_ID",

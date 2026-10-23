@@ -16,9 +16,20 @@ import shlex
 import sys
 from pathlib import Path
 
-from ..config import CairnConfig, user_config_path
+from ..config import CairnConfig, ConfigError, user_config_path
 from ..runtime import background_environment
 from ..storage import atomic_write, lock_path, locked
+from .antigravity import (
+    READ_ONLY_COMMANDS,
+    TEST_COMMANDS,
+    command_rules,
+    default_deny_rules,
+    grant_rules,
+    needs_shell_rules,
+    permission_rules,
+    settings_path,
+    shell_rules_present,
+)
 
 HOOK_NAME = "cairn"
 HOOKS_FILE_ENV = "CAIRN_ANTIGRAVITY_HOOKS_FILE"
@@ -53,6 +64,81 @@ def hook_command(config: CairnConfig) -> str:
             "antigravity",
         ]
     )
+
+
+def agy_settings(config: CairnConfig | None) -> Path:
+    """The settings file of the configured agy store (the CLI's by default)."""
+    store = None
+    if config is not None:
+        try:
+            store = config.collection("antigravity-sessions").require_store()
+        except ConfigError:
+            store = None
+    return settings_path(store)
+
+
+def grant_read_only_commands(config: CairnConfig | None, *, tests: bool = True) -> str:
+    """Allow cairn's review (and test-gate) shell commands in agy's settings and deny
+    the cloud, database, network, interpreter and history-moving commands next to
+    them. Every rule written is printed, so the operator sees the exact diff."""
+    path = agy_settings(config)
+    commands = READ_ONLY_COMMANDS + (TEST_COMMANDS if tests else ())
+    with locked(lock_path(path, "permissions")):
+        grant = grant_rules(path, command_rules(commands), default_deny_rules())
+    lines = []
+    if not grant["added_allow"] and not grant["added_deny"]:
+        lines.append(f"agy already allows and denies cairn's default rules ({path}).")
+    else:
+        lines.append(
+            f"Wrote {len(grant['added_allow'])} allow and {len(grant['added_deny'])} deny "
+            f"rules for headless agy runs to {path} (existing rules untouched):"
+        )
+        lines += [f"  + allow {rule}" for rule in grant["added_allow"]]
+        lines += [f"  + deny  {rule}" for rule in grant["added_deny"]]
+    lines += [
+        f"  - skipped deny {rule}: it is in permissions.allow, which you chose"
+        for rule in grant["skipped_deny"]
+    ]
+    lines.append("Review them with: agy -p='/permissions'")
+    return "\n".join(lines)
+
+
+def permission_report(config: CairnConfig | None) -> dict:
+    """``{"path", "allow", "deny", "error"}``: the rules agy applies to a headless run."""
+    path = agy_settings(config)
+    try:
+        allow, deny = permission_rules(path)
+    except (OSError, ValueError) as exc:
+        return {"path": str(path), "allow": [], "deny": [], "error": str(exc)}
+    return {"path": str(path), "allow": allow, "deny": deny, "error": None}
+
+
+def permission_warning(config: CairnConfig | None) -> str | None:
+    """Why a headless run would stall, or ``None`` when shell commands may run."""
+    report = permission_report(config)
+    if report["error"]:
+        return f"cannot read agy permissions in {report['path']}: {report['error']}"
+    if shell_rules_present(report["allow"]):
+        return None
+    return (
+        f"agy has no command allow rules in {report['path']}; a headless run auto-denies "
+        "every shell command (grep, git diff, tests). Run: cairn hook install --harness "
+        "antigravity --grant-commands"
+    )
+
+
+def permission_problem(
+    config: CairnConfig | None, policy: tuple[str, ...]
+) -> tuple[bool, str | None]:
+    """``(refuse, message)`` for a run under native ``policy``: ``refuse`` when the mode
+    cannot do useful work without a command rule and none exists; a message alone is a
+    warning. ``--dangerously-skip-permissions`` needs no rules at all."""
+    if tuple(policy) == ("--dangerously-skip-permissions",):
+        return False, None
+    message = permission_warning(config)
+    if message is None:
+        return False, None
+    return needs_shell_rules(policy), message
 
 
 def _load(path: Path) -> dict:

@@ -83,3 +83,27 @@ when it next starts.
 
 Peer runs (`cairn invoke antigravity`) export the conversation at the end of the round
 without the hook, and link it to the calling session.
+
+## Permissions for headless runs
+
+Headless agy cannot prompt, so a tool call that needs approval is auto-denied and the turn
+goes on without it; the `result` still says `SUCCESS` and lists `denied_actions`. Rules live
+in `<store>/settings.json` under `permissions.allow` / `permissions.deny`: `command(<prefix>)`
+matches a shell command word by word (`command(git log)` covers `git log -3`, not `git`
+alone), `command(regex:...)` a pattern, `read_file(<path>)` a file; every segment of a
+compound command needs its own rule and a deny rule beats an allow rule. Allowed commands run
+in plan mode too (verified live); `--dangerously-skip-permissions` needs no rules.
+
+`cairn hook install --harness antigravity --grant-commands` writes cairn's allow set (the
+read-only commands a review needs and the usual test runners) and deny set (`supabase`,
+`psql`, `terraform`, `aws`, `gcloud`, `kubectl`, `curl`, `wget`, `python`, `python3`, the
+history-moving `git` verbs, `read_file(.env*)` by name), keeps every existing rule, skips a
+deny whose target the user allows explicitly, and prints each rule it added. `cairn doctor`
+lists both sets.
+
+`cairn invoke antigravity` refuses an `accept-edits` run with no command rule before the
+spawn (exit 2) and warns on the others. A round whose peer was refused calls and answered
+nothing ends as `denied` (exit 2, retryable) with the rule each command needs in `error`; a
+refusal beside an answer is a `permissions:` warning. The result records `denied`,
+`files_written` and the `permissions` in force, and a resume after a rule change tells the
+peer what changed and which refused commands it may now run.

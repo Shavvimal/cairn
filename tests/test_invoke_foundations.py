@@ -19,12 +19,26 @@ from cairn import config, hooks, qmd
 from cairn.frontmatter import parse_frontmatter, preserved_tail, rewrite_preserved_tail
 from cairn.harnesses import Event, InvokeRequest, get_harness, is_client_error
 from cairn.harnesses.antigravity import (
+    DENY_COMMANDS,
+    DENY_FILES,
     MODE_BY_PROFILE,
+    READ_ONLY_COMMANDS,
+    TEST_COMMANDS,
     billing_env,
     billing_problem,
     billing_problems,
+    command_segments,
+    command_verdict,
+    default_deny_rules,
+    grant_commands,
+    grant_rules,
+    is_denial,
+    needs_shell_rules,
     observe_billing,
+    permission_rules,
     resolved_project,
+    shell_rules_present,
+    suggested_prefix,
     transcript_conversation_id,
 )
 from cairn.harnesses.claude import KEYCHAIN_GUIDANCE, KEYCHAIN_MARKERS, keychain_failure
@@ -783,14 +797,7 @@ AGY_BAD_MODEL = (
 
 class TestAntigravityArgv(unittest.TestCase):
     agy = get_harness("antigravity")
-    HEAD: ClassVar[list[str]] = [
-        "agy",
-        "--output-format",
-        "stream-json",
-        "--print-timeout",
-        "0",
-        "--disable-slash-commands",
-    ]
+    HEAD: ClassVar[list[str]] = ["agy", "--output-format", "stream-json", "--print-timeout", "0"]
 
     def test_fresh_with_schema_model_effort_and_extra(self):
         with TemporaryDirectory() as tmp:
@@ -830,9 +837,11 @@ class TestAntigravityArgv(unittest.TestCase):
             [*self.HEAD, "--mode", "accept-edits", "--input-format", "stream-json", "-p="],
         )
         full = self.agy.exec_argv(_request("antigravity", profile="full"))
-        self.assertEqual(full[6:], ["--dangerously-skip-permissions", "-p=Review this"])
+        self.assertEqual(full[5:], ["--dangerously-skip-permissions", "-p=Review this"])
         native = self.agy.exec_argv(_request("antigravity", native_policy=("--mode", "auto")))
-        self.assertEqual(native[6:8], ["--mode", "auto"])
+        self.assertEqual(native[5:7], ["--mode", "auto"])
+        # --disable-slash-commands would cancel --mode (agy 1.4.6), so it is never passed.
+        self.assertNotIn("--disable-slash-commands", full)
         self.assertEqual(self.agy.policy_argv("review"), MODE_BY_PROFILE["review"])
         with self.assertRaises(ValueError):
             self.agy.policy_argv("bogus")
@@ -893,16 +902,63 @@ class TestAntigravityEvents(unittest.TestCase):
             '"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":'
             '{"CommandLine":"rm -rf /"},"error":{"type":"PERMISSION_DENIED","message":"denied"}}}}'
         )
-        self.assertEqual(
-            [e.text for e in failed],
-            ['tool: run_command {"CommandLine": "rm -rf /"}', "tool failed: run_command: denied"],
-        )
+        # The shell call is a structured ``command`` event; a plain tool error (not a
+        # permission refusal) stays a failure note.
+        self.assertEqual([e.kind for e in failed], ["command", "progress"])
+        self.assertEqual([e.text for e in failed], ["rm -rf /", "tool failed: run_command: denied"])
         sub = agy.parse_event(
             '{"event":"step_update","step_update":{"step_index":8,"state":"DONE","step_type":'
             '"tool","tool_name":"invoke_subagent","subagent_info":{"subagents":[{"type_name":'
             '"researcher","role":"worker","conversation_id":"c2"}]}}}'
         )
         self.assertEqual(sub[-1].text, "subagents: researcher (worker)")
+
+    def test_refusals_and_writes_are_structured(self):
+        """The shapes agy 1.4.6 emitted live: a refused ``run_command`` ends in state
+        ERROR with "permission check failed"; a write tool ends DONE with no output."""
+        agy = get_harness("antigravity")
+        refused_line = (
+            '{"event":"step_update","step_update":{"step_index":26,"state":"%s","step_type":'
+            '"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":'
+            '{"CommandLine":"rg foo src"}%s}}}'
+        )
+        error = (
+            ',"error":{"type":"TOOL_ERROR","message":"permission check failed for command '
+            '\\"rg foo src\\": user denied permission to run command:\\nrg foo src\\nDo not '
+            'attempt to circumvent this denial."}'
+        )
+        started = agy.parse_event(refused_line % ("ACTIVE", ""))
+        self.assertEqual([(e.kind, e.text) for e in started], [("command", "rg foo src")])
+        ended = agy.parse_event(refused_line % ("ERROR", error))
+        self.assertEqual(len(ended), 1)
+        self.assertEqual(
+            (ended[0].kind, ended[0].text, ended[0].error), ("denied", "rg foo src", "run_command")
+        )
+        write_line = (
+            '{"event":"step_update","step_update":{"step_index":108,"state":"%s","step_type":'
+            '"tool","tool_name":"write_to_file","tool_info":{"name":"write_to_file","parameters":'
+            '{"TargetFile":"/repo/a.sql"}}}}'
+        )
+        started = agy.parse_event(write_line % "ACTIVE")
+        self.assertEqual(started[0].kind, "progress")
+        self.assertTrue(str(started[0].text).startswith("tool: write_to_file"))
+        ended = agy.parse_event(write_line % "DONE")
+        self.assertEqual([(e.kind, e.text) for e in ended], [("file_written", "/repo/a.sql")])
+        # A replace that was refused is a refusal, not a write.
+        refused_write = (
+            '{"event":"step_update","step_update":{"step_index":9,"state":"DONE","step_type":'
+            '"tool","tool_name":"replace_file_content","tool_info":{"name":"replace_file_content",'
+            '"parameters":{"TargetFile":"/repo/b.py"},"error":{"type":"TOOL_ERROR","message":'
+            '"user denied permission to write"}}}}'
+        )
+        events = agy.parse_event(refused_write)
+        self.assertEqual(
+            [(e.kind, e.text, e.error) for e in events][-1],
+            ("denied", "/repo/b.py", "replace_file_content"),
+        )
+        self.assertTrue(is_denial("Permission check failed for command"))
+        self.assertFalse(is_denial("context canceled"))
+        self.assertTrue(getattr(agy, "reports_files", False))
 
     def test_bad_model_is_a_failed_done_and_a_client_error(self):
         agy = get_harness("antigravity")
@@ -916,6 +972,14 @@ class TestAntigravityEvents(unittest.TestCase):
         self.assertTrue(is_client_error("You are not logged into Antigravity."))
         other = agy.parse_event('{"event":"result","result":{"status":"INTERRUPTED"}}')[0]
         self.assertEqual(other.error, "INTERRUPTED: agy ended with status INTERRUPTED")
+        # A soft-denied tool still ends in SUCCESS (verified live); the denial is kept.
+        denied = agy.parse_event(
+            '{"event":"result","result":{"conversation_id":"b85d","status":"SUCCESS","response":"",'
+            '"num_turns":1,"denied_actions":[{"action":"command","display_name":"RunCommand"}]}}'
+        )[0]
+        self.assertEqual(denied.status, "succeeded")
+        assert denied.usage is not None
+        self.assertEqual(denied.usage["denied_actions"], ["command"])
         self.assertEqual(agy.parse_event("garbage")[0].kind, "notice")
         self.assertEqual(agy.parse_event('{"event":"unknown"}'), [])
 
@@ -947,12 +1011,12 @@ class TestAntigravityBilling(unittest.TestCase):
 
     LOG = (
         "I1023 10:53:39.862890       1 server_oauth.go:224] applyAuthResult: "
-        "email=s@x.com, authMethod=adc, quotaProject=gen-lang-client-0002376644\n"
+        "email=s@x.com, authMethod=adc, quotaProject=example-quota-project\n"
         "I1023 10:53:43.468255      63 http_helpers.go:349] URL: https://aiplatform."
-        "googleapis.com/v1/projects/gen-lang-client-0002376644/locations/global/publishers/"
+        "googleapis.com/v1/projects/example-quota-project/locations/global/publishers/"
         "google/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse ResponseID: a\n"
         "I1023 10:53:45.166799     433 http_helpers.go:349] URL: https://aiplatform."
-        "googleapis.com/v1/projects/gen-lang-client-0002376644/locations/global/publishers/"
+        "googleapis.com/v1/projects/example-quota-project/locations/global/publishers/"
         "google/models/gemini-4-argon:streamGenerateContent?alt=sse ResponseID: b\n"
     )
 
@@ -1042,7 +1106,7 @@ class TestAntigravityBilling(unittest.TestCase):
             )
             log.write_text(self.LOG)
             observed = observe_billing(log)
-        project = "gen-lang-client-0002376644"
+        project = "example-quota-project"
         self.assertEqual(
             observed,
             {"auth_method": "adc", "quota_project": project, "vertex_projects": [project]},
@@ -1052,7 +1116,8 @@ class TestAntigravityBilling(unittest.TestCase):
         self.assertIsNone(billing_problem("inherit", None, observed))
         self.assertIn("plan route requested", billing_problem("plan", None, observed) or "")
         self.assertIn(
-            "quotaProject=gen-lang", billing_problem("gcp", "other-project", observed) or ""
+            "quotaProject=example-quota-project",
+            billing_problem("gcp", "other-project", observed) or "",
         )
         consumer = {"auth_method": "gcp", "quota_project": project, "vertex_projects": []}
         self.assertIn("authMethod=gcp", billing_problem("gcp", project, consumer) or "")
@@ -1117,6 +1182,107 @@ class TestAntigravityStopHook(unittest.TestCase):
         ):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 agy.decode(bad)
+
+
+class TestAntigravityPermissions(unittest.TestCase):
+    """agy auto-denies shell commands without ``permissions.allow`` rules; the grant adds
+    cairn's allow and deny sets and keeps everything else, and the matcher mirrors agy's
+    word-by-word prefix rules so a refusal can name the rule it needs."""
+
+    def test_grant_merges_and_preserves(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store" / "settings.json"
+            self.assertEqual(permission_rules(path), ([], []))
+            self.assertFalse(shell_rules_present([]))
+            added = grant_commands(path, READ_ONLY_COMMANDS)
+            self.assertEqual(len(added), len(READ_ONLY_COMMANDS))
+            allow, deny = permission_rules(path)
+            self.assertIn("command(rg)", allow)
+            self.assertIn("command(regex:sed -n .*)", allow)
+            self.assertIn("command(git diff)", allow)
+            self.assertNotIn("command(git push)", allow)
+            self.assertEqual(deny, [])
+            self.assertTrue(shell_rules_present(allow))
+            # Existing settings and deny rules survive; the grant is idempotent.
+            data = json.loads(path.read_text())
+            data["gcp"] = {"project": "p"}
+            data["permissions"]["deny"] = ["command(git push)", "read_file(.env)"]
+            data["permissions"]["allow"].insert(0, "command(poetry run pytest)")
+            path.write_text(json.dumps(data))
+            self.assertEqual(grant_commands(path, READ_ONLY_COMMANDS), [])
+            added = grant_commands(path, READ_ONLY_COMMANDS + TEST_COMMANDS)
+            self.assertEqual(added, [f"command({c})" for c in TEST_COMMANDS])
+            data = json.loads(path.read_text())
+            self.assertEqual(data["gcp"], {"project": "p"})
+            self.assertEqual(data["permissions"]["deny"], ["command(git push)", "read_file(.env)"])
+            self.assertEqual(data["permissions"]["allow"][0], "command(poetry run pytest)")
+            self.assertFalse(shell_rules_present(["read_file(src/)", "write_file(src/)"]))
+            path.write_text("[]")
+            with self.assertRaises(ValueError):
+                permission_rules(path)
+
+    def test_deny_set_is_written_once_and_never_overrides_an_explicit_allow(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(
+                json.dumps(
+                    {"permissions": {"allow": ["command(python)"], "deny": ["command(aws)"]}}
+                )
+            )
+            grant = grant_rules(path, ["command(rg)"], default_deny_rules())
+            self.assertEqual(grant["added_allow"], ["command(rg)"])
+            # ``aws`` was there; ``python`` is allowed by the user, so the deny is skipped.
+            self.assertEqual(grant["skipped_deny"], ["command(python)"])
+            self.assertNotIn("command(aws)", grant["added_deny"])
+            self.assertIn("command(git push)", grant["added_deny"])
+            self.assertIn("read_file(.env.prod)", grant["added_deny"])
+            allow, deny = permission_rules(path)
+            self.assertEqual(allow, ["command(python)", "command(rg)"])
+            self.assertEqual(deny[0], "command(aws)")
+            self.assertNotIn("command(python)", deny)
+            self.assertEqual(len(deny), 1 + len(DENY_COMMANDS) - 2 + len(DENY_FILES))
+            again = grant_rules(path, ["command(rg)"], default_deny_rules())
+            self.assertEqual((again["added_allow"], again["added_deny"]), ([], []))
+            self.assertEqual(again["skipped_deny"], ["command(python)"])
+            self.assertEqual(default_deny_rules()[0], "command(supabase)")
+            self.assertIn("read_file(.env)", default_deny_rules())
+
+    def test_verdicts_mirror_agy_matching(self):
+        allow = ["command(rg)", "command(git log)", "command(regex:sed -n .*)", "read_file(src/)"]
+        deny = ["command(git push)", "command(python)"]
+        self.assertEqual(command_verdict("rg foo src", allow, deny)["verdict"], "allowed")
+        self.assertEqual(command_verdict("git log --oneline -3", allow, deny)["verdict"], "allowed")
+        self.assertEqual(command_verdict("sed -n 1,5p a", allow, deny)["verdict"], "allowed")
+        self.assertEqual(command_verdict("sed -i x a", allow, deny)["verdict"], "unmatched")
+        # Word-by-word: ``git`` alone does not cover ``git diff``; ``python`` does not cover ``python3``.
+        unmatched = command_verdict("git diff", allow, deny)
+        self.assertEqual(
+            (unmatched["verdict"], unmatched["suggest"]), ("unmatched", ["command(git diff)"])
+        )
+        self.assertEqual(
+            command_verdict("python3 -m pytest", allow, deny)["suggest"], ["command(python3)"]
+        )
+        denied = command_verdict("git push origin main", allow, deny)
+        self.assertEqual(
+            (denied["verdict"], denied["denied_by"], denied["suggest"]),
+            ("denied", ["command(git push)"], []),
+        )
+        # A compound command needs every segment; the suggestion names the missing ones only.
+        compound = command_verdict('git log --oneline -3 && echo "---" | rg -n x', allow, deny)
+        self.assertEqual(compound["verdict"], "unmatched")
+        self.assertEqual(compound["unmatched"], ['echo "---"'])
+        self.assertEqual(compound["suggest"], ["command(echo)"])
+        self.assertEqual(command_verdict("rg a; python x.py", allow, deny)["verdict"], "denied")
+        self.assertEqual(command_segments(" a && b || c | d ; e "), ["a", "b", "c", "d", "e"])
+        self.assertEqual(suggested_prefix("uv run pytest -q"), "uv run")
+        self.assertEqual(suggested_prefix("git -C x status"), "git")
+        self.assertEqual(suggested_prefix("make"), "make")
+        self.assertEqual(command_verdict("anything", ["command(*)"], [])["verdict"], "allowed")
+        self.assertEqual(command_verdict("rg x", [], ["command(regex:[)"])["verdict"], "unmatched")
+        self.assertTrue(needs_shell_rules(("--mode", "accept-edits")))
+        self.assertFalse(needs_shell_rules(("--mode", "plan")))
+        self.assertFalse(needs_shell_rules(("--mode", "auto")))
+        self.assertFalse(needs_shell_rules(("--dangerously-skip-permissions",)))
 
 
 if __name__ == "__main__":

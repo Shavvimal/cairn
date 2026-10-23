@@ -1,6 +1,6 @@
 # Plan: peer agents and subagent visibility in cairn (one PR)
 
-Branch `feat/invoke-codex-skill` in worktree `/Users/shav/Code/cairn-invoke-codex`, head set to
+Branch `feat/invoke-codex-skill` in its own worktree, head set to
 `origin/main` at `1443f89` (PR #28 merged 2026-10-17). One PR against `main`. Version 2.5.0.
 Research with evidence: `docs/agent-exchange-research.md`. Review trail and live acceptance:
 `docs/agent-exchange-reviews.md`.

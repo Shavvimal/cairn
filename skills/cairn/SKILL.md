@@ -109,6 +109,8 @@ cairn invoke claude --prompt "…" --profile review          # the mirror direct
 cairn invoke antigravity --prompt "…" --model <slug>       # Google Antigravity (agy); slugs from `agy models`
 cairn antigravity export [--all]                           # export agy conversations (also via the Stop hook)
 cairn invoke status <thread-id> [--follow]                 # health line, progress, answer
+cairn invoke tail <thread-id>                              # one line per tool call (CMD, WRITE, DENIED, RESULT)
+cairn invoke wait <thread-id> --json                       # block until the round exits; print its result line
 cairn invoke codex --resume <thread-id> --prompt "…"        # continue the same thread, any time later
 cairn invoke cancel | publish <thread-id>                  # stop a run; finish pending export/link/index
 cairn invoke list-models                                   # Codex model and effort catalogue

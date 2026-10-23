@@ -401,6 +401,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     install = sub.add_parser("install", help="record launcher; inspect/register a host hook")
     install.add_argument("--harness", choices=HOOK_HARNESSES)
+    install.add_argument(
+        "--grant-commands",
+        action="store_true",
+        help=(
+            "antigravity: also write cairn's allow rules (read-only and test commands) and "
+            "deny rules (cloud, database, network, interpreters, history-moving git) to "
+            "agy's settings, printing every rule added"
+        ),
+    )
     uninstall = sub.add_parser("uninstall", help="remove owned registration; preserve shared data")
     uninstall.add_argument("--harness", choices=HOOK_HARNESSES)
     export = sub.add_parser("export", help=argparse.SUPPRESS)
@@ -435,6 +444,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         config = get_config()
         if args.command == "install":
+            if args.grant_commands and args.harness != "antigravity":
+                raise ValueError("--grant-commands applies to --harness antigravity")
             print(install_launcher(config))
             if args.harness == "codex":
                 from .harnesses.codex_registration import configure
@@ -444,6 +455,8 @@ def main(argv: list[str] | None = None) -> int:
                 from .harnesses import antigravity_registration
 
                 print(antigravity_registration.configure(config))
+                if args.grant_commands:
+                    print(antigravity_registration.grant_read_only_commands(config))
         elif args.command == "handle":
             payload = json.load(sys.stdin)
             if args.require_plugin:

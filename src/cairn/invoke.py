@@ -1,7 +1,9 @@
 """``cairn invoke``: run Codex, Claude or Antigravity headlessly as a peer agent (plan Part B, Part D).
 
 One invocation runs one round of one thread in the foreground; the host runs it
-in the background and reads progress with ``cairn invoke status`` (D2). The run
+in the background and reads progress with ``cairn invoke status`` (D2), one line per
+tool call with ``cairn invoke tail``, and blocks for the result line with
+``cairn invoke wait``. The run
 directory ``data_root/logs/invoke/<peer>/<thread_id>/`` holds ``thread.json``
 (:class:`cairn.exchange.ThreadState`), and per round ``events-NN.jsonl`` (the raw
 stdout tee), ``stderr-NN.log``, ``answer-NN.md`` and ``result-NN.json``.
@@ -24,7 +26,10 @@ Round lifecycle:
    identities (pid plus start time, D21), and tail that file on one thread:
    parse, heartbeat, exchange refresh, the wall-clock and idle watchdogs, and
    SIGTERM/SIGINT forwarding. A runner that dies loses none of the stream.
-4. Finalise the outcome, save the answer, then run the publication pipeline
+4. Finalise the outcome, save the answer, then run the publication pipeline.
+   A peer that reported success with an empty answer after refusing tool calls
+   for want of a permission (headless agy) ends as ``denied`` (exit 2, retryable):
+   the error names each refused command and the allow rule it needs. Then run
    (peer export, caller export, links, exchange document, index). Pipeline
    failures never change the outcome (D11); each step lands in the round's
    publication ledger (D24) so ``cairn invoke publish`` or the next
@@ -67,9 +72,11 @@ from .exchange import ThreadState, now_iso, write_exchange
 from .harnesses import Event, Harness, InvokeRequest, detect_harness, get_harness, is_client_error
 from .harnesses.antigravity import (
     ANTIGRAVITY_MODES,
+    COMMAND_TOOL,
     billing_env,
     billing_problem,
     billing_problems,
+    command_verdict,
     observe_billing,
     resolved_project,
 )
@@ -82,6 +89,9 @@ from .storage import atomic_write, lock_path, locked
 EXIT_OK = 0
 EXIT_FATAL = 1
 EXIT_USAGE = 2
+# A ``denied`` round shares the usage code: both mean "fix the invocation and run
+# again" (here: add the allow rule the error names), and nothing the peer did stands.
+EXIT_DENIED = 2
 EXIT_BUSY = 75
 EXIT_TIMEOUT = 124
 EXIT_IDLE = 125
@@ -253,6 +263,11 @@ class Replay:
     done: Event | None = None
     last_event: str | None = None
     notices: list[str] = field(default_factory=list)
+    # Structured facts a harness reports (antigravity today): every shell command
+    # started, every path a write tool finished, every call the peer's CLI refused.
+    commands: list[str] = field(default_factory=list)
+    files_written: list[str] = field(default_factory=list)
+    denied: list[dict] = field(default_factory=list)
 
     def add_progress(self, text: str) -> None:
         self.progress.append(_clip(text, PROGRESS_CHARS))
@@ -273,6 +288,17 @@ class Replay:
                 self.add_progress(f"message: {event.text}")
             elif event.kind == "progress" and event.text:
                 self.add_progress(event.text)
+            elif event.kind == "command" and event.text:
+                self.commands.append(event.text)
+                self.add_progress(f"run: {event.text}")
+            elif event.kind == "file_written" and event.text:
+                if event.text not in self.files_written:
+                    self.files_written.append(event.text)
+                self.add_progress(f"wrote: {event.text}")
+            elif event.kind == "denied":
+                tool = event.error or "tool"
+                self.denied.append({"tool": tool, "target": event.text or ""})
+                self.add_progress(f"denied: {tool} {event.text or ''}".rstrip())
             elif event.kind == "notice" and event.text:
                 self.notices.append(_clip(event.text, 500))
             elif event.kind == "done":
@@ -616,6 +642,90 @@ def _retryable(text: str) -> bool:
     return not is_client_error(text) and not keychain_failure(text)
 
 
+def denied_outcome(replay: Replay) -> bool:
+    """A peer that said "success" with an empty final answer after its CLI refused
+    tool calls did nothing usable: the round is ``denied``, not ``succeeded``. The
+    final answer is the peer's own response, not an earlier progress message."""
+    done = replay.done
+    return bool(done and done.status == "succeeded" and not done.text and replay.denied)
+
+
+def denial_lines(denied: list[dict], permissions: dict | None) -> list[str]:
+    """One line per refused call: the command and the rule that would allow it, judged
+    against the rules recorded for the round (so the advice matches what agy saw)."""
+    allow = list((permissions or {}).get("allow") or [])
+    deny = list((permissions or {}).get("deny") or [])
+    lines = []
+    for item in denied:
+        tool, target = str(item.get("tool") or "tool"), str(item.get("target") or "")
+        if tool != COMMAND_TOOL or not target:
+            lines.append(f"{tool} {target} (needs a {tool} allow rule)".replace("  ", " "))
+            continue
+        verdict = command_verdict(target, allow, deny)
+        if verdict["verdict"] == "denied":
+            lines.append(f"`{target}` denied by {', '.join(verdict['denied_by'])}")
+        elif verdict["verdict"] == "unmatched":
+            lines.append(f"`{target}` needs {', '.join(verdict['suggest'])} in permissions.allow")
+        else:
+            lines.append(f"`{target}` (the recorded rules allow it; agy still refused it)")
+    return lines
+
+
+def denial_text(denied: list[dict], permissions: dict | None) -> str:
+    path = (permissions or {}).get("path") or "agy's settings.json"
+    shown = denial_lines(denied[:8], permissions)
+    more = f" (+{len(denied) - 8} more)" if len(denied) > 8 else ""
+    return (
+        f"agy auto-denied {len(denied)} tool call(s){more}: {'; '.join(shown)}. Add the rule "
+        f"to permissions.allow in {path} (or run 'cairn hook install --harness antigravity "
+        "--grant-commands' for cairn's defaults), then resume"
+    )
+
+
+def permissions_note(previous: dict | None, current: dict, denied_before: list[dict]) -> str | None:
+    """What the resumed peer must know about its shell permissions: the rules added or
+    removed since its last round, and the verdict on each command it was refused then.
+    ``None`` when nothing changed and nothing was refused."""
+    prev_allow = set((previous or {}).get("allow") or [])
+    prev_deny = set((previous or {}).get("deny") or [])
+    cur_allow, cur_deny = set(current.get("allow") or []), set(current.get("deny") or [])
+    changes = [
+        ("newly allowed", sorted(cur_allow - prev_allow)),
+        ("no longer allowed", sorted(prev_allow - cur_allow)),
+        ("newly denied", sorted(cur_deny - prev_deny)),
+        ("no longer denied", sorted(prev_deny - cur_deny)),
+    ]
+    if previous is None:
+        changes = []  # a first round has nothing to diff against
+    if not any(rules for _, rules in changes) and not denied_before:
+        return None
+    lines = ["[cairn invoke] Shell permissions since your previous round:"]
+    for label, rules in changes:
+        if rules:
+            lines.append(f"- {label}: {', '.join(rules)}")
+    for item in denied_before:
+        tool, target = str(item.get("tool") or "tool"), str(item.get("target") or "")
+        if tool != COMMAND_TOOL or not target:
+            lines.append(f"- previously refused: {tool} {target}; it stays refused".rstrip())
+            continue
+        verdict = command_verdict(target, sorted(cur_allow), sorted(cur_deny))
+        if verdict["verdict"] == "allowed":
+            lines.append(f"- previously refused `{target}`: now allowed")
+        elif verdict["verdict"] == "denied":
+            lines.append(
+                f"- previously refused `{target}`: still denied by "
+                f"{', '.join(verdict['denied_by'])}; do not retry it"
+            )
+        else:
+            lines.append(
+                f"- previously refused `{target}`: still has no allow rule; do not retry it"
+            )
+    lines.append(
+        "Run only commands the rules allow. A refused call is never retried by rephrasing it."
+    )
+    return "\n".join(lines)
+
+
 def _finish(
     config: CairnConfig,
     state: ThreadState,
@@ -647,10 +757,15 @@ def _finish(
     done = replay.done
     if target is None or not answer:
         # Only Codex writes an answer file (-o); the others end with the answer in
-        # their final event, else the last message stands in.
+        # their final event, else the last message stands in. A denied round has no
+        # answer by definition: an earlier progress message must not pose as one.
         answer = (done.text if done and done.text else None) or replay.last_message or ""
+        if outcome == "denied":
+            answer = ""
         if answer:
             atomic_write(answer_path, answer + "\n")
+    harness = get_harness(state.peer)
+    reports_files = bool(getattr(harness, "reports_files", False))
     round_.update(
         finished_at=now_iso(),
         outcome=outcome,
@@ -661,6 +776,8 @@ def _finish(
         progress_dropped=replay.dropped,
         last_event=replay.last_event,
         usage=done.usage if done else None,
+        files_written=list(replay.files_written) if reports_files else None,
+        denied=list(replay.denied),
         error=error,
         retryable=retryable,
         events_path=str(files["events_path"]),
@@ -683,6 +800,8 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
     try:
         replay = replay_file(harness, files["events_path"])
         derived = (replay.done.status if replay.done else None) or "aborted"
+        if derived == "succeeded" and denied_outcome(replay):
+            derived = "denied"
     except OSError:
         replay, derived = Replay(), "unknown"
     final = outcome or derived
@@ -697,8 +816,10 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
         error = (replay.done.error if replay.done else None) or stderr.strip() or None
         if final == "aborted":
             error = error or "the runner died and the stream has no final event"
+        if final == "denied":
+            error = denial_text(replay.denied, round_.get("permissions"))
     text = f"{stderr}\n{error or ''}"
-    retryable = final != "cancelled" and _retryable(text)
+    retryable = final == "denied" or (final != "cancelled" and _retryable(text))
     if keychain_failure(text):
         error = KEYCHAIN_GUIDANCE
     round_["adopted_at"] = now_iso()
@@ -851,6 +972,10 @@ def observation_json(obs: Observation) -> dict:
         "last_event": obs.last_event,
         "progress": progress,
         "last_message": round_.get("last_message") or obs.replay.last_message,
+        "files_written": round_.get("files_written")
+        if round_.get("finished_at")
+        else (obs.replay.files_written or None),
+        "denied": round_.get("denied") or obs.replay.denied,
         "billing": round_.get("billing"),
         "publication": round_.get("publication") or {},
         "events_path": round_.get("events_path"),
@@ -858,6 +983,59 @@ def observation_json(obs: Observation) -> dict:
         "exchange_doc": obs.state.exchange_doc,
         "run_dir": str(obs.state.path.parent) if obs.state.path else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# The result line
+# ---------------------------------------------------------------------------
+
+
+def round_result(
+    peer: str,
+    state: ThreadState | None,
+    round_: dict,
+    run_dir: Path | None,
+    warnings: list[str],
+    **extra: Any,
+) -> dict:
+    """The one-line JSON contract for a round (the runner's stdout, ``result-NN.json``
+    and ``cairn invoke wait``). ``status`` defaults to the round's outcome."""
+    files = _round_files(run_dir, int(round_["round"])) if round_ and run_dir else {}
+    publication = round_.get("publication") or {}
+    result = {
+        "status": round_.get("outcome"),
+        "outcome": round_.get("outcome"),
+        "peer": peer,
+        "thread_id": state.thread_id if state else None,
+        "round": round_.get("round"),
+        "model": round_.get("model"),
+        "effort": round_.get("effort"),
+        "profile": round_.get("profile"),
+        "native_policy": round_.get("native_policy"),
+        "cwd": state.cwd if state else None,
+        "caller": round_.get("caller_session"),
+        "duration_s": round_.get("duration_s"),
+        "exit_code": round_.get("exit_code"),
+        "events_path": str(files["events_path"]) if files else None,
+        "stderr_path": str(files["stderr_path"]) if files else None,
+        "answer_path": round_.get("answer_path"),
+        "transcript_path": round_.get("transcript_path"),
+        "exchange_doc": state.exchange_doc if state else None,
+        "peer_session_doc": round_.get("peer_session_doc"),
+        "caller_session_doc": round_.get("caller_session_doc"),
+        "last_message": round_.get("last_message"),
+        "files_written": round_.get("files_written"),
+        "denied": round_.get("denied") or [],
+        "usage": round_.get("usage"),
+        "billing": round_.get("billing"),
+        "indexed": "indexed" in publication,
+        "publication": publication,
+        "error": round_.get("error"),
+        "retryable": round_.get("retryable"),
+        "warnings": warnings,
+    }
+    result.update(extra)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1027,45 +1205,10 @@ class Runner:
     def result(self, status: str, **extra: Any) -> dict:
         round_ = getattr(self, "round", None) or {}
         state = getattr(self, "state", None)
-        files = (
-            _round_files(self.run_dir, int(round_["round"]))
-            if round_ and hasattr(self, "run_dir")
-            else {}
+        run_dir = self.run_dir if round_ and hasattr(self, "run_dir") else None
+        return round_result(
+            self.peer, state, round_, run_dir, self.warnings, status=status, **extra
         )
-        exit_code = round_.get("exit_code")
-        publication = round_.get("publication") or {}
-        result = {
-            "status": status,
-            "outcome": round_.get("outcome"),
-            "peer": self.peer,
-            "thread_id": state.thread_id if state else None,
-            "round": round_.get("round"),
-            "model": round_.get("model"),
-            "effort": round_.get("effort"),
-            "profile": round_.get("profile"),
-            "native_policy": round_.get("native_policy"),
-            "cwd": state.cwd if state else None,
-            "caller": round_.get("caller_session"),
-            "duration_s": round_.get("duration_s"),
-            "exit_code": exit_code,
-            "events_path": str(files["events_path"]) if files else None,
-            "stderr_path": str(files["stderr_path"]) if files else None,
-            "answer_path": round_.get("answer_path"),
-            "transcript_path": round_.get("transcript_path"),
-            "exchange_doc": state.exchange_doc if state else None,
-            "peer_session_doc": round_.get("peer_session_doc"),
-            "caller_session_doc": round_.get("caller_session_doc"),
-            "last_message": round_.get("last_message"),
-            "usage": round_.get("usage"),
-            "billing": round_.get("billing"),
-            "indexed": "indexed" in publication,
-            "publication": publication,
-            "error": round_.get("error"),
-            "retryable": round_.get("retryable"),
-            "warnings": self.warnings,
-        }
-        result.update(extra)
-        return result
 
     # ---- the round ------------------------------------------------------
 
@@ -1120,6 +1263,22 @@ class Runner:
             problems = billing_problems(self.billing, os.environ)
             if problems:
                 raise UsageError("billing check failed: " + "; ".join(problems))
+        if self.peer == "antigravity":
+            from .harnesses.antigravity_registration import permission_problem
+
+            # An accept-edits run with no command rule cannot test what it writes: a
+            # dead round. Refuse it up front, the way the billing check does, with the
+            # one command that fixes it. Other modes still answer from what they read,
+            # so they only carry the warning.
+            policy = self.harness.policy_argv(settings.profile, settings.native_policy)
+            refuse, problem = permission_problem(self.config, policy)
+            if problem and refuse and not getattr(args, "skip_permission_check", False):
+                raise UsageError(
+                    f"permissions check failed: {problem} (or pass --skip-permission-check "
+                    "for a task that needs no shell)"
+                )
+            if problem:
+                self.warnings.append(f"permissions: {problem}")
 
         root = invoke_root(self.config) / self.peer
         session_id: str | None = None
@@ -1193,9 +1352,18 @@ class Runner:
             state.caller_session = caller
         number = len(state.rounds) + 1
         files = _round_files(self.run_dir, number)
-        full_prompt = (
-            f"{preamble(self.peer, caller, number, settings.timeout_s)}\n\n---\n\n{prompt}"
-        )
+        permissions = self._permissions_snapshot()
+        note = None
+        if permissions is not None and recorded is not None and not self.args.fork:
+            previous = recorded.last_round or {}
+            note = permissions_note(
+                previous.get("permissions"), permissions, list(previous.get("denied") or [])
+            )
+            permissions["note"] = note
+        head = preamble(self.peer, caller, number, settings.timeout_s)
+        if note:
+            head = f"{head}\n\n{note}"
+        full_prompt = f"{head}\n\n---\n\n{prompt}"
         via_stdin = len(full_prompt.encode("utf-8")) > STDIN_PROMPT_BYTES
         resume_id = recorded.thread_id if recorded is not None else None
         extra = settings.extra
@@ -1280,6 +1448,7 @@ class Runner:
             "answer_target": str(answer_target) if answer_target else None,
             "log_target": str(log_target) if log_target else None,
             "billing": billing,
+            "permissions": permissions,
             "publication": {"pending": {}},
         }
         state.rounds.append(self.round)
@@ -1288,6 +1457,17 @@ class Runner:
         self._lookup_caller_doc(state, caller)
         state.save(self.run_dir / "thread.json")
         return self._spawn_and_pump(argv, request, depth, caller)
+
+    def _permissions_snapshot(self) -> dict | None:
+        """The agy rules in force when this round starts (antigravity only), so the
+        result can judge a refusal against what the peer actually saw and the next
+        resume can tell the peer what changed."""
+        if self.peer != "antigravity":
+            return None
+        from .harnesses.antigravity_registration import permission_report
+
+        report = permission_report(self.config)
+        return {"path": report["path"], "allow": report["allow"], "deny": report["deny"]}
 
     def _lookup_caller_doc(self, state: ThreadState, caller: str | None) -> None:
         """Find an already exported caller document so the exchange document can be
@@ -1326,7 +1506,8 @@ class Runner:
                     if self.thread_id:
                         print(
                             f"cairn invoke: {self.peer} thread {self.thread_id} "
-                            f"round {int(self.round['round'])} (run dir {self.run_dir})",
+                            f"round {int(self.round['round'])} (run dir {self.run_dir}, "
+                            f"events {files['events_path']})",
                             file=sys.stderr,
                             flush=True,
                         )
@@ -1407,7 +1588,8 @@ class Runner:
         self.lock = destination
         # The skills read this line to learn the id while the run is still going.
         print(
-            f"cairn invoke: {self.peer} thread {thread_id} round {number} (run dir {target})",
+            f"cairn invoke: {self.peer} thread {thread_id} round {number} (run dir {target}, "
+            f"events {self.round['events_path']})",
             file=sys.stderr,
             flush=True,
         )
@@ -1582,7 +1764,11 @@ class Runner:
         if outcome is None:
             succeeded = done is not None and done.status == "succeeded" and rc == 0
             outcome = "succeeded" if succeeded else "failed"
-        if outcome == "failed":
+            if succeeded and denied_outcome(replay):
+                outcome = "denied"
+        if outcome == "denied":
+            error = denial_text(replay.denied, self.round.get("permissions"))
+        elif outcome == "failed":
             error = error or (done.error if done and done.error else None) or stderr.strip()
             if not error:
                 error = f"peer exited with code {rc} and no final event"
@@ -1597,7 +1783,7 @@ class Runner:
             error = "cancelled by signal"
         text = f"{stderr}\n{error or ''}\n{(done.text if done else '') or ''}"
         retryable: bool | None
-        if outcome in ("timeout", "idle_timeout"):
+        if outcome in ("timeout", "idle_timeout", "denied"):
             retryable = True
         elif outcome == "cancelled":
             retryable = False
@@ -1609,6 +1795,7 @@ class Runner:
             error, retryable = None, None
         exit_code = {
             "succeeded": EXIT_OK,
+            "denied": EXIT_DENIED,
             "timeout": EXIT_TIMEOUT,
             "idle_timeout": EXIT_IDLE,
             "cancelled": EXIT_CANCELLED,
@@ -1630,6 +1817,21 @@ class Runner:
         billing_issue = (self.round.get("billing") or {}).get("problem")
         if billing_issue:
             self.warnings.append(f"billing: {billing_issue}")
+        refused = list(self.round.get("denied") or [])
+        if not refused and (self.round.get("usage") or {}).get("denied_actions"):
+            # agy counted a refusal the stream did not show as a tool error.
+            refused = [
+                {"tool": kind, "target": ""} for kind in self.round["usage"]["denied_actions"]
+            ]
+            self.round["denied"] = refused
+        if refused and outcome != "denied":
+            lines = denial_lines(refused, self.round.get("permissions"))
+            self.warnings.append(
+                f"permissions: agy auto-denied {len(refused)} tool call(s), so the answer may "
+                f"be incomplete: {'; '.join(lines)}"
+            )
+        if outcome == "succeeded" and not self.round.get("last_message"):
+            self.warnings.append("empty answer: the peer ended without a final message")
         if self.peer in BY_NAME and not _exportable(self.config, self.peer):
             self.warnings.append(
                 f"{BY_NAME[self.peer].collection} is not configured; the peer session was "
@@ -1769,6 +1971,163 @@ def cmd_status(config: CairnConfig, thread_id: str, follow: bool, as_json: bool)
                 print(observation_json(obs)["last_message"] or "(no answer)")
             return EXIT_OK
         time.sleep(1)
+
+
+def tail_line(event: Event) -> str | None:
+    """One feed line per event for ``cairn invoke tail``; ``None`` for the final
+    ``done`` event, which the caller prints with the round's outcome."""
+    text = event.text or ""
+    if event.kind == "thread_started":
+        return f"START {event.thread_id or '?'}" + (f" {text}" if text else "")
+    if event.kind == "command":
+        return f"CMD {text}"
+    if event.kind == "file_written":
+        return f"WRITE {text}"
+    if event.kind == "denied":
+        return f"DENIED {event.error or 'tool'} {text}".rstrip()
+    if event.kind == "message":
+        return f"MSG {_clip(text, 200)}"
+    if event.kind == "progress":
+        for prefix, label in (
+            ("tool failed: ", "FAILED "),
+            ("tool: ", "TOOL "),
+            ("subagents: ", "SUBAGENTS "),
+        ):
+            if text.startswith(prefix):
+                return label + text[len(prefix) :]
+        return f"STEP {text}"
+    if event.kind == "notice":
+        return f"NOTICE {_clip(text, 200)}"
+    return None
+
+
+def _round_exit_code(round_: dict) -> int:
+    code = round_.get("exit_code")
+    if round_.get("outcome") == "succeeded":
+        return EXIT_OK
+    return code if isinstance(code, int) else EXIT_FATAL
+
+
+def _select_round(state: ThreadState, number: int | None) -> dict:
+    if number is None:
+        if state.last_round is None:
+            raise LookupError(f"thread {state.thread_id} has no round yet")
+        return state.last_round
+    for round_ in state.rounds:
+        if int(round_.get("round", 0)) == number:
+            return round_
+    raise LookupError(f"thread {state.thread_id} has no round {number}")
+
+
+def cmd_tail(
+    config: CairnConfig, thread_id: str, round_number: int | None, follow: bool, as_json: bool
+) -> int:
+    """One line per tool call, write, refusal and message of a round, replayed from
+    ``events-NN.jsonl`` and followed until the peer's final event; the last line is
+    ``RESULT <outcome>``. Exit 0 when the round succeeded, else the round's exit code."""
+    run_dir = locate(config, thread_id)
+    state = ThreadState.load(run_dir / "thread.json")
+    round_ = _select_round(state, round_number)
+    number = int(round_["round"])
+    harness = get_harness(state.peer)
+    events_path = _round_files(run_dir, number)["events_path"]
+    tail = LineTail()
+    done: Event | None = None
+    reader = None
+
+    def emit(line: bytes) -> None:
+        nonlocal done
+        for event in harness.parse_event(line.decode("utf-8", errors="replace")):
+            if event.kind == "done":
+                done = event
+                continue
+            text = tail_line(event)
+            if text is None:
+                continue
+            if as_json:
+                print(
+                    json.dumps(
+                        {"kind": event.kind, "text": event.text, "tool": event.error}
+                        if event.kind == "denied"
+                        else {"kind": event.kind, "text": event.text},
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+            else:
+                print(text, flush=True)
+
+    try:
+        while True:
+            if reader is None and events_path.exists():
+                reader = events_path.open("rb")
+            if reader is not None:
+                while chunk := reader.read(65536):
+                    for line in tail.feed(chunk):
+                        emit(line)
+            state = ThreadState.load(run_dir / "thread.json")
+            round_ = _select_round(state, number)
+            finished = bool(round_.get("finished_at"))
+            if finished and reader is not None:
+                for line in tail.flush():
+                    emit(line)
+            if done is not None or finished or not follow:
+                break
+            if not identity_alive(round_.get("runner_pid"), round_.get("runner_started")) and (
+                not identity_alive(round_.get("peer_pid"), round_.get("peer_started"))
+            ):
+                observe(config, run_dir)  # both gone: adopt, which sets finished_at
+                continue
+            time.sleep(0.5)
+    finally:
+        if reader is not None:
+            reader.close()
+    if round_.get("finished_at"):
+        outcome = str(round_.get("outcome") or "unknown")
+    elif done is not None:
+        outcome = str(done.status or "unknown")
+    else:
+        outcome = "running"
+    if as_json:
+        print(json.dumps({"kind": "result", "outcome": outcome}, ensure_ascii=False), flush=True)
+    else:
+        print(f"RESULT {outcome}", flush=True)
+    if outcome == "running":
+        return EXIT_OK
+    return _round_exit_code(round_) if round_.get("finished_at") else EXIT_OK
+
+
+def cmd_wait(config: CairnConfig, thread_id: str, as_json: bool) -> int:
+    """Block until the thread's last round has exited, then print its result line
+    (``result-NN.json``, the same JSON the runner printed) and exit with its code."""
+    run_dir = locate(config, thread_id)
+    while True:
+        obs = observe(config, run_dir)
+        if obs.round_ is None:
+            raise LookupError(f"thread {obs.state.thread_id} has no round yet")
+        if obs.health.execution in ("exited", "unknown"):
+            break
+        time.sleep(1)
+    round_ = obs.round_
+    number = int(round_["round"])
+    result_path = _round_files(run_dir, number)["result_path"]
+    # The runner writes the result file after publication; a live runner lands it.
+    while not result_path.exists() and identity_alive(
+        round_.get("runner_pid"), round_.get("runner_started")
+    ):
+        time.sleep(0.2)
+    warnings: list[str] = []
+    if result_path.exists():
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    else:
+        warnings.append("result file missing (the round was adopted); built from thread.json")
+        state = ThreadState.load(run_dir / "thread.json")
+        result = round_result(state.peer, state, _select_round(state, number), run_dir, warnings)
+    if as_json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(_summary(result, run_dir))
+    return _round_exit_code(result)
 
 
 def cmd_cancel(config: CairnConfig, thread_id: str, as_json: bool) -> int:
@@ -1925,9 +2284,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=BILLING_ROUTES,
         help="billing route for this round (overrides invoke.antigravity.billing.route)",
     )
+    antigravity.add_argument(
+        "--skip-permission-check",
+        action="store_true",
+        help="start an accept-edits run even when agy has no command allow rule",
+    )
     antigravity.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="native args")
     for name, text in (
         ("status", "health, progress and answer of a thread"),
+        ("tail", "one line per tool call of a round, until its final event"),
+        ("wait", "block until the last round exits, then print its result line"),
         ("cancel", "stop the running round of a thread"),
         ("publish", "finish pending publication steps"),
     ):
@@ -1936,6 +2302,11 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--json", action="store_true")
         if name == "status":
             command.add_argument("--follow", action="store_true", help="poll until it exits")
+        if name == "tail":
+            command.add_argument("--round", type=_positive, help="a round other than the last")
+            command.add_argument(
+                "--no-follow", action="store_true", help="print what exists and exit"
+            )
     models = sub.add_parser("list-models", help="the Codex model catalogue")
     models.add_argument("--json", action="store_true")
     return parser
@@ -1972,6 +2343,9 @@ def _summary(result: dict, run_dir: Path | None) -> str:
         lines += ["", str(result["last_message"]), ""]
     if isinstance(result.get("billing"), dict):
         lines.append(f"billing: {billing_text(result['billing'])}")
+    files = result.get("files_written")
+    if files:
+        lines.append(f"files_written: {', '.join(str(f) for f in files)}")
     for key in ("exchange_doc", "peer_session_doc", "events_path"):
         if result.get(key):
             lines.append(f"{key}: {result[key]}")
@@ -1998,6 +2372,10 @@ def main(argv: list[str] | None = None) -> int:
             return code
         if args.command == "status":
             return cmd_status(config, args.thread_id, args.follow, args.json)
+        if args.command == "tail":
+            return cmd_tail(config, args.thread_id, args.round, not args.no_follow, args.json)
+        if args.command == "wait":
+            return cmd_wait(config, args.thread_id, args.json)
         if args.command == "cancel":
             return cmd_cancel(config, args.thread_id, args.json)
         if args.command == "publish":
@@ -2017,6 +2395,7 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "EXIT_BUSY",
     "EXIT_CANCELLED",
+    "EXIT_DENIED",
     "EXIT_IDLE",
     "EXIT_TIMEOUT",
     "PUBLICATION_STEPS",
@@ -2034,4 +2413,6 @@ __all__ = [
     "publish_round",
     "publish_thread",
     "replay_file",
+    "round_result",
+    "tail_line",
 ]

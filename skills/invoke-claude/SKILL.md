@@ -62,7 +62,9 @@ refused at depth 1 unless the user asks for `--allow-nested`.
 ## 5. Watch
 
 ```bash
-cairn invoke status <session_id>
+cairn invoke status <session_id>              # health line, progress, answer so far
+cairn invoke tail <session_id>                # one line per event, until RESULT <outcome>
+cairn invoke wait <session_id> --json         # block until the round exits; its result line
 ```
 
 After the identity line, the health line shows execution state, activity with its age, and the last event.

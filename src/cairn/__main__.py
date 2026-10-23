@@ -64,6 +64,8 @@ peer agents (one foreground round per call; run it in the background):
   cairn invoke antigravity --prompt TEXT [--model M] [--mode plan|accept-edits|auto]
   cairn invoke codex --resume THREAD_ID --prompt TEXT   follow up in the same thread
   cairn invoke status THREAD_ID [--follow] [--json]     health, progress and answer
+  cairn invoke tail THREAD_ID [--round N] [--no-follow]  one line per tool call, until the final event
+  cairn invoke wait THREAD_ID [--json]                  block until the round exits, print its result line
   cairn invoke cancel THREAD_ID                         stop a running round
   cairn invoke publish THREAD_ID                        finish pending exports/index
   cairn hook install --harness claude|codex|antigravity  register the session-end hook

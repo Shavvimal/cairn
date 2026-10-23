@@ -9,11 +9,17 @@
 # the quota project is $GOOGLE_CLOUD_QUOTA_PROJECT or `stub-project`. With
 # STUB_AGY_STORE set, the run is recorded the way agy records it: transcript JSONL
 # under $STUB_AGY_STORE/brain/<id>/.system_generated/logs/ and a row in
-# $STUB_AGY_STORE/conversation_summaries.db.
+# $STUB_AGY_STORE/conversation_summaries.db. Extra steps, all verified live on 1.4.6:
+# STUB_CMD=<line> runs a run_command step (DONE); STUB_WRITE=<path> a write_to_file step;
+# STUB_DENY=<line> a run_command step agy refused (state ERROR, "permission check
+# failed") plus denied_actions on the result, and with STUB_DENY_ANSWER unset the
+# final response is empty, exactly as the real denied round ended; STUB_SLEEP=<s>
+# pauses before the answer so a watcher can follow the stream mid-run.
 import json
 import os
 import sqlite3
 import sys
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -61,7 +67,7 @@ if log:
             "cwd": os.getcwd(),
             "stdin": used_stdin,
             "prompt_len": len(prompt or ""),
-            "prompt_head": (prompt or "")[:400],
+            "prompt_head": (prompt or "")[:1600],
             "thread": conversation,
         }
         handle.write(json.dumps(entry) + "\n")
@@ -229,18 +235,58 @@ step(1, "DONE", "agent_response", text_delta="ing.\n", duration_seconds=0.5)
 tool = {"name": "read_file", "parameters": {"Path": "a.py"}}
 step(2, "ACTIVE", "tool", tool_name="read_file", tool_info=tool)
 step(2, "DONE", "tool", tool_name="read_file", tool_info={**tool, "output": "1 lines"})
-step(3, "ACTIVE", "agent_response", text_delta=answer)
-step(3, "DONE", "agent_response", text_delta="\n", duration_seconds=1.0)
+index = 3
+command = os.environ.get("STUB_CMD")
+if command:
+    info = {"name": "run_command", "parameters": {"CommandLine": command}}
+    step(index, "ACTIVE", "tool", tool_name="run_command", tool_info=info)
+    step(index, "DONE", "tool", tool_name="run_command", tool_info={**info, "output": "ok"})
+    index += 1
+target = os.environ.get("STUB_WRITE")
+if target:
+    info = {"name": "write_to_file", "parameters": {"TargetFile": target}}
+    step(index, "ACTIVE", "tool", tool_name="write_to_file", tool_info=info)
+    step(index, "DONE", "tool", tool_name="write_to_file", tool_info=info, duration_seconds=0.1)
+    index += 1
+denied = os.environ.get("STUB_DENY")
+if denied:
+    info = {"name": "run_command", "parameters": {"CommandLine": denied}}
+    step(index, "ACTIVE", "tool", tool_name="run_command", tool_info=info)
+    error = {
+        "type": "TOOL_ERROR",
+        "message": f'permission check failed for command "{denied}": user denied permission '
+        f"to run command:\n{denied}\nDo not attempt to circumvent this denial by rephrasing "
+        "the command. Proceed without performing this action.",
+    }
+    step(index, "ERROR", "tool", tool_name="run_command", tool_info={**info, "error": error})
+    index += 1
+    if not os.environ.get("STUB_DENY_ANSWER"):
+        answer = ""
+    print(
+        'jetski: no output produced — a tool required the "command" permission that headless '
+        "mode cannot prompt for, so it was auto-denied.",
+        file=sys.stderr,
+    )
+if os.environ.get("STUB_SLEEP"):
+    time.sleep(float(os.environ["STUB_SLEEP"]))
+if answer:
+    step(index, "ACTIVE", "agent_response", text_delta=answer)
+    step(index, "DONE", "agent_response", text_delta="\n", duration_seconds=1.0)
 emit(
     {
         "event": "result",
         "result": {
             "conversation_id": conversation,
             "status": "SUCCESS",
-            "response": answer + "\n",
+            "response": (answer + "\n") if answer else "",
             "duration_seconds": 1.5,
             "num_turns": 1,
             "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+            **(
+                {"denied_actions": [{"action": "command", "display_name": "RunCommand"}]}
+                if denied
+                else {}
+            ),
         },
     }
 )

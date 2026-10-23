@@ -53,6 +53,12 @@ HOST_HINTS = (
     "CLAUDE_PLUGIN_ROOT",
     "PLUGIN_ROOT",
     "CLAUDE_CODE_SESSION_ID",
+    # The developer's shell may route agy to GCP; the billing tests set these themselves.
+    "AGY_ADC_AUTH",
+    "GOOGLE_CLOUD_QUOTA_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "CLOUDSDK_CONFIG",
 )
 EXPECTED_CODEX_TYPES = [
     "thread.started",
@@ -87,6 +93,8 @@ RESULT_KEYS = {
     "peer_session_doc",
     "caller_session_doc",
     "last_message",
+    "files_written",
+    "denied",
     "usage",
     "indexed",
     "publication",
@@ -107,6 +115,10 @@ class InvokeFixture(StoreFixture):
         self.sessions.mkdir(parents=True)
         self.agy_store = self.root / "agy"
         self.agy_store.mkdir()
+        # agy allows one shell command, so runs carry no permissions warning by default.
+        (self.agy_store / "settings.json").write_text(
+            json.dumps({"permissions": {"allow": ["command(rg)"]}})
+        )
         shutil.copy(FIXTURES / "models_cache.json", self.codex_home / "models_cache.json")
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -196,11 +208,11 @@ class InvokeFixture(StoreFixture):
             time.sleep(interval)
         self.fail("condition not met in time")
 
-    def started_round(self):
+    def started_round(self, peer="codex"):
         """The renamed run dir's round once the peer pid is recorded."""
 
         def ready():
-            for run_dir in self.run_dirs():
+            for run_dir in self.run_dirs(peer):
                 if run_dir.is_symlink() or run_dir.name.startswith("pending-"):
                     continue
                 path = run_dir / "thread.json"
@@ -500,6 +512,8 @@ class TestCodexRun(InvokeFixture):
         tid = state["thread_id"]
         self.assertTrue(line.startswith(f"cairn invoke: codex thread {tid} round 1 (run dir "))
         self.assertIn(str(self.run_dirs()[0]), line)
+        # The events path rides on the same line, so a watcher needs no guess at the round.
+        self.assertIn(f"events {self.run_dirs()[0] / 'events-01.jsonl'})", line)
         self.release()
         out, err = runner.communicate(timeout=60)
         self.assertEqual(runner.returncode, 0, err)
@@ -796,10 +810,8 @@ class TestAntigravityRun(InvokeFixture):
         run_dir = self.run_dirs("antigravity")[0]
         self.assertEqual((run_dir / "answer-01.md").read_text().strip(), "PONG")
         argv = self.stub_calls()[0]["argv"]
-        self.assertEqual(
-            argv[1:6],
-            ["--output-format", "stream-json", "--print-timeout", "0", "--disable-slash-commands"],
-        )
+        self.assertEqual(argv[1:5], ["--output-format", "stream-json", "--print-timeout", "0"])
+        self.assertNotIn("--disable-slash-commands", argv)  # it would cancel --mode plan
         self.assertIn("--mode", argv)
         self.assertTrue(argv[-1].startswith("-p=[cairn invoke] You are antigravity"))
         self.assertNotIn("--conversation", argv)
@@ -1076,6 +1088,149 @@ class TestAntigravityRun(InvokeFixture):
         result, _ = self.invoke("codex", "--cd", self.cwd, "--prompt", "x", "--billing", "gcp")
         self.assertEqual(result.returncode, 2)  # argparse: codex has no --billing
 
+    def test_edit_profile_refuses_without_command_rules(self):
+        """An accept-edits run with no ``command`` rule cannot test what it writes, so
+        it is refused before anything is spawned (exit 2, like the billing check), with
+        the one command that fixes it. Review still runs and carries the warning."""
+        settings = self.agy_store / "settings.json"
+        settings.unlink()
+        result, _ = self.run_agy("--profile", "edit")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn(
+            "Error: permissions check failed: agy has no command allow rules", result.stderr
+        )
+        self.assertIn("cairn hook install --harness antigravity --grant-commands", result.stderr)
+        self.assertIn("--skip-permission-check", result.stderr)
+        self.assertEqual(self.stub_calls(), [])  # nothing spawned
+        self.assertEqual(self.run_dirs("antigravity"), [])
+        result, _ = self.run_agy("--mode", "accept-edits")
+        self.assertEqual(result.returncode, 2)
+        # Plan (review) and full still run; only plan warns.
+        result, data = self.run_agy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "succeeded")
+        self.assertTrue(any(w.startswith("permissions: ") for w in data["warnings"]))
+        self.assertIn("--grant-commands", " ".join(data["warnings"]))
+        result, data = self.run_agy("--profile", "full")
+        assert data is not None
+        self.assertFalse(any(w.startswith("permissions: ") for w in data["warnings"]))
+        result, data = self.run_agy("--profile", "edit", "--skip-permission-check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertTrue(any(w.startswith("permissions: ") for w in data["warnings"]))
+        # The rules in force are recorded with the round.
+        state = self.thread(data["thread_id"], "antigravity")
+        self.assertEqual(state["rounds"][0]["permissions"]["allow"], [])
+        settings.write_text(json.dumps({"permissions": {"allow": ["command(grep)"]}}))
+        result, data = self.run_agy("--profile", "edit")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertFalse(any(w.startswith("permissions: ") for w in data["warnings"]))
+        state = self.thread(data["thread_id"], "antigravity")
+        self.assertEqual(state["rounds"][0]["permissions"]["allow"], ["command(grep)"])
+        self.assertEqual(state["rounds"][0]["permissions"]["path"], str(settings))
+
+    def test_refused_command_with_empty_answer_is_a_denied_round(self):
+        """The dead round from the post-mortem: agy refuses one ``rg``, the model gives
+        up with an empty response, agy says SUCCESS. cairn ends it as ``denied`` with
+        exit 2, names the command and the rule it needs, and the next resume tells the
+        peer what changed."""
+        command = 'git log --oneline -3 && echo "---"'
+        result, data = self.run_agy("--profile", "edit", env={"STUB_DENY": command})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        assert data is not None
+        self.assertEqual(
+            (data["status"], data["outcome"], data["exit_code"]), ("denied", "denied", 2)
+        )
+        self.assertTrue(data["retryable"])
+        self.assertIsNone(data["last_message"])
+        self.assertEqual(data["files_written"], [])
+        self.assertEqual(data["denied"], [{"tool": "run_command", "target": command}])
+        self.assertEqual(data["usage"]["denied_actions"], ["command"])
+        error = data["error"]
+        self.assertIn("agy auto-denied 1 tool call(s)", error)
+        self.assertIn(
+            f"`{command}` needs command(git log), command(echo) in permissions.allow", error
+        )
+        self.assertIn(str(self.agy_store / "settings.json"), error)
+        self.assertIn("then resume", error)
+        self.assertFalse(any(w.startswith("permissions: ") for w in data["warnings"]))
+        tid = data["thread_id"]
+        run_dir = self.run_dirs("antigravity")[0]
+        self.assertEqual(json.loads((run_dir / "result-01.json").read_text())["status"], "denied")
+        round_ = self.thread(tid, "antigravity")["rounds"][0]
+        self.assertIn(f"run: {command}", round_["progress"])
+        self.assertIn(f"denied: run_command {command}", round_["progress"])
+        self.assertEqual(round_["outcome"], "denied")
+        # The round is still exported, linked and indexed: the refusal is data, not a crash.
+        self.assertTrue(data["indexed"])
+        self.assertIn("- denied: run_command git log", Path(data["exchange_doc"]).read_text())
+        # Allow the commands, resume: the peer learns the diff and the verdict on its refusal.
+        (self.agy_store / "settings.json").write_text(
+            json.dumps(
+                {"permissions": {"allow": ["command(rg)", "command(git log)", "command(echo)"]}}
+            )
+        )
+        result, data = self.run_agy("--resume", tid, prompt="Carry on")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "succeeded")
+        head = self.stub_calls()[-1]["prompt_head"]
+        self.assertTrue(head.startswith("[cairn invoke] You are antigravity"))
+        self.assertIn("[cairn invoke] Shell permissions since your previous round:", head)
+        self.assertIn("- newly allowed: command(echo), command(git log)", head)
+        self.assertIn(f"- previously refused `{command}`: now allowed", head)
+        self.assertIn("\n\n---\n\nCarry on", head)
+        rounds = self.thread(tid, "antigravity")["rounds"]
+        self.assertIn("newly allowed", rounds[1]["permissions"]["note"])
+        self.assertEqual(rounds[1]["prompt"], "Carry on")  # the note is not the prompt
+        # A third round with nothing changed and nothing refused gets no note.
+        result, data = self.run_agy("--resume", tid, prompt="Again")
+        assert data is not None
+        self.assertIsNone(self.thread(tid, "antigravity")["rounds"][2]["permissions"]["note"])
+        self.assertNotIn("Shell permissions", self.stub_calls()[-1]["prompt_head"])
+
+    def test_partial_refusal_warns_and_the_result_lists_files_written(self):
+        (self.agy_store / "settings.json").write_text(
+            json.dumps({"permissions": {"allow": ["command(rg)"], "deny": ["command(curl)"]}})
+        )
+        target = str(Path(self.cwd) / "out.sql")
+        env = {
+            "STUB_CMD": "rg foo src",
+            "STUB_WRITE": target,
+            "STUB_DENY": "curl https://x.test",
+            "STUB_DENY_ANSWER": "1",
+        }
+        result, data = self.run_agy("--profile", "edit", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual((data["status"], data["last_message"]), ("succeeded", "PONG"))
+        self.assertEqual(data["files_written"], [target])
+        self.assertEqual(data["denied"], [{"tool": "run_command", "target": "curl https://x.test"}])
+        warning = next(w for w in data["warnings"] if w.startswith("permissions: "))
+        self.assertIn("agy auto-denied 1 tool call(s), so the answer may be incomplete", warning)
+        self.assertIn("`curl https://x.test` denied by command(curl)", warning)
+        round_ = self.thread(data["thread_id"], "antigravity")["rounds"][0]
+        self.assertIn("run: rg foo src", round_["progress"])
+        self.assertIn(f"wrote: {target}", round_["progress"])
+        exchange = Path(data["exchange_doc"]).read_text()
+        self.assertIn(f"- files written: {target}", exchange)
+        self.assertIn("- denied: run_command curl https://x.test", exchange)
+        # The human summary names the files too.
+        result, _ = self.invoke(
+            "antigravity", "--cd", self.cwd, "--prompt", "x", "--profile", "edit", env=env
+        )
+        self.assertIn(f"files_written: {target}", result.stdout)
+        # A run that wrote nothing says so (an empty list), unlike peers that do not report.
+        result, data = self.run_agy()
+        assert data is not None
+        self.assertEqual(data["files_written"], [])
+        _, codex = self.run_codex()
+        assert codex is not None
+        self.assertIsNone(codex["files_written"])
+        self.assertEqual(codex["denied"], [])
+
     def test_usage_refusals(self):
         result, _ = self.run_agy("--fast")
         self.assertEqual(result.returncode, 2)
@@ -1123,6 +1278,130 @@ class TestStatusAndPublish(InvokeFixture):
         assert status is not None
         self.assertEqual(status["execution"], "exited")
         self.assertEqual(status["outcome"], "succeeded")
+
+    def test_tail_replays_a_finished_round_one_line_per_call(self):
+        target = str(Path(self.cwd) / "a.sql")
+        _, data = self.invoke(
+            "antigravity",
+            "--json",
+            "--cd",
+            self.cwd,
+            "--prompt",
+            "x",
+            "--profile",
+            "edit",
+            env={"STUB_CMD": "rg foo", "STUB_WRITE": target},
+        )
+        assert data is not None
+        tid = data["thread_id"]
+        result, _ = self.invoke("tail", tid)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertTrue(lines[0].startswith(f"START {tid}"), lines[0])
+        self.assertIn('TOOL read_file {"Path": "a.py"}', lines)
+        self.assertIn("CMD rg foo", lines)
+        self.assertIn(f"WRITE {target}", lines)
+        self.assertIn("MSG Looking.", lines)
+        self.assertIn("MSG PONG", lines)
+        self.assertEqual(lines[-1], "RESULT succeeded")
+        self.assertLess(lines.index("CMD rg foo"), lines.index(f"WRITE {target}"))
+        result, _ = self.invoke("tail", tid, "--json", check_json=False)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(rows[0]["kind"], "thread_started")
+        self.assertIn({"kind": "command", "text": "rg foo"}, rows)
+        self.assertEqual(rows[-1], {"kind": "result", "outcome": "succeeded"})
+        missing, _ = self.invoke("tail", tid, "--round", "9")
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("no round 9", missing.stderr)
+        # A denied round ends the feed with its outcome and exit code.
+        _, data = self.invoke(
+            "antigravity",
+            "--json",
+            "--cd",
+            self.cwd,
+            "--prompt",
+            "x",
+            "--profile",
+            "edit",
+            env={"STUB_DENY": "curl x"},
+        )
+        assert data is not None
+        result, _ = self.invoke("tail", data["thread_id"])
+        self.assertEqual(result.returncode, 2)
+        lines = result.stdout.splitlines()
+        self.assertIn("DENIED run_command curl x", lines)
+        self.assertEqual(lines[-1], "RESULT denied")
+        # Codex threads replay through the same feed with their generic steps.
+        _, codex = self.run_codex()
+        assert codex is not None
+        result, _ = self.invoke("tail", codex["thread_id"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("STEP run: cat a.txt", result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith("RESULT succeeded"))
+
+    def test_tail_and_wait_follow_a_live_round(self):
+        runner = self.spawn(
+            "antigravity",
+            "--json",
+            "--cd",
+            self.cwd,
+            "--prompt",
+            "x",
+            env={"STUB_SLEEP": "3", "STUB_CMD": "rg live"},
+        )
+        state = self.started_round("antigravity")
+        tid = state["thread_id"]
+        tail = self.spawn("tail", tid)
+        waiter = self.spawn("wait", tid, "--json")
+        runner_out, runner_err = runner.communicate(timeout=60)
+        self.assertEqual(runner.returncode, 0, runner_err)
+        tail_out, tail_err = tail.communicate(timeout=60)
+        self.assertEqual(tail.returncode, 0, tail_err)
+        lines = tail_out.splitlines()
+        self.assertIn("CMD rg live", lines)
+        self.assertEqual(lines[-1], "RESULT succeeded")
+        wait_out, wait_err = waiter.communicate(timeout=60)
+        self.assertEqual(waiter.returncode, 0, wait_err)
+        # ``wait`` prints the very line the runner printed (the saved result file).
+        self.assertEqual(
+            json.loads(wait_out.strip()), json.loads(runner_out.strip().splitlines()[-1])
+        )
+        # Already finished: both return at once, with the same verdict.
+        result, _ = self.invoke("wait", tid)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("round 1: succeeded", result.stdout)
+        self.assertIn("PONG", result.stdout)
+        result, data = self.invoke("wait", tid, "--json")
+        assert data is not None
+        self.assertEqual(data["status"], "succeeded")
+        # A denied round: wait exits with the round's code.
+        _, denied = self.invoke(
+            "antigravity", "--json", "--cd", self.cwd, "--prompt", "x", env={"STUB_DENY": "curl x"}
+        )
+        assert denied is not None
+        result, data = self.invoke("wait", denied["thread_id"], "--json")
+        self.assertEqual(result.returncode, 2)
+        assert data is not None
+        self.assertEqual(data["status"], "denied")
+
+    def test_wait_adopts_an_abandoned_round(self):
+        runner = self.spawn(
+            "codex", "--json", "--cd", self.cwd, "--prompt", "x", env=self.hold_env()
+        )
+        state = self.started_round()
+        tid = state["thread_id"]
+        peer_pid = state["rounds"][0]["peer_pid"]
+        os.kill(runner.pid, signal.SIGKILL)
+        runner.wait()
+        self.wait_for(lambda: self.gone(runner.pid))
+        self.release()
+        self.wait_for(lambda: self.gone(peer_pid))
+        result, data = self.invoke("wait", tid, "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "succeeded")
+        self.assertIn("result file missing", " ".join(data["warnings"]))
+        self.assertTrue(self.thread(tid)["rounds"][0]["adopted_at"])
 
     def test_status_shows_progress_midway(self):
         runner = self.spawn(
@@ -1410,6 +1689,122 @@ class TestExchangeCollisions(InvokeFixture):
         with self.assertRaisesRegex(ValueError, "belongs to thread"):
             write_exchange(cfg, intruder, describe_folder=False)
         self.assertEqual(parse_frontmatter(path.read_text())["thread_id"], one.thread_id)
+
+
+class TestReplayFacts(unittest.TestCase):
+    """The structured facts a replay keeps beside the progress bullets, the ``denied``
+    verdict, and the note a resumed peer gets about its permissions."""
+
+    def test_feed_collects_commands_writes_and_refusals(self):
+        from cairn.harnesses import Event
+
+        replay = invoke.Replay()
+        replay.feed(
+            [
+                Event("command", text="rg foo"),
+                Event("file_written", text="/r/a.py"),
+                Event("file_written", text="/r/a.py"),
+                Event("denied", text="curl x", error="run_command"),
+                Event("done", status="succeeded", text=""),
+            ]
+        )
+        self.assertEqual(replay.commands, ["rg foo"])
+        self.assertEqual(replay.files_written, ["/r/a.py"])
+        self.assertEqual(replay.denied, [{"tool": "run_command", "target": "curl x"}])
+        self.assertEqual(
+            replay.progress,
+            ["run: rg foo", "wrote: /r/a.py", "wrote: /r/a.py", "denied: run_command curl x"],
+        )
+        self.assertTrue(invoke.denied_outcome(replay))
+        replay.done = Event("done", status="succeeded", text="an answer")
+        self.assertFalse(invoke.denied_outcome(replay))
+        replay.done = Event("done", status="failed", text="")
+        self.assertFalse(invoke.denied_outcome(replay))
+        self.assertFalse(invoke.denied_outcome(invoke.Replay()))
+
+    def test_denial_text_and_tail_lines(self):
+        from cairn.harnesses import Event
+
+        permissions = {"path": "/s.json", "allow": ["command(rg)"], "deny": ["command(curl)"]}
+        denied = [
+            {"tool": "run_command", "target": "git diff"},
+            {"tool": "run_command", "target": "curl x"},
+            {"tool": "run_command", "target": "rg x"},
+            {"tool": "replace_file_content", "target": "/r/b.py"},
+        ]
+        text = invoke.denial_text(denied, permissions)
+        self.assertIn("agy auto-denied 4 tool call(s): ", text)
+        self.assertIn("`git diff` needs command(git diff) in permissions.allow", text)
+        self.assertIn("`curl x` denied by command(curl)", text)
+        self.assertIn("`rg x` (the recorded rules allow it; agy still refused it)", text)
+        self.assertIn(
+            "replace_file_content /r/b.py (needs a replace_file_content allow rule)", text
+        )
+        self.assertIn("/s.json", text)
+        self.assertIn(
+            "(+2 more)",
+            invoke.denial_text(denied * 3 if False else denied + denied + denied[:2], permissions),
+        )
+        self.assertEqual(
+            invoke.tail_line(Event("thread_started", thread_id="t1", text="m")), "START t1 m"
+        )
+        self.assertEqual(invoke.tail_line(Event("command", text="rg x")), "CMD rg x")
+        self.assertEqual(invoke.tail_line(Event("file_written", text="/a")), "WRITE /a")
+        self.assertEqual(
+            invoke.tail_line(Event("denied", text="rg x", error="run_command")),
+            "DENIED run_command rg x",
+        )
+        self.assertEqual(invoke.tail_line(Event("message", text="hi")), "MSG hi")
+        self.assertEqual(
+            invoke.tail_line(Event("progress", text="tool: view_file {}")), "TOOL view_file {}"
+        )
+        self.assertEqual(
+            invoke.tail_line(Event("progress", text="tool failed: x: y")), "FAILED x: y"
+        )
+        self.assertEqual(invoke.tail_line(Event("progress", text="run: cat")), "STEP run: cat")
+        self.assertEqual(invoke.tail_line(Event("notice", text="n")), "NOTICE n")
+        self.assertIsNone(invoke.tail_line(Event("done", status="succeeded")))
+
+    def test_permissions_note(self):
+        before = {"allow": ["command(rg)"], "deny": ["command(curl)"]}
+        same = {"allow": ["command(rg)"], "deny": ["command(curl)"]}
+        self.assertIsNone(invoke.permissions_note(before, same, []))
+        self.assertIsNone(invoke.permissions_note(None, same, []))
+        after = {"allow": ["command(rg)", "command(git log)"], "deny": ["command(python)"]}
+        refused = [
+            {"tool": "run_command", "target": "git log -1"},
+            {"tool": "run_command", "target": "curl x"},
+            {"tool": "run_command", "target": "python x.py"},
+            {"tool": "write_to_file", "target": "/r/c"},
+        ]
+        note = invoke.permissions_note(before, after, refused)
+        assert note is not None
+        self.assertTrue(
+            note.startswith("[cairn invoke] Shell permissions since your previous round:")
+        )
+        self.assertIn("- newly allowed: command(git log)", note)
+        self.assertIn("- newly denied: command(python)", note)
+        self.assertIn("- no longer denied: command(curl)", note)
+        self.assertIn("- previously refused `git log -1`: now allowed", note)
+        self.assertIn(
+            "- previously refused `curl x`: still has no allow rule; do not retry it", note
+        )
+        self.assertIn(
+            "- previously refused `python x.py`: still denied by command(python); do not retry it",
+            note,
+        )
+        self.assertIn("- previously refused: write_to_file /r/c; it stays refused", note)
+        self.assertTrue(note.endswith("A refused call is never retried by rephrasing it."))
+        # Nothing changed but something was refused: the verdicts alone are the note.
+        only = invoke.permissions_note(before, same, refused[:2])
+        assert only is not None
+        self.assertNotIn("newly", only)
+        self.assertIn("`git log -1`: still has no allow rule", only)
+        self.assertIn("`curl x`: still denied by command(curl)", only)
+        # A first round has no previous rules to diff against, even with refusals recorded.
+        first = invoke.permissions_note(None, after, refused[:1])
+        assert first is not None
+        self.assertNotIn("newly allowed", first)
 
 
 class TestFollowCursor(unittest.TestCase):

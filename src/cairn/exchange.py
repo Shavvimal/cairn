@@ -290,6 +290,13 @@ def _round_lines(round_: dict) -> list[str]:
         from .invoke import billing_text
 
         lines.append(f"- billing: {billing_text(billing)}")
+    files = round_.get("files_written")
+    if isinstance(files, list):
+        lines.append(f"- files written: {', '.join(str(f) for f in files) if files else 'none'}")
+    denied = round_.get("denied")
+    if isinstance(denied, list) and denied:
+        shown = [f"{d.get('tool', 'tool')} {d.get('target', '')}".strip() for d in denied]
+        lines.append(f"- denied: {'; '.join(shown)[:500]}")
     if round_.get("error"):
         lines.append(f"- error: {' '.join(str(round_['error']).split())[:500]}")
     lines.append("")
