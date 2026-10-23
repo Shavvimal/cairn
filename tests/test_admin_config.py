@@ -65,6 +65,7 @@ class TestConfigShow(_ConfigFixture):
         enabled = {c["name"]: c["enabled"] for c in data["collections"]}
         self.assertTrue(enabled["claude-code-sessions"])
         self.assertTrue(enabled["codex-sessions"])
+        self.assertFalse(enabled["antigravity-sessions"])
         self.assertFalse(enabled["cursor-sessions"])
         sd = next(c for c in data["collections"] if c["name"] == "service-docs")
         self.assertEqual(sd["type"], "service-docs")

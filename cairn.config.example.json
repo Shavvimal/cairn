@@ -13,7 +13,7 @@
     "antigravity": { "model": null, "effort": null, "profile": "review", "timeout_s": 1800, "idle_timeout_s": 900, "quiet_after_s": 120, "stall_after_s": 600, "billing": { "route": "inherit", "project": null, "location": null } }
   },
   "//invoke.antigravity.billing": "Optional, antigravity only: which credits a headless agy run bills. route: inherit (the host shell's environment decides, the default) | plan (consumer plan quota: AGY_ADC_AUTH is stripped) | gcp (Vertex AI through Application Default Credentials, billed to the GCP quota project; the run is refused before anything is spawned unless the ADC file and a quota project exist, and the route agy took is read back from its log). project/location export GOOGLE_CLOUD_QUOTA_PROJECT / GOOGLE_CLOUD_LOCATION when set; null leaves the ADC file's quota_project_id and agy's default location. `cairn invoke antigravity --billing ROUTE` overrides the route for one round.",
-  "//collections": "Each key is BOTH the QMD collection name AND the output subdirectory under data_root.",
+  "//collections": "Each key is BOTH the QMD collection name AND the output subdirectory under data_root. antigravity-sessions.store is the agy app-data directory (the CLI's ~/.gemini/antigravity-cli; the IDE and the Antigravity 2.0 app use ~/.gemini/antigravity-ide and ~/.gemini/antigravity with the same layout).",
   "//sync": "Per-collection sync policy (config-as-data). 'enabled' is the integration on/off switch the engine reads - disabled sources are skipped by 'cairn sync'. 'since' is the export window (today|yesterday|Nd|Nw|YYYY-MM-DD). 'on_hook': false opts out of the originating host's SessionEnd sync (otherwise enabled). Legacy 'sync --hook' still defaults to Claude. Omitting the whole block means enabled with a 1d window.",
   "collections": {
     "claude-code-sessions": {
@@ -22,6 +22,10 @@
     },
     "codex-sessions": {
       "store": "~/.codex/sessions",
+      "sync": { "enabled": true, "since": "1d" }
+    },
+    "antigravity-sessions": {
+      "store": "~/.gemini/antigravity-cli",
       "sync": { "enabled": true, "since": "1d" }
     },
     "cursor-sessions": {

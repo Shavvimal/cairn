@@ -28,10 +28,10 @@ Round lifecycle:
    (peer export, caller export, links, exchange document, index). Pipeline
    failures never change the outcome (D11); each step lands in the round's
    publication ledger (D24) so ``cairn invoke publish`` or the next
-   ``cairn sync`` can finish it without running the peer again. A peer without
-   a cairn source adapter (Antigravity, for now) has no session to export or
-   link, so those steps are not applicable to its rounds; with a known caller
-   the exchange document still lands in the caller's folder.
+   ``cairn sync`` can finish it without running the peer again. A peer whose
+   collection is not configured has no session to export or link, so those steps
+   are not applicable to its rounds; with a known caller the exchange document
+   still lands in the caller's folder.
 """
 
 from __future__ import annotations
@@ -514,14 +514,21 @@ DOWNSTREAM: dict[str, tuple[str, ...]] = {
 NOT_ATTEMPTED = "not attempted yet"
 
 
-def _applicable(step: str, round_: dict, peer: str) -> bool:
+def _exportable(config: CairnConfig, peer: str) -> bool:
+    """Whether the peer's sessions can be exported: a registered source whose
+    collection is configured with a store."""
+    return peer in BY_NAME and _store(config, peer) is not None
+
+
+def _applicable(config: CairnConfig, step: str, round_: dict, peer: str) -> bool:
     """Whether ``step`` applies to a round of ``peer``.
 
-    A peer with no cairn source adapter has no session document to export or link.
-    Without a caller either, nothing anchors an exchange document and nothing lands
-    in a collection, so only the answer is kept.
+    A peer whose collection is not configured (or that has no source adapter) has
+    no session document to export or link. Without a caller either, nothing anchors
+    an exchange document and nothing lands in a collection, so only the answer is
+    kept.
     """
-    exportable = peer in BY_NAME
+    exportable = _exportable(config, peer)
     caller = bool(round_.get("caller_session"))
     if step == "exported":
         return exportable
@@ -532,26 +539,26 @@ def _applicable(step: str, round_: dict, peer: str) -> bool:
     return exportable or caller  # exchange_written, indexed
 
 
-def applicable_steps(round_: dict, peer: str) -> tuple[str, ...]:
-    return tuple(step for step in PUBLICATION_STEPS if _applicable(step, round_, peer))
+def applicable_steps(config: CairnConfig, round_: dict, peer: str) -> tuple[str, ...]:
+    return tuple(step for step in PUBLICATION_STEPS if _applicable(config, step, round_, peer))
 
 
-def init_ledger(round_: dict, peer: str) -> None:
+def init_ledger(config: CairnConfig, round_: dict, peer: str) -> None:
     """Record every applicable step without a completion timestamp as pending, so a
     runner killed between steps leaves an explicit to-do list behind."""
     publication = round_.setdefault("publication", {})
     pending = publication.setdefault("pending", {})
-    for step in applicable_steps(round_, peer):
+    for step in applicable_steps(config, round_, peer):
         if step not in publication:
             pending.setdefault(step, NOT_ATTEMPTED)
 
 
-def pending_steps(round_: dict, peer: str) -> tuple[str, ...]:
+def pending_steps(config: CairnConfig, round_: dict, peer: str) -> tuple[str, ...]:
     """Applicable steps of a finished round that have no completion timestamp."""
     if not round_.get("finished_at"):
         return ()
     publication = round_.get("publication") or {}
-    return tuple(step for step in applicable_steps(round_, peer) if step not in publication)
+    return tuple(step for step in applicable_steps(config, round_, peer) if step not in publication)
 
 
 def publish_round(
@@ -571,10 +578,10 @@ def publish_round(
     returned as warnings; they never raise and never touch the outcome (D11).
     """
     warnings = warnings if warnings is not None else []
-    todo = set(applicable_steps(round_, state.peer) if steps is None else steps)
-    init_ledger(round_, state.peer)
+    todo = set(applicable_steps(config, round_, state.peer) if steps is None else steps)
+    init_ledger(config, round_, state.peer)
     for step in PUBLICATION_STEPS:
-        if step not in todo or not _applicable(step, round_, state.peer):
+        if step not in todo or not _applicable(config, step, round_, state.peer):
             continue
         try:
             if step == "indexed":
@@ -593,7 +600,7 @@ def publish_round(
         else:
             _mark(round_, step, None)
             for later in DOWNSTREAM[step]:
-                if _applicable(later, round_, state.peer) and later not in todo:
+                if _applicable(config, later, round_, state.peer) and later not in todo:
                     _mark(round_, later, f"redo after {step}")
                     todo.add(later)
         state.save()
@@ -610,6 +617,7 @@ def _retryable(text: str) -> bool:
 
 
 def _finish(
+    config: CairnConfig,
     state: ThreadState,
     round_: dict,
     *,
@@ -660,7 +668,7 @@ def _finish(
         answer_path=str(answer_path) if answer_path.exists() else None,
     )
     _mark(round_, "answer_saved", None)
-    init_ledger(round_, state.peer)
+    init_ledger(config, round_, state.peer)
 
 
 def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str | None = None):
@@ -695,6 +703,7 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
         error = KEYCHAIN_GUIDANCE
     round_["adopted_at"] = now_iso()
     _finish(
+        config,
         state,
         round_,
         outcome=final,
@@ -1607,6 +1616,7 @@ class Runner:
         if exit_code is None:
             exit_code = rc if isinstance(rc, int) and rc > 0 else EXIT_FATAL
         _finish(
+            self.config,
             self.state,
             self.round,
             outcome=outcome,
@@ -1620,6 +1630,11 @@ class Runner:
         billing_issue = (self.round.get("billing") or {}).get("problem")
         if billing_issue:
             self.warnings.append(f"billing: {billing_issue}")
+        if self.peer in BY_NAME and not _exportable(self.config, self.peer):
+            self.warnings.append(
+                f"{BY_NAME[self.peer].collection} is not configured; the peer session was "
+                "not exported or linked"
+            )
         self.state.save()
         if self.state.thread_id:
             publish_round(
@@ -1662,7 +1677,7 @@ def publish_thread(config: CairnConfig, run_dir: Path, *, index: bool = True) ->
         for round_ in state.rounds:
             if not round_.get("finished_at"):
                 continue
-            steps = pending_steps(round_, state.peer)
+            steps = pending_steps(config, round_, state.peer)
             if not steps:
                 continue
             publish_round(config, state, round_, steps=steps, index=index, warnings=warnings)
@@ -1690,7 +1705,7 @@ def drain_publications(config: CairnConfig) -> list[dict]:
             continue
         last = state.last_round
         open_round = bool(last and not last.get("finished_at"))
-        if not open_round and not any(pending_steps(r, state.peer) for r in state.rounds):
+        if not open_round and not any(pending_steps(config, r, state.peer) for r in state.rounds):
             continue
         reports.append(publish_thread(config, run_dir))
     return reports

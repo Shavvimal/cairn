@@ -91,7 +91,7 @@ checkbox is confusing.
 
 - **data_root** - directory for exported markdown (default `~/.cairn/.context`; they may
   point it anywhere, e.g. a git-tracked notes repo).
-- **session integrations** (multi-select) - which of **claude / codex / cursor / granola** to
+- **session integrations** (multi-select) - which of **claude / codex / antigravity / cursor / granola** to
   enable. Config-as-data: only enabled sources are synced, written into the config in step 4
   (`--enable`), not hardcoded. **Do NOT put service-docs in this list.**
 - **service docs?** (separate yes/no) - "Do you also want to index local documentation
@@ -149,7 +149,8 @@ into `config init` (list ONLY the session sources the user picked - **not** serv
 service docs are configured by folder in step 4b):
 
 ```bash
-cairn config init --data-root "<data_root>" --enable claude,codex,cursor,granola
+cairn config init --data-root "<data_root>" --enable claude,codex,antigravity,cursor,granola
+# Pre-select antigravity when `command -v agy` succeeds (the agy CLI is installed).
 ```
 
 `--enable` writes `sync.enabled: true` for the listed sources and `false` for the rest. Then
@@ -237,6 +238,7 @@ stop and report it (a document may never fit in one session).
 
 ```bash
 cairn hook install --harness HOST  # HOST is claude or codex from the adapter
+cairn hook install --harness antigravity  # when antigravity is enabled: agy's Stop hook in ~/.gemini/config/hooks.json
 cairn cron install     # absolute-path 'cairn sync --cron' entry, safe under cron's PATH
 ```
 

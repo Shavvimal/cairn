@@ -41,16 +41,17 @@ cairn exports your AI coding sessions, meetings, and docs to markdown, indexes t
 Sources ──► Exporters ──► Markdown (.context/) ──► QMD index ──► /recall
 ```
 
-- **Exporters** pull each source into clean markdown: Claude Code & Codex JSONL logs, Cursor's SQLite databases, Granola meeting transcripts (via its API), and service docs mirrored from your repos.
+- **Exporters** pull each source into clean markdown: Claude Code, Codex and Antigravity (agy) JSONL transcripts, Cursor's SQLite databases, Granola meeting transcripts (via its API), and service docs mirrored from your repos.
 - **QMD** indexes everything locally — BM25 full-text, vector embeddings, and an LLM reranker, all running on-device via `node-llama-cpp`.
 - **`/recall`** loads context before you start working, so you don't have to re-explain what you were doing.
 
-Six collections and one search index:
+Seven collections and one search index:
 
 | Collection             | Source                                           |
 | ---------------------- | ------------------------------------------------ |
 | `claude-code-sessions` | `~/.claude/projects` JSONL transcripts, subagent transcripts, peer exchanges |
 | `codex-sessions`       | `~/.codex/sessions` rollout JSONL, subagent rollouts, peer exchanges |
+| `antigravity-sessions` | `~/.gemini/antigravity-cli` agy conversation transcripts, subagent conversations |
 | `cursor-sessions`      | Cursor `state.vscdb` SQLite databases            |
 | `granola-sessions`     | Granola meeting API (transcripts + AI summaries) |
 | `service-docs`         | Markdown docs mirrored from your repos           |
@@ -209,9 +210,9 @@ Each run captures the peer's real thread id, streams its events to a per-thread 
 session documents, and records an exchange document (prompt, progress, answer and result
 per round) in the calling session's folder. Profiles `review` (read-only), `edit` and
 `full` map to each peer's native sandbox, permission or mode flags, and the record stores the
-exact flags that ran. Antigravity is a peer only for now: `agy` must be logged in once
-interactively, its conversation is resumable, and the exchange document is the record (no
-Antigravity session document is exported or linked until it gets a source adapter). Which
+exact flags that ran. `agy` must be logged in once interactively; its conversation is
+exported like any other session, linked to the caller, and resumable with
+`cairn resume antigravity:<id>`. Which
 credits a headless `agy` run bills is a per-machine choice (`invoke.antigravity.billing`):
 `inherit` the host environment, force the consumer `plan` quota, or `gcp` (Vertex AI through
 Application Default Credentials on a named quota project, checked before the spawn and read
@@ -263,10 +264,12 @@ To change later, edit `sync.enabled` per collection and re-run `cairn doctor` �
 
 `cairn sync` is a single orchestration command; each collection runs as its own subprocess, so one failing source never blocks the others. Two triggers keep context current:
 
-- **SessionEnd hook** — queues the originating Claude or Codex session and starts a detached worker. Export, collection registration and `qmd update` run after the callback returns. Embeddings stay out of this path.
+- **SessionEnd hook** — queues the originating Claude or Codex session and starts a detached worker. Export, collection registration and `qmd update` run after the callback returns. Embeddings stay out of this path. Antigravity has no SessionEnd; its `Stop` hook (end of every turn) does the same through `cairn hook handle --harness antigravity`, which always answers `{}` so it never blocks agy.
 - **Hourly cron** (`cairn cron install`) — retries failed work, exports other enabled sources, and maintains embeddings.
 
-Configure with `cairn hook install --harness claude|codex`. The Codex installer inspects
+Configure with `cairn hook install --harness claude|codex|antigravity`. The Antigravity
+installer writes one named hook (`cairn`) into the global `~/.gemini/config/hooks.json`,
+shared by the agy CLI, the IDE and the Antigravity 2.0 app. The Codex installer inspects
 actual hook discovery. Codex 0.160.0/0.163.0 currently expose portable skills/onboarding
 but omit portable hooks; Cairn installs a narrowly owned user hook as a fallback. If a
 client discovers the bundled hook, setup removes the fallback instead. Unrelated host
@@ -367,6 +370,7 @@ references/peer-review.md  # adversarial review doctrine shared by the invoke sk
 docs/                      # design plans, research and acceptance evidence
 hooks/hooks.json           # Claude SessionEnd
 hooks/codex.json           # Codex SessionEnd (explicit selection)
+hooks/antigravity.json     # Antigravity Stop (reference shape; `cairn hook install` writes the real one)
 tests/                     # stdlib unittest suite
 cairn.config.example.json  # committed config template
 .context/                  # synced data (data_root), git-ignored

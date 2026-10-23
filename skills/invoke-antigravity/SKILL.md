@@ -14,9 +14,9 @@ Then read [the peer review doctrine](../../references/peer-review.md).
 
 The engine is `cairn invoke antigravity`. This skill only drives it. The CLI is authoritative
 for flags: run `cairn invoke antigravity --help`. Every run is recorded under cairn's data
-root, and an exchange document with the prompt, progress, answer and result per round lands
-in the calling session's folder. Antigravity has no cairn source adapter yet, so no
-Antigravity session document is exported or linked; the exchange document is the record.
+root, the Antigravity conversation is exported as a session document and linked to the
+calling session, and an exchange document with the prompt, progress, answer and result per
+round lands in the calling session's folder.
 
 ## Host caveat
 
@@ -132,13 +132,13 @@ per thread, then escalate to the user with the accepted, dismissed and unresolve
 
 ## 8. Close
 
-Tell the user: the conversation id, the exchange document path from the result, and how to
-continue: `cairn invoke antigravity --resume <conversation_id> --prompt "…"` for another
-round, or `agy --conversation <conversation_id>` to open it interactively. If `warnings` is
-empty and `indexed` is true, `/search` finds the exchange document now; if `indexed` is
-false, `rg` finds it at once and `/search` after `cairn invoke publish <conversation_id>` or
-the next `cairn sync`. A run with no calling session has no exchange document: the answer is
-in `answer-NN.md` under the run directory the result names.
+Tell the user: the conversation id, the exchange document path and the Antigravity session
+document path from the result, and how to continue:
+`cairn invoke antigravity --resume <conversation_id> --prompt "…"` for another round, or
+`cairn resume antigravity:<conversation_id>` to open it interactively. If `warnings` is empty
+and `indexed` is true, `/search` finds the exchange document and `/recall` lists the peer
+session now; if `indexed` is false, `rg` finds them at once and `/search` after
+`cairn invoke publish <conversation_id>` or the next `cairn sync`.
 
 ## Errors
 

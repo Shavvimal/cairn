@@ -35,7 +35,7 @@ from .config import CairnConfig, ConfigError, get_config
 from .harnesses import detect_harness, get_harness
 from .health import Thresholds, activity_of, parse_iso
 
-_SESSION_REF = re.compile(r"^(claude|codex):\S+$")
+_SESSION_REF = re.compile(r"^(claude|codex|antigravity):\S+$")
 _TASK_ID = re.compile(r"<task-id>\s*([^<\s]+)\s*</task-id>")
 _TASK_STATUS = re.compile(r"<status>\s*([A-Za-z_-]+)\s*</status>")
 _TAIL_BYTES = 256 * 1024
@@ -411,7 +411,9 @@ class UsageError(Exception):
 def resolve_session(explicit: str | None) -> str | None:
     if explicit:
         if not _SESSION_REF.match(explicit):
-            raise UsageError(f"--session must look like claude:<id> or codex:<id>: {explicit!r}")
+            raise UsageError(
+                f"--session must look like claude:<id>, codex:<id> or antigravity:<id>: {explicit!r}"
+            )
         return explicit
     try:
         name = detect_harness()
@@ -425,7 +427,11 @@ def collect(config: CairnConfig, session: str | None, everything: bool) -> list[
     rows = peer_rows(config, session, everything)
     if session is not None:
         source, native = session.split(":", 1)
-        rows += claude_rows(config, native) if source == "claude" else codex_rows(config, native)
+        if source == "claude":
+            rows += claude_rows(config, native)
+        elif source == "codex":
+            rows += codex_rows(config, native)
+        # antigravity: no subagent transcripts are exported yet; peer rows cover it.
     return rows
 
 

@@ -36,8 +36,10 @@ class StoreFixture(unittest.TestCase):
         self.cwd = str(self.root / "project")
         self.claude = self.root / "claude"
         self.codex = self.root / "codex"
+        self.antigravity = self.root / "antigravity"
         self.claude.mkdir()
         self.codex.mkdir()
+        (self.antigravity / "brain").mkdir(parents=True)
         self.config = self.root / "config.json"
         self.config.write_text(
             json.dumps(
@@ -47,6 +49,7 @@ class StoreFixture(unittest.TestCase):
                     "collections": {
                         "claude-code-sessions": {"store": str(self.claude)},
                         "codex-sessions": {"store": str(self.codex)},
+                        "antigravity-sessions": {"store": str(self.antigravity)},
                     },
                     "project_groups": {},
                     "repo_catalog": {},
@@ -81,7 +84,7 @@ class StoreFixture(unittest.TestCase):
         'if sys.argv[1:2] == ["status"]:\n'
         '    print("Documents\\n  Total:    2 files indexed\\n  Vectors:  2 embedded")\n'
         "else:\n"
-        '    print("qmd://codex-sessions/\\nqmd://claude-code-sessions/")\n'
+        '    print("qmd://codex-sessions/\\nqmd://claude-code-sessions/\\nqmd://antigravity-sessions/")\n'
     )
 
     def fake_qmd(self, body: str | None = None) -> Path:
@@ -120,6 +123,8 @@ class StoreFixture(unittest.TestCase):
             ]
             (self.claude / "-demo").mkdir(exist_ok=True)
             path = self.claude / "-demo" / (sid + ".jsonl")
+        elif source == "antigravity":
+            return self.native_antigravity(sid, stamps, text)
         else:
             records = [
                 {
@@ -138,6 +143,69 @@ class StoreFixture(unittest.TestCase):
             path = self.codex / ("rollout-" + sid + ".jsonl")
         path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
         return path
+
+    def native_antigravity(self, sid, stamps, text, title=None, parent=None):
+        """A brain transcript (user prompt + answer) and its conversation_summaries row."""
+        import sqlite3
+
+        logs = self.antigravity / "brain" / sid / ".system_generated" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        steps = []
+        for index, stamp in enumerate(stamps):
+            steps.append(
+                {
+                    "step_index": 2 * index,
+                    "source": "USER_EXPLICIT",
+                    "type": "USER_INPUT",
+                    "status": "DONE",
+                    "created_at": stamp,
+                    "content": f"<USER_REQUEST>\n{text}\n</USER_REQUEST>",
+                }
+            )
+            steps.append(
+                {
+                    "step_index": 2 * index + 1,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "created_at": stamp,
+                    "input_tokens": 3,
+                    "output_tokens": 1,
+                    "cache_read_tokens": 0,
+                    "content": f"Reply to: {text}",
+                }
+            )
+        body = "".join(json.dumps(step) + "\n" for step in steps)
+        (logs / "transcript_full.jsonl").write_text(body)
+        (logs / "transcript.jsonl").write_text(body)
+        db = sqlite3.connect(self.antigravity / "conversation_summaries.db")
+        db.execute(
+            "create table if not exists conversation_summaries (conversation_id text primary "
+            "key, title text, preview text, step_count integer, last_modified_time text, "
+            "workspace_uris text, status text, source text, agent_name text, "
+            "parent_conversation_id text, nesting_depth integer, last_user_input_time text)"
+        )
+        last = stamps[-1].replace("T", " ").replace("Z", "+00:00")
+        db.execute(
+            "insert or replace into conversation_summaries values (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                sid,
+                title or f"Orchard {sid[:8]}",
+                text[:60],
+                len(steps),
+                last,
+                json.dumps([Path(self.cwd).as_uri()]),
+                "CASCADE_RUN_STATUS_IDLE",
+                "",
+                "",
+                parent or "",
+                1 if parent else 0,
+                last,
+            ),
+        )
+        db.commit()
+        db.close()
+        return logs / "transcript.jsonl"
 
     def records(self):
         return SessionStore(config.get_config()).records()

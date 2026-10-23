@@ -259,6 +259,147 @@ class TestHooks(StoreFixture):
         self.assertEqual({r.source for r in self.records()}, {"claude", "codex"})
 
 
+class TestAntigravityHook(StoreFixture):
+    """agy's ``Stop`` hook: the camelCase payload, the ``{}`` reply contract, and the
+    named-hook registration in ``~/.gemini/config/hooks.json``."""
+
+    def stop_payload(self, sid="agy-hook-session"):
+        transcript = self.native("antigravity", sid)
+        return {
+            "conversationId": sid,
+            "workspacePaths": [self.cwd],
+            "transcriptPath": str(transcript),
+            "artifactDirectoryPath": str(transcript.parents[2]),
+            "modelName": "gemini-4-argon-high",
+            "executionNum": 1,
+            "terminationReason": "NO_TOOL_CALL",
+            "error": "",
+            "fullyIdle": True,
+        }
+
+    def test_stop_event_exports_the_conversation(self):
+        cfg = config.get_config()
+        event = get_harness("antigravity").decode(self.stop_payload())
+        self.assertTrue(hooks.allowed(cfg, event))
+        coll = cfg.collections["antigravity-sessions"]
+        changed = replace(
+            cfg,
+            collections={
+                **cfg.collections,
+                "antigravity-sessions": replace(coll, sync=replace(coll.sync, enabled=False)),
+            },
+        )
+        with patch("cairn.hooks.launch") as launch:
+            self.assertEqual(
+                hooks.handle(changed, "antigravity", self.stop_payload())["state"], "disabled"
+            )
+            launch.assert_not_called()
+        self.fake_qmd()
+        hooks.enqueue(cfg, event)
+        self.assertEqual(hooks.worker(config.get_config()), 0)
+        records = self.records()
+        self.assertEqual(
+            [(r.source, r.session_id) for r in records], [("antigravity", "agy-hook-session")]
+        )
+        self.assertEqual(records[0].title, "Orchard agy-hook")
+        text = records[0].path.read_text()
+        self.assertIn("type: antigravity-session", text)
+        self.assertIn("Shared orchard marker", text)
+
+    def test_handle_always_answers_with_an_empty_decision(self):
+        self.fake_qmd()
+        good = self.stop_payload()
+        cases = [
+            (json.dumps(good), ""),
+            ("not json", "cairn hook:"),
+            (json.dumps({"conversationId": ""}), "cairn hook:"),
+        ]
+        for stdin, stderr_marker in cases:
+            with self.subTest(stdin=stdin[:20]):
+                result = subprocess.run(
+                    [sys.executable, "-m", "cairn", "hook", "handle", "--harness", "antigravity"],
+                    input=stdin,
+                    env=self.env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), "{}")
+                if stderr_marker:
+                    self.assertIn(stderr_marker, result.stderr)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if hooks.status(config.get_config())["counts"]["completed"] == 1:
+                break
+            time.sleep(0.05)
+        self.assertEqual(hooks.status(config.get_config(), "antigravity")["counts"]["completed"], 1)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_registration_preserves_foreign_hooks_and_removes_only_its_own(self):
+        from cairn.harnesses import antigravity_registration as reg
+
+        path = self.root / "home" / ".gemini" / "config" / "hooks.json"
+        self.assertEqual(reg.hooks_file(), path)  # HOME points into the fixture
+        foreign = {
+            "lint": {
+                "PostToolUse": [{"matcher": "run_command", "hooks": [{"command": "./lint.sh"}]}]
+            }
+        }
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(foreign))
+        message = reg.configure(config.get_config())
+        self.assertIn(str(path), message)
+        data = json.loads(path.read_text())
+        self.assertEqual(data["lint"], foreign["lint"])
+        self.assertEqual(data["cairn"]["enabled"], True)
+        handlers = data["cairn"]["Stop"]
+        self.assertEqual(len(handlers), 1)
+        self.assertIn("hook handle --harness antigravity", handlers[0]["command"])
+        self.assertIn("CAIRN_CONFIG=", handlers[0]["command"])
+        self.assertEqual(handlers[0]["timeout"], reg.HOOK_TIMEOUT_S)
+        self.assertEqual(reg.registration()["registered"], True)
+        reg.configure(config.get_config())  # idempotent
+        self.assertEqual(len(json.loads(path.read_text())["cairn"]["Stop"]), 1)
+        # The registered command works from a bare environment and answers {}.
+        self.fake_qmd()
+        result = subprocess.run(
+            ["/bin/sh", "-c", handlers[0]["command"]],
+            input=json.dumps(self.stop_payload()),
+            env={"PATH": "/usr/bin:/bin", "HOME": self.env["HOME"]},
+            capture_output=True,
+            text=True,
+            cwd=path.parent,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "{}")
+        self.run_cli("hook", "worker")
+        self.assertEqual(hooks.status(config.get_config())["counts"]["completed"], 1)
+        # status reports the host side; uninstall removes only the cairn key.
+        report = json.loads(self.run_cli("hook", "status", "--harness", "antigravity").stdout)
+        self.assertTrue(report["host_hooks"]["registered"])
+        reg.configure(None, remove=True)
+        data = json.loads(path.read_text())
+        self.assertNotIn("cairn", data)
+        self.assertEqual(data["lint"], foreign["lint"])
+        self.assertFalse(reg.registration()["registered"])
+        self.assertFalse(reg.ownership_path().exists())
+
+    def test_install_and_uninstall_commands(self):
+        from cairn.harnesses import antigravity_registration as reg
+
+        self.assertIn(
+            "Registered", self.run_cli("hook", "install", "--harness", "antigravity").stdout
+        )
+        self.assertTrue(reg.registration()["registered"])
+        self.assertIn(
+            "Removed", self.run_cli("hook", "uninstall", "--harness", "antigravity").stdout
+        )
+        self.assertFalse(reg.registration()["registered"])
+        self.run_cli("hook", "install", "--harness", "antigravity")
+        self.run_cli("hook", "uninstall")  # the bare form removes every owned registration
+        self.assertFalse(reg.registration()["registered"])
+
+
 class TestCodexRegistration(StoreFixture):
     def setUp(self):
         super().setUp()

@@ -38,6 +38,13 @@ SOURCES = (
     Source(
         "codex", "codex-sessions", "codex-session", targeted=True, subagent_type="codex-subagent"
     ),
+    Source(
+        "antigravity",
+        "antigravity-sessions",
+        "antigravity-session",
+        targeted=True,
+        subagent_type="antigravity-subagent",
+    ),
     Source("cursor", "cursor-sessions", "cursor-session", "composer_id"),
     Source("granola", "granola-sessions", "granola-meeting", "meeting_id"),
     Source("service-docs", "service-docs", "", windowed=False),

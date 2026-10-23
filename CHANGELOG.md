@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directly. An unknown model or a missing login is reported as not retryable. Defaults
   live under `invoke.antigravity` in the config.
 - Skill `invoke-antigravity` for both hosts.
+- Source adapter `antigravity` (`cairn antigravity export|list|context|note|close|log|resume`,
+  collection `antigravity-sessions`): every agy conversation exports from the JSONL
+  transcript agy keeps under `<app data>/brain/<id>/.system_generated/logs/`, with the
+  title, workspace, run status and lineage from `conversation_summaries.db`. User prompts
+  lose agy's wrapper blocks, thinking is folded, tool results are paired with their calls,
+  system messages render as `### System`, subagent conversations become
+  `antigravity-subagent` documents in the parent's folder, and the agent's artifacts are
+  listed. Peer runs (`cairn invoke antigravity`) now export and link the conversation like
+  Codex and Claude peers.
+- `cairn hook install|uninstall|status --harness antigravity`: a cairn-owned `Stop` hook in
+  the global `~/.gemini/config/hooks.json` (agy has no SessionEnd; `Stop` fires per turn).
+  `cairn hook handle --harness antigravity` queues the export and always answers `{}` so it
+  never blocks agy. Link references accept every registered session source.
 - `invoke.antigravity.billing` (`route`, `project`, `location`): which credits a headless
   `agy` run bills. `inherit` (default) passes the host environment through; `plan` strips
   `AGY_ADC_AUTH` so the consumer plan quota pays; `gcp` sets `AGY_ADC_AUTH=true` and the
@@ -30,11 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cairn doctor` reports whether the `gcp` route is ready.
 
 ### Changed
-- Publication steps are decided per peer: a peer without a cairn source adapter
-  (Antigravity, for now) has no session document to export or link, so those steps are
-  not applicable to its rounds instead of pending forever. With a known caller the
-  exchange document still lands in the caller's folder and is indexed; without one, only
-  the answer is kept under the run directory.
+- Publication steps are decided per peer: a peer whose collection is not configured has no
+  session document to export or link, so those steps are not applicable to its rounds
+  (one warning in the result) instead of pending forever. With a known caller the exchange
+  document still lands in the caller's folder and is indexed; without one, only the answer
+  is kept under the run directory.
 - Harness adapters own the bytes a large prompt takes on the peer's stdin
   (`stdin_payload`), and the recorded argv masks a prompt glued to a flag.
 

@@ -5,7 +5,8 @@ Each adapter also knows how to run its CLI headlessly as a peer agent for
 shared permission profile, the bytes a prompt takes on the child's stdin, how to
 read one line of its JSON event stream, where its native transcript lands, and how
 to check a model/effort choice up front. Claude and Codex are hosts and peers;
-Antigravity (``agy``) is a peer only, until it gets a hook and a source adapter.
+Antigravity (``agy``) is a peer whose conversations reach cairn through its
+``Stop`` hook (:mod:`cairn.harnesses.antigravity_registration`).
 """
 
 from __future__ import annotations

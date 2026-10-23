@@ -35,6 +35,8 @@ from .storage import atomic_write, lock_path, locked
 RETENTION_SECONDS = 7 * 24 * 3600
 RECENT_COMPLETED = 10  # completed requests shown by `hook status` without --all
 MAX_ATTEMPTS = 3
+# Hosts whose lifecycle event cairn can receive: Claude and Codex SessionEnd, agy Stop.
+HOOK_HARNESSES = ("claude", "codex", "antigravity")
 
 
 def job_dir(config: CairnConfig) -> Path:
@@ -358,6 +360,21 @@ def compact_status(report: dict, show_all: bool) -> dict:
     return {**report, "requests": kept, "hidden_completed": hidden}
 
 
+def _handle_antigravity() -> int:
+    """``hook handle --harness antigravity``: agy parses the handler's stdout and
+    blocks its own loop on any decision other than an empty one, and a non-zero exit
+    is a hook failure. So this always prints ``{}`` and exits 0; problems go to
+    stderr, and the work stays durable in the queue when a worker could not start."""
+    try:
+        payload = json.load(sys.stdin)
+        result = handle(get_config(), "antigravity", payload)
+        print(json.dumps(result), file=sys.stderr)
+    except (OSError, ValueError, RuntimeError, ConfigError) as exc:
+        print(f"cairn hook: {exc}", file=sys.stderr)
+    print("{}")
+    return 0
+
+
 def iso(timestamp: object) -> str:
     if isinstance(timestamp, int | float):
         return datetime.fromtimestamp(timestamp, tz=UTC).isoformat(timespec="seconds")
@@ -367,8 +384,8 @@ def iso(timestamp: object) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cairn hook")
     sub = parser.add_subparsers(dest="command", required=True)
-    callback = sub.add_parser("handle", help="queue a host SessionEnd event from stdin")
-    callback.add_argument("--harness", required=True, choices=("claude", "codex"))
+    callback = sub.add_parser("handle", help="queue a host session-end event from stdin")
+    callback.add_argument("--harness", required=True, choices=HOOK_HARNESSES)
     callback.add_argument("--require-plugin", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("worker", help="drain/retry durable work, without embedding")
     retry_parser = sub.add_parser(
@@ -376,16 +393,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     retry_parser.add_argument("reference", metavar="SOURCE:FULL_SESSION_ID")
     inspect = sub.add_parser("status", help="show observed execution and queue state")
-    inspect.add_argument("--harness", choices=("claude", "codex"))
+    inspect.add_argument("--harness", choices=HOOK_HARNESSES)
     inspect.add_argument(
         "--all",
         action="store_true",
         help=f"list every completed request, not the last {RECENT_COMPLETED}",
     )
     install = sub.add_parser("install", help="record launcher; inspect/register a host hook")
-    install.add_argument("--harness", choices=("claude", "codex"))
+    install.add_argument("--harness", choices=HOOK_HARNESSES)
     uninstall = sub.add_parser("uninstall", help="remove owned registration; preserve shared data")
-    uninstall.add_argument("--harness", choices=("claude", "codex"))
+    uninstall.add_argument("--harness", choices=HOOK_HARNESSES)
     export = sub.add_parser("export", help=argparse.SUPPRESS)
     export.add_argument(
         "--source", required=True, choices=[s.source for s in BY_NAME.values() if s.targeted]
@@ -393,18 +410,26 @@ def main(argv: list[str] | None = None) -> int:
     export.add_argument("--session-id", required=True)
     export.add_argument("--transcript")
     args = parser.parse_args(argv)
+    if args.command == "handle" and args.harness == "antigravity":
+        return _handle_antigravity()
     try:
         if args.command == "uninstall":
             if args.harness == "codex":
                 from .harnesses.codex_registration import configure
 
                 print(configure(None, remove=True))
+            elif args.harness == "antigravity":
+                from .harnesses import antigravity_registration
+
+                print(antigravity_registration.configure(None, remove=True))
             elif args.harness == "claude":
                 print("Disable/remove the Claude plugin in Claude; shared launcher preserved.")
             else:
+                from .harnesses import antigravity_registration
                 from .harnesses.codex_registration import configure
 
                 print(configure(None, remove=True))
+                print(antigravity_registration.configure(None, remove=True))
                 for path in launcher_paths():
                     path.unlink(missing_ok=True)
             return 0
@@ -415,6 +440,10 @@ def main(argv: list[str] | None = None) -> int:
                 from .harnesses.codex_registration import configure
 
                 print(configure(config))
+            elif args.harness == "antigravity":
+                from .harnesses import antigravity_registration
+
+                print(antigravity_registration.configure(config))
         elif args.command == "handle":
             payload = json.load(sys.stdin)
             if args.require_plugin:
@@ -444,6 +473,14 @@ def main(argv: list[str] | None = None) -> int:
                 report["host_hooks"] = Codex().inspect_hooks(os.getcwd())
                 report["trust"] = (
                     "See host_hooks trustStatus; completed jobs are separate evidence of execution."
+                )
+            elif args.harness == "antigravity":
+                from .harnesses import antigravity_registration
+
+                report["host_hooks"] = antigravity_registration.registration()
+                report["trust"] = (
+                    "host_hooks shows the hooks.json entry; agy loads it on its next start. "
+                    "Completed jobs are separate evidence of execution."
                 )
             print(json.dumps(report, indent=2))
         else:

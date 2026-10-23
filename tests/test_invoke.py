@@ -105,6 +105,8 @@ class InvokeFixture(StoreFixture):
         self.codex_home = self.root / "codexhome"
         self.sessions = self.codex_home / "sessions"
         self.sessions.mkdir(parents=True)
+        self.agy_store = self.root / "agy"
+        self.agy_store.mkdir()
         shutil.copy(FIXTURES / "models_cache.json", self.codex_home / "models_cache.json")
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -123,6 +125,7 @@ class InvokeFixture(StoreFixture):
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "CODEX_HOME": str(self.codex_home),
             "STUB_CLAUDE_STORE": str(self.claude),
+            "STUB_AGY_STORE": str(self.agy_store),
             "STUB_LOG": str(self.stub_log),
         }
         self.env.update(extra)
@@ -134,6 +137,7 @@ class InvokeFixture(StoreFixture):
     def write_config(self, **policy):
         data = json.loads(self.config.read_text())
         data["collections"]["codex-sessions"]["store"] = str(self.sessions)
+        data["collections"]["antigravity-sessions"] = {"store": str(self.agy_store)}
         data["qmd_binary"] = str(self.bin / "qmd")
         merged = {**self.invoke_policy, **policy}
         if merged:
@@ -799,18 +803,41 @@ class TestAntigravityRun(InvokeFixture):
         self.assertIn("--mode", argv)
         self.assertTrue(argv[-1].startswith("-p=[cairn invoke] You are antigravity"))
         self.assertNotIn("--conversation", argv)
-        # No source adapter and no caller: nothing to export, link, anchor or index.
-        self.assertIsNone(data["peer_session_doc"])
-        self.assertIsNone(data["exchange_doc"])
-        self.assertFalse(data["indexed"])
+        # The conversation agy recorded is exported at once; with no caller the
+        # exchange document anchors on the peer document's folder.
+        peer_doc = Path(data["peer_session_doc"])
+        self.assertTrue(peer_doc.is_file())
+        self.assertEqual(peer_doc.parent, self.root / "data/antigravity-sessions")
+        fm = parse_frontmatter(peer_doc.read_text())
+        self.assertEqual(fm["type"], "antigravity-session")
+        self.assertEqual(fm["session_id"], tid)
+        self.assertEqual(fm["title"], "Stub Conversation Title")
+        self.assertEqual(fm["run_status"], "IDLE")
+        body = peer_doc.read_text()
+        self.assertIn("### User", body)
+        self.assertIn("Say PONG", body)
+        self.assertNotIn("<USER_REQUEST>", body)
+        self.assertNotIn("ADDITIONAL_METADATA", body)
+        self.assertIn('<tool name="read_file" status="done">', body)
+        self.assertIn("<details><summary>Reasoning</summary>", body)
+        exchange = Path(data["exchange_doc"])
+        self.assertEqual(exchange.parent, session_dir_of(peer_doc))
+        self.assertTrue(data["indexed"])
         # The only warning is the operator run's unknown caller; no publication step failed.
         self.assertEqual(len(data["warnings"]), 1)
         self.assertIn("caller unknown", data["warnings"][0])
         state = self.thread(tid, "antigravity")
         round_ = state["rounds"][0]
         self.assertEqual(round_["argv"][-1], "-p=<prompt>")
-        self.assertEqual(set(round_["publication"]), {"answer_saved", "pending"})
+        self.assertEqual(
+            set(round_["publication"]),
+            {"answer_saved", "exported", "exchange_written", "indexed", "pending"},
+        )
         self.assertEqual(round_["publication"]["pending"], {})
+        self.assertEqual(
+            round_["transcript_path"],
+            str(self.agy_store / "brain" / tid / ".system_generated/logs/transcript_full.jsonl"),
+        )
         self.assertEqual(state["resume_command"], f"agy --conversation {tid}")
         self.assertIn('tool: read_file {"Path": "a.py"}', round_["progress"])
         self.assertIn("message: Looking.", round_["progress"][0])
@@ -832,12 +859,23 @@ class TestAntigravityRun(InvokeFixture):
         self.assertIn("PONG", exchange.read_text())
         self.assertTrue(data["indexed"])
         self.assertEqual(data["warnings"], [])
-        # Nothing to link: the peer has no session document.
-        self.assertNotIn("links", parse_frontmatter(caller_doc.read_text()))
+        peer_doc = Path(data["peer_session_doc"])
+        self.assertEqual(parse_frontmatter(peer_doc.read_text())["links"], [f"parent claude:{sid}"])
+        self.assertEqual(
+            parse_frontmatter(caller_doc.read_text())["links"], [f"child antigravity:{tid}"]
+        )
         publication = self.thread(tid, "antigravity")["rounds"][0]["publication"]
         self.assertEqual(
             set(publication),
-            {"answer_saved", "caller_exported", "exchange_written", "indexed", "pending"},
+            {
+                "answer_saved",
+                "exported",
+                "caller_exported",
+                "linked",
+                "exchange_written",
+                "indexed",
+                "pending",
+            },
         )
         self.assertIn(
             f"invoked by claude session claude:{sid}", self.stub_calls()[0]["prompt_head"]
@@ -855,6 +893,37 @@ class TestAntigravityRun(InvokeFixture):
         self.assertEqual(argv2[argv2.index("--effort") + 1], "high")
         self.assertIn("plan", argv2)  # the profile's flags are re-sent on a resume
         self.assertEqual(parse_frontmatter(exchange.read_text())["rounds"], "2")
+        # One conversation, one document: the second round re-exports it in place.
+        self.assertEqual(data2["peer_session_doc"], str(peer_doc))
+        self.assertEqual(parse_frontmatter(peer_doc.read_text())["messages"], "2")
+        # One session document in the peer collection; the exchange lives with the caller.
+        self.assertEqual(len(list((self.root / "data/antigravity-sessions").rglob("*.md"))), 1)
+        resumed, _ = self.invoke("--help", check_json=False)  # parser smoke
+        self.assertEqual(resumed.returncode, 0)
+        result = subprocess.run(
+            [sys.executable, "-m", "cairn", "resume", f"antigravity:{tid}"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"agy --conversation {tid}")
+
+    def test_unconfigured_collection_skips_export_with_one_warning(self):
+        data = json.loads(self.config.read_text())
+        del data["collections"]["antigravity-sessions"]
+        self.config.write_text(json.dumps(data))
+        config.get_config.cache_clear()
+        result, data = self.run_agy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "succeeded")
+        self.assertIsNone(data["peer_session_doc"])
+        self.assertIsNone(data["exchange_doc"])  # no caller and no peer document: no anchor
+        self.assertTrue(any("not configured" in w for w in data["warnings"]))
+        publication = self.thread(data["thread_id"], "antigravity")["rounds"][0]["publication"]
+        self.assertEqual(set(publication), {"answer_saved", "pending"})
+        self.assertEqual(publication["pending"], {})
 
     def test_native_mode_and_large_prompt_via_ndjson_stdin(self):
         prompt_file = self.root / "big.txt"
@@ -1146,7 +1215,7 @@ class TestStatusAndPublish(InvokeFixture):
         ):
             invoke.publish_round(cfg, state, round_)
         self.assertEqual(calls, ["exported", "x", "indexed"])
-        self.assertEqual(invoke.pending_steps(round_, "codex"), ("exported",))
+        self.assertEqual(invoke.pending_steps(cfg, round_, "codex"), ("exported",))
         calls.clear()
         with (
             patch.dict(
@@ -1155,9 +1224,11 @@ class TestStatusAndPublish(InvokeFixture):
             ),
             fake_index,
         ):
-            invoke.publish_round(cfg, state, round_, steps=invoke.pending_steps(round_, "codex"))
+            invoke.publish_round(
+                cfg, state, round_, steps=invoke.pending_steps(cfg, round_, "codex")
+            )
         self.assertEqual(calls, ["exported", "x", "indexed"])  # downstream redone
-        self.assertEqual(invoke.pending_steps(round_, "codex"), ())
+        self.assertEqual(invoke.pending_steps(cfg, round_, "codex"), ())
         self.assertEqual(round_["publication"]["pending"], {})
 
     def test_late_caller_export_moves_the_exchange_to_the_caller_folder(self):

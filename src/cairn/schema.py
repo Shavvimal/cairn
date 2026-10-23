@@ -30,7 +30,9 @@ class CodeBlockData(TypedDict, total=False):
 
 
 class Message(TypedDict, total=False):
-    role: str  # "user" | "assistant" | "tool" | "agent" (inter-agent message; never user input)
+    # "user" | "assistant" | "tool" | "agent" (inter-agent message; never user input) |
+    # "system" (a message the host injected, e.g. agy's SYSTEM_MESSAGE steps)
+    role: str
     text: str
     timestamp: str | None
     thinking: str | None
@@ -134,6 +136,12 @@ class SessionData(TypedDict, total=False):
     sandbox: str | None
     approval_policy: str | None
     replay_unresolved: bool
+    # Antigravity conversation index (conversation_summaries.db)
+    run_status: str | None
+    agent_name: str | None
+    steps: int
+    errors: int
+    usage: dict[str, int]
     # meeting-specific (Granola)
     duration_min: int | None
     attendees: list[Any]

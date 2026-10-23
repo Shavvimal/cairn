@@ -6,11 +6,17 @@
 # live for an unknown --model). STUB_ANSWER sets the final text. `--log-file PATH`
 # gets the two log lines cairn reads for the billing route: authMethod is `adc` when
 # AGY_ADC_AUTH=true is in the environment (else `gcp`, the login's own method), and
-# the quota project is $GOOGLE_CLOUD_QUOTA_PROJECT or `stub-project`.
+# the quota project is $GOOGLE_CLOUD_QUOTA_PROJECT or `stub-project`. With
+# STUB_AGY_STORE set, the run is recorded the way agy records it: transcript JSONL
+# under $STUB_AGY_STORE/brain/<id>/.system_generated/logs/ and a row in
+# $STUB_AGY_STORE/conversation_summaries.db.
 import json
 import os
+import sqlite3
 import sys
 import uuid
+from datetime import UTC, datetime
+from pathlib import Path
 
 args = sys.argv[1:]
 VALUED = {
@@ -103,6 +109,96 @@ if not prompt:
     sys.exit(1)
 
 answer = os.environ.get("STUB_ANSWER", "PONG")
+
+
+def record_native(store: Path) -> None:
+    """Append this turn to the conversation's transcript and upsert its index row."""
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    logs = store / "brain" / conversation / ".system_generated" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    full = logs / "transcript_full.jsonl"
+    existing = full.read_text().count("\n") if full.exists() else 0
+    steps = [
+        {
+            "step_index": existing,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "status": "DONE",
+            "created_at": now,
+            "content": f"<USER_REQUEST>\n{prompt}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\n"
+            "The current local time is: now.\n</ADDITIONAL_METADATA>",
+        },
+        {
+            "step_index": existing + 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "created_at": now,
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "cache_read_tokens": 0,
+            "thinking": "Looking.",
+            "tool_calls": [{"name": "read_file", "args": {"Path": "a.py"}}],
+        },
+        {
+            "step_index": existing + 2,
+            "source": "MODEL",
+            "type": "GENERIC",
+            "status": "DONE",
+            "created_at": now,
+            "content": "Created At: now\nCompleted At: now\n1 lines",
+        },
+        {
+            "step_index": existing + 3,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "created_at": now,
+            "input_tokens": 5,
+            "output_tokens": 1,
+            "cache_read_tokens": 0,
+            "content": answer,
+        },
+    ]
+    lines = "".join(json.dumps(step) + "\n" for step in steps)
+    with full.open("a") as handle:
+        handle.write(lines)
+    with (logs / "transcript.jsonl").open("a") as handle:
+        handle.write(lines)
+    db = sqlite3.connect(store / "conversation_summaries.db")
+    db.execute(
+        "create table if not exists conversation_summaries (conversation_id text primary key, "
+        "title text, preview text, step_count integer, last_modified_time text, "
+        "workspace_uris text, status text, source text, agent_name text, "
+        "parent_conversation_id text, nesting_depth integer, last_user_input_time text)"
+    )
+    stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f+00:00")
+    db.execute(
+        "insert into conversation_summaries values (?,?,?,?,?,?,?,?,?,?,?,?) "
+        "on conflict(conversation_id) do update set step_count=excluded.step_count, "
+        "last_modified_time=excluded.last_modified_time, last_user_input_time=excluded.last_user_input_time",
+        (
+            conversation,
+            "Stub Conversation Title",
+            (prompt or "")[:60],
+            existing + len(steps),
+            stamp,
+            json.dumps([Path(os.getcwd()).as_uri()]),
+            "CASCADE_RUN_STATUS_IDLE",
+            "",
+            "",
+            "",
+            0,
+            stamp,
+        ),
+    )
+    db.commit()
+    db.close()
+
+
+if os.environ.get("STUB_AGY_STORE"):
+    record_native(Path(os.environ["STUB_AGY_STORE"]))
+
 emit(
     {
         "event": "init",

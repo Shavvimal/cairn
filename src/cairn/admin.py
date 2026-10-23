@@ -756,7 +756,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="path to the plugin's plugin.json (else $CLAUDE_PLUGIN_ROOT) for a drift check",
     )
-    parser.add_argument("--harness", choices=("claude", "codex"))
+    parser.add_argument("--harness", choices=("claude", "codex", "antigravity"))
     parser.add_argument(
         "--strict-index",
         action="store_true",

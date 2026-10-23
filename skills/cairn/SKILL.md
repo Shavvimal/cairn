@@ -107,6 +107,7 @@ its own skill (`/cairn:recall`); `cairn recall --help` shows its args.
 cairn invoke codex --prompt-file brief.md --effort high   # run Codex headlessly, record the exchange
 cairn invoke claude --prompt "…" --profile review          # the mirror direction
 cairn invoke antigravity --prompt "…" --model <slug>       # Google Antigravity (agy); slugs from `agy models`
+cairn antigravity export [--all]                           # export agy conversations (also via the Stop hook)
 cairn invoke status <thread-id> [--follow]                 # health line, progress, answer
 cairn invoke codex --resume <thread-id> --prompt "…"        # continue the same thread, any time later
 cairn invoke cancel | publish <thread-id>                  # stop a run; finish pending export/link/index

@@ -25,6 +25,7 @@ from cairn.harnesses.antigravity import (
     billing_problems,
     observe_billing,
     resolved_project,
+    transcript_conversation_id,
 )
 from cairn.harnesses.claude import KEYCHAIN_GUIDANCE, KEYCHAIN_MARKERS, keychain_failure
 from cairn.harnesses.codex_models import (
@@ -923,9 +924,16 @@ class TestAntigravityEvents(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             store = Path(tmp)
             self.assertIsNone(agy.transcript_path(store, "236f", None))
-            path = store / "236f.db"
-            path.write_bytes(b"")
-            self.assertEqual(agy.transcript_path(store, "236f", None), path)
+            logs = store / "brain" / "236f" / ".system_generated" / "logs"
+            logs.mkdir(parents=True)
+            compact = logs / "transcript.jsonl"
+            compact.write_text("{}\n")
+            self.assertEqual(agy.transcript_path(store, "236f", None), compact)
+            full = logs / "transcript_full.jsonl"
+            full.write_text("{}\n")
+            self.assertEqual(agy.transcript_path(store, "236f", None), full)  # full wins
+            self.assertEqual(transcript_conversation_id(compact), "236f")
+            self.assertIsNone(transcript_conversation_id(store / "x" / "transcript.jsonl"))
         self.assertEqual(agy.self_check("gemini-3.1-pro-high", "xhigh", False), [])
         self.assertEqual(agy.self_check(None, None, False), [])
         self.assertIn("not supported by antigravity", agy.self_check(None, "ultra", False)[0])
@@ -1061,6 +1069,54 @@ class TestAntigravityBilling(unittest.TestCase):
         argv = agy.exec_argv(_request("antigravity", log_path=Path("/r/.logs/x.log")))
         self.assertEqual(argv[argv.index("--log-file") + 1], "/r/.logs/x.log")
         self.assertNotIn("--log-file", agy.exec_argv(_request("antigravity")))
+
+
+class TestAntigravityStopHook(unittest.TestCase):
+    """agy's ``Stop`` payload (camelCase protojson, agy 1.4.6 embedded docs)."""
+
+    PAYLOAD: ClassVar[dict] = {
+        "conversationId": "236f2e5b-0d6f-4fe5-9faa-738226a9c8b8",
+        "workspacePaths": ["/w/repo"],
+        "transcriptPath": "/h/.gemini/antigravity-cli/brain/236f2e5b-0d6f-4fe5-9faa-738226a9c8b8/"
+        ".system_generated/logs/transcript.jsonl",
+        "artifactDirectoryPath": "/h/.gemini/antigravity-cli/brain/236f2e5b-0d6f-4fe5-9faa-738226a9c8b8",
+        "modelName": "gemini-4-argon-high",
+        "executionNum": 1,
+        "terminationReason": "NO_TOOL_CALL",
+        "error": "",
+        "fullyIdle": True,
+    }
+
+    def test_decode(self):
+        event = get_harness("antigravity").decode(self.PAYLOAD)
+        self.assertEqual((event.harness, event.source), ("antigravity", "antigravity"))
+        self.assertEqual(event.session_id, self.PAYLOAD["conversationId"])
+        self.assertEqual(event.transcript_path, self.PAYLOAD["transcriptPath"])
+        self.assertEqual(event.cwd, "/w/repo")
+        self.assertEqual(event.event, "Stop")
+        # No workspace: the app-data directory stands in for the cwd.
+        bare = get_harness("antigravity").decode({**self.PAYLOAD, "workspacePaths": []})
+        self.assertEqual(bare.cwd, "/h/.gemini/antigravity-cli")
+        minimal = get_harness("antigravity").decode({"conversationId": "abc"})
+        self.assertIsNone(minimal.transcript_path)
+
+    def test_rejects_malformed_payloads(self):
+        agy = get_harness("antigravity")
+        bad: object
+        for bad in (
+            [],
+            {},
+            {**self.PAYLOAD, "conversationId": ""},
+            {**self.PAYLOAD, "conversationId": "a/b"},
+            {**self.PAYLOAD, "conversationId": "a\nb"},
+            {**self.PAYLOAD, "workspacePaths": "relative"},
+            {**self.PAYLOAD, "workspacePaths": ["relative"]},
+            {**self.PAYLOAD, "transcriptPath": 1},
+            {**self.PAYLOAD, "transcriptPath": "relative.jsonl"},
+            {"hook_event_name": "SessionEnd", "session_id": "x", "cwd": "/w"},  # a Claude payload
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                agy.decode(bad)
 
 
 if __name__ == "__main__":

@@ -15,10 +15,12 @@ A conversation is continued with ``--conversation <id>``; agy has no fork. A pro
 too large for the command line goes through ``--input-format stream-json``: one
 NDJSON ``user`` message on stdin, then EOF, which ends the session after the turn.
 
-Antigravity has no cairn source adapter yet, so a peer run is recorded under
-``logs/invoke/antigravity/`` and in the exchange document, but no session document
-is exported or linked. Conversations live as SQLite files under
-``~/.gemini/antigravity-cli/conversations/<id>.db`` for a future adapter.
+Conversations are exported by :mod:`cairn.sources.antigravity` from the JSONL
+transcript agy writes per conversation under
+``<app data>/brain/<id>/.system_generated/logs/`` (``transcript_full.jsonl``, with
+``transcript.jsonl`` as the compact copy). The hook side is agy's ``Stop`` event
+(``~/.gemini/config/hooks.json``), whose camelCase payload :meth:`Antigravity.decode`
+maps onto :class:`SessionEvent`; see :mod:`cairn.harnesses.antigravity_registration`.
 
 Billing (:class:`cairn.config.BillingPolicy`): agy bills either the consumer plan
 quota or, with ``AGY_ADC_AUTH=true`` and Application Default Credentials, Vertex AI
@@ -40,7 +42,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..config import BillingPolicy
-from . import Event, InvokeRequest, SessionEvent, decode_event
+from . import Event, InvokeRequest, SessionEvent
 
 # Shared profile -> agy flags. ``plan`` keeps workspace writes and shell commands
 # deferred until a human approves the plan (verified live: the file was not created),
@@ -73,13 +75,46 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+TRANSCRIPT_NAMES = ("transcript_full.jsonl", "transcript.jsonl")
+STOP_EVENT = "Stop"
+
+
+def transcript_logs_dir(store: Path, conversation_id: str) -> Path:
+    """Where agy keeps a conversation's transcripts under its app-data ``store``."""
+    return store / "brain" / conversation_id / ".system_generated" / "logs"
+
+
+def conversation_transcript(store: Path, conversation_id: str) -> Path | None:
+    """The untruncated transcript, else the compact one, else ``None``."""
+    logs = transcript_logs_dir(store, conversation_id)
+    for name in TRANSCRIPT_NAMES:
+        candidate = logs / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def transcript_conversation_id(transcript: Path) -> str | None:
+    """The conversation a transcript path belongs to (its ``brain/<id>/`` folder)."""
+    parts = transcript.parts
+    if (
+        len(parts) >= 5
+        and parts[-1] in TRANSCRIPT_NAMES
+        and parts[-2] == "logs"
+        and parts[-3] == ".system_generated"
+        and parts[-5] == "brain"
+    ):
+        return parts[-4]
+    return None
+
+
 class Antigravity:
     """The ``agy`` adapter. One instance parses one stream: ``agent_response`` deltas
     are buffered per step until that step is ``DONE`` and emitted as one message."""
 
     name = "antigravity"
     executable = "agy"
-    manifest_paths: tuple[str, ...] = ()  # no plugin or hook integration yet
+    manifest_paths: tuple[str, ...] = ()  # hooks are registered by cairn, not a plugin
     update_command = "agy update"
 
     def __init__(self) -> None:
@@ -89,7 +124,39 @@ class Antigravity:
     # ---- host side (not integrated yet) ---------------------------------------
 
     def decode(self, payload: object) -> SessionEvent:
-        return decode_event(self.name, payload)
+        """Map agy's ``Stop`` hook payload (camelCase protojson) onto a session event.
+
+        ``conversationId`` is the session, ``transcriptPath`` the compact transcript,
+        and the first ``workspacePaths`` entry the cwd. agy fires ``Stop`` at the end
+        of every turn, so one conversation produces many events; the export is
+        idempotent, so that is cheap.
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("hook input must be an object")
+        conversation_id = payload.get("conversationId")
+        if not isinstance(conversation_id, str) or not conversation_id.strip():
+            raise ValueError("hook requires a nonempty conversationId")
+        if any(ord(c) < 32 for c in conversation_id) or "/" in conversation_id:
+            raise ValueError("invalid conversationId")
+        workspaces = payload.get("workspacePaths")
+        if workspaces is None:
+            workspaces = []
+        if not isinstance(workspaces, list) or not all(
+            isinstance(p, str) and Path(p).is_absolute() for p in workspaces
+        ):
+            raise ValueError("workspacePaths must be a list of absolute paths")
+        transcript = payload.get("transcriptPath")
+        if transcript is not None and (
+            not isinstance(transcript, str) or not Path(transcript).is_absolute()
+        ):
+            raise ValueError("transcriptPath must be an absolute path or null")
+        if workspaces:
+            cwd = workspaces[0]
+        elif transcript and transcript_conversation_id(Path(transcript)):
+            cwd = str(Path(transcript).parents[4])  # the agy app-data directory
+        else:
+            cwd = str(Path.home())
+        return SessionEvent(self.name, self.name, conversation_id, transcript, cwd, STOP_EVENT)
 
     def current_id(self) -> str | None:
         """Antigravity exports no session hint to child processes that cairn reads."""
@@ -264,9 +331,9 @@ class Antigravity:
         ]
 
     def transcript_path(self, store: Path, thread_id: str, started: datetime | None) -> Path | None:
-        """The conversation's SQLite file under the agy store (``started`` is unused)."""
-        candidate = store / f"{thread_id}.db"
-        return candidate if candidate.is_file() else None
+        """The conversation's JSONL transcript under the agy app-data ``store``
+        (``started`` is unused)."""
+        return conversation_transcript(store, thread_id)
 
     def self_check(self, model: str | None, effort: str | None, fast: bool) -> list[str]:
         """Problems with an effort/fast choice. Any model slug is passed through; agy
