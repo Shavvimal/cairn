@@ -1,8 +1,7 @@
 """cairn - shared engine for the per-agent session-sync skills.
 
-A faithful local port of the conversation_provenance_service design (SammyClub/api
-PR #2199): one normalized schema, one decoupled renderer, per-source adapters, and
-a shared CLI. Each source under :mod:`cairn.sources` subclasses
+One normalized schema, one decoupled renderer, per-source adapters, and a shared
+CLI. Each source under :mod:`cairn.sources` subclasses
 :class:`cairn.sources.base.ConversationSource` and is driven through
 :func:`cairn.cli.run`; the ``cairn`` console command dispatches to them.
 """

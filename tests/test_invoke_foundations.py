@@ -1011,12 +1011,12 @@ class TestAntigravityBilling(unittest.TestCase):
 
     LOG = (
         "I1023 10:53:39.862890       1 server_oauth.go:224] applyAuthResult: "
-        "email=s@x.com, authMethod=adc, quotaProject=gen-lang-client-0002376644\n"
+        "email=s@x.com, authMethod=adc, quotaProject=example-quota-project\n"
         "I1023 10:53:43.468255      63 http_helpers.go:349] URL: https://aiplatform."
-        "googleapis.com/v1/projects/gen-lang-client-0002376644/locations/global/publishers/"
+        "googleapis.com/v1/projects/example-quota-project/locations/global/publishers/"
         "google/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse ResponseID: a\n"
         "I1023 10:53:45.166799     433 http_helpers.go:349] URL: https://aiplatform."
-        "googleapis.com/v1/projects/gen-lang-client-0002376644/locations/global/publishers/"
+        "googleapis.com/v1/projects/example-quota-project/locations/global/publishers/"
         "google/models/gemini-4-argon:streamGenerateContent?alt=sse ResponseID: b\n"
     )
 
@@ -1106,7 +1106,7 @@ class TestAntigravityBilling(unittest.TestCase):
             )
             log.write_text(self.LOG)
             observed = observe_billing(log)
-        project = "gen-lang-client-0002376644"
+        project = "example-quota-project"
         self.assertEqual(
             observed,
             {"auth_method": "adc", "quota_project": project, "vertex_projects": [project]},
