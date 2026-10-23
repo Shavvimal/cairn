@@ -1116,7 +1116,8 @@ class TestAntigravityBilling(unittest.TestCase):
         self.assertIsNone(billing_problem("inherit", None, observed))
         self.assertIn("plan route requested", billing_problem("plan", None, observed) or "")
         self.assertIn(
-            "quotaProject=gen-lang", billing_problem("gcp", "other-project", observed) or ""
+            "quotaProject=example-quota-project",
+            billing_problem("gcp", "other-project", observed) or "",
         )
         consumer = {"auth_method": "gcp", "quota_project": project, "vertex_projects": []}
         self.assertIn("authMethod=gcp", billing_problem("gcp", project, consumer) or "")
