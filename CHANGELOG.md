@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.1]
+
+### Changed
+- The Claude Code update instructions (README, the Claude harness reference) are one
+  command, `/plugin marketplace update cairn`: in a session it refreshes the marketplace
+  and updates the plugins installed from it, and closing the panel reloads them.
+  `/plugin update cairn@cairn` on its own reinstalls the version the marketplace last saw.
+
 ## [2.8.0]
 
 The fix for the two dead rounds in `docs/antigravity-soft-deny-postmortem.md`: a headless
