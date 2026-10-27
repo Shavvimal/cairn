@@ -1294,11 +1294,20 @@ class TestAntigravityRun(InvokeFixture):
         assert shown is not None
         self.assertEqual(shown["outcome"], "denied")
         self.assertIsNone(shown["last_message"])  # "Looking." never poses as the answer
-        # Following a stream whose runner never finalises: after the grace wait, the
-        # fallback reads the log and still says denied (the record stays unfinished).
-        result, _ = self.invoke("tail", data["thread_id"], check_json=False)
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertEqual(result.stdout.splitlines()[-1], "RESULT denied")
+        # Following a stream whose runner never finalises (``status`` above adopted the
+        # round, so the record is stripped again): after the grace wait the fallback
+        # reads the log, where the denial appeared only during the wait, and says denied.
+        path.write_text(json.dumps(state))
+        peer_log = run_dir / "peer-01.log"
+        log_text = peer_log.read_text()
+        peer_log.write_text("")
+        tailer = self.spawn("tail", data["thread_id"])
+        time.sleep(0.5)
+        peer_log.write_text(log_text)
+        out, err = tailer.communicate(timeout=60)
+        self.assertEqual(tailer.returncode, 2, err)
+        self.assertEqual(out.splitlines()[-1], "RESULT denied")
+        self.assertFalse(json.loads(path.read_text())["rounds"][0].get("finished_at"))
         events.write_text(kept)
         # ``wait`` while another reader holds the thread lock (adopting): it holds for
         # that reader's record instead of building a result from an unfinished round.
@@ -1307,12 +1316,25 @@ class TestAntigravityRun(InvokeFixture):
         lock.acquire(run_dir)
         waiter = self.spawn("wait", data["thread_id"], "--json")
         time.sleep(1.5)
+        self.assertIsNone(waiter.poll())  # still holding for the record
         lock.release()
         out, err = waiter.communicate(timeout=60)
         self.assertEqual(waiter.returncode, 2, err)
         shown = json.loads(out.strip().splitlines()[-1])
         self.assertEqual((shown["status"], shown["exit_code"]), ("denied", 2))
         self.assertIn("result file missing", " ".join(shown["warnings"]))
+        # Past its hold (the peer's quiet threshold), ``wait`` reports busy (exit 75)
+        # rather than an unfinished round.
+        path.write_text(json.dumps(state))
+        (run_dir / "result-01.json").unlink(missing_ok=True)  # adoption writes none
+        self.write_config(antigravity={"quiet_after_s": 1})
+        lock.acquire(run_dir)
+        result, shown = self.invoke("wait", data["thread_id"], "--json")
+        lock.release()
+        self.assertEqual(result.returncode, 75, result.stderr)
+        assert shown is not None
+        self.assertEqual(shown["status"], "busy")
+        self.assertIn("adopting this round", shown["error"])
         _, shown = self.invoke("status", data["thread_id"], "--json")
         assert shown is not None
         self.assertEqual((shown["execution"], shown["outcome"]), ("exited", "denied"))
@@ -2014,8 +2036,10 @@ class TestReplayFacts(unittest.TestCase):
     def test_only_an_authentication_error_yields_to_the_adc_log(self):
         self.assertTrue(invoke._auth_related("ERROR: authentication failed or timed out"))
         self.assertTrue(invoke._auth_related("You are not logged into Antigravity."))
+        self.assertTrue(invoke._auth_related("ADC token missing"))
         self.assertFalse(invoke._auth_related("input token count exceeds maximum context length"))
         self.assertFalse(invoke._auth_related("cannot read /srv/author/x.py"))
+        self.assertFalse(invoke._auth_related("cannot read /srv/readconfig.py"))
 
     def test_permissions_note(self):
         before = {"allow": ["command(rg)"], "deny": ["command(curl)"]}

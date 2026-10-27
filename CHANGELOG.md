@@ -41,6 +41,10 @@ outside the workspace, ended with no answer and still reported success.
   message poses as the answer of a denied round). An adopted `denied` round exits 2 like
   a live one. Refusals merge the stream's tool errors, the log's soft denials and one
   entry per counted action type the others did not name.
+- `cairn invoke wait` on a round that another reader is adopting (both processes gone,
+  the thread lock held, no `finished_at`) holds for that reader's record up to the peer's
+  `quiet_after_s`, then reports `status: busy` (exit 75) with the reason; it never builds a
+  result from an unfinished round.
 - The docstrings and the skill said the turn goes on after an auto-denied call. Live runs
   show both shapes (a refusal with a tool error in the stream, a soft deny with none) and
   both can end the turn; the text says so.

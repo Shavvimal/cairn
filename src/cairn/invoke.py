@@ -117,7 +117,6 @@ EXIT_BY_OUTCOME: dict[str, int] = {
 # A prompt larger than this goes through the child's stdin (macOS ARG_MAX, D14).
 STDIN_PROMPT_BYTES = 64_000
 TAIL_FINALISE_GRACE_S = 2.0
-WAIT_ADOPTION_GRACE_S = 30.0
 PROGRESS_CAP = 200
 PROGRESS_CHARS = 200
 STATE_WRITE_INTERVAL_S = 2.0
@@ -707,24 +706,18 @@ def _soft_denials(harness: Harness, log_path: Path | None) -> list[dict]:
     return list(observe(log_path)) if callable(observe) and log_path is not None else []
 
 
-_AUTH_PHRASES = (
-    "authentication",
-    "unauthenticated",
-    "not logged in",
-    "log in",
-    "login",
-    "credential",
-    "invalid_grant",
-    "invalid_rapt",
-    "adc",
+_AUTH_TEXT = re.compile(
+    r"\b(authentication|unauthenticated|not logged in\w*|log in|login|credentials?|"
+    r"invalid_grant|invalid_rapt|adc)\b",
+    re.IGNORECASE,
 )
 
 
 def _auth_related(error: str) -> bool:
     """Whether a peer's own error text is about authentication (so agy's log may name
-    the cause); "input token count" or a path containing "auth" is not."""
-    low = error.lower()
-    return any(phrase in low for phrase in _AUTH_PHRASES)
+    the cause). Whole words only: "input token count", a path containing "auth" or
+    "readconfig" are not."""
+    return _AUTH_TEXT.search(error) is not None
 
 
 def _round_log(round_: dict, files: dict[str, Path]) -> Path | None:
@@ -2302,12 +2295,27 @@ def cmd_wait(config: CairnConfig, thread_id: str, as_json: bool) -> int:
         time.sleep(1)
     # Both processes are gone but the record is not finished: another reader holds
     # the thread lock and is adopting the round. Its record is the contract, so wait
-    # for it rather than build a result from an unfinished round.
-    deadline = time.monotonic() + WAIT_ADOPTION_GRACE_S
+    # for it, up to the peer's quiet threshold (an adoption is seconds of work); a
+    # result is never built from an unfinished round.
+    hold = float(config.invoke.for_peer(obs.state.peer).quiet_after_s)
+    deadline = time.monotonic() + hold
     while not (obs.round_ or {}).get("finished_at") and time.monotonic() < deadline:
         time.sleep(0.2)
         obs = observe(config, run_dir)
     round_ = obs.round_ or {}
+    if not round_.get("finished_at"):
+        busy = round_result(
+            obs.state.peer,
+            obs.state,
+            round_,
+            run_dir,
+            [],
+            status="busy",
+            error=f"another reader is adopting this round and has not finished it after "
+            f"{hold:g}s; run 'cairn invoke wait' again",
+        )
+        print(json.dumps(busy, ensure_ascii=False) if as_json else _summary(busy, run_dir))
+        return EXIT_BUSY
     number = int(round_["round"])
     result_path = _round_files(run_dir, number)["result_path"]
     # The runner writes the result file after publication; a live runner lands it.
