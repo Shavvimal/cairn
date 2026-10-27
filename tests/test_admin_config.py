@@ -209,10 +209,19 @@ class TestDoctorInvoke(_ConfigFixture):
                 self.assertIn("warn antigravity billing - route gcp is not ready", out)
                 self.assertIn("adc.json does not exist", out)
                 Path(missing).write_text('{"type":"authorized_user","quota_project_id":"q-p"}')
-                _, out = _capture(admin._check_invoke, config.get_config())
+                probe = "cairn.harnesses.antigravity.adc_token_check"
+                with mock.patch(probe, return_value=("ok", None)):
+                    _, out = _capture(admin._check_invoke, config.get_config())
                 self.assertIn(
-                    "ok   antigravity billing - route gcp via ADC, quota project q-p", out
+                    "ok   antigravity billing - route gcp via ADC, quota project q-p, token ok",
+                    out,
                 )
+                with mock.patch(probe, return_value=("refused", "Google rejected the token")):
+                    _, out = _capture(admin._check_invoke, config.get_config())
+                self.assertIn("warn antigravity billing - route gcp is not ready: Google", out)
+                with mock.patch(probe, return_value=("unverified", "gcloud is not installed")):
+                    _, out = _capture(admin._check_invoke, config.get_config())
+                self.assertIn("quota project q-p; token not verified: gcloud is not", out)
 
     def test_reports_defaults_and_missing_codex_cache(self):
         # Only codex is "installed": with agy on PATH the permissions line would read the

@@ -126,6 +126,7 @@ class InvokeFixture(StoreFixture):
             ("codex", "codex"),
             ("claude", "claude"),
             ("agy", "antigravity"),
+            ("gcloud", "gcloud"),
             ("qmd", "qmd"),
         ):
             target = self.bin / name
@@ -1071,6 +1072,44 @@ class TestAntigravityRun(InvokeFixture):
         self.assertEqual(data["billing"]["project"], "env-project")
         self.assertIsNone(data["billing"]["problem"])
 
+    def test_gcp_route_refuses_to_spawn_when_the_adc_token_is_stale(self):
+        """The ADC file exists but Google rejects its refresh token (invalid_rapt): the
+        probe refuses the spawn with the login command. A probe that cannot conclude
+        (no network) warns and spawns; a stale token agy itself reports is named."""
+        self.write_adc("adc-project")
+        self.write_config(antigravity={"billing": {"route": "gcp"}})
+        result, _ = self.run_agy(env={"STUB_GCLOUD": "rapt"})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("billing check failed: Google rejected the ADC refresh token", result.stderr)
+        self.assertIn("invalid_rapt", result.stderr)
+        self.assertIn("gcloud auth application-default login", result.stderr)
+        self.assertEqual(self.stub_calls(), [])
+        result, data = self.run_agy(env={"STUB_GCLOUD": "fail"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        warning = next(w for w in data["warnings"] if w.startswith("billing: "))
+        self.assertIn("ADC token not verified", warning)
+        self.assertIn("could not resolve host", warning)
+        self.assertEqual(len(self.stub_calls()), 1)
+        # agy's log is read when the probe passed but agy's own refresh failed.
+        result, data = self.run_agy(env={"STUB_MODE": "noauth"})
+        self.assertEqual(result.returncode, 1)
+        assert data is not None
+        self.assertEqual(data["status"], "failed")
+        self.assertIn("ADC token refresh failed", data["error"])
+        self.assertIn("invalid_rapt", data["error"])
+        self.assertIn("gcloud auth application-default login", data["error"])
+        self.assertFalse(data["retryable"])
+        self.assertIn("ADC token refresh failed", data["billing"]["problem"])
+        text, _ = self.invoke(
+            "antigravity", "--cd", self.cwd, "--prompt", "x", env={"STUB_MODE": "noauth"}
+        )
+        self.assertIn("ADC token refresh failed", text.stdout + text.stderr)
+        # The plan route never probes.
+        self.write_config(antigravity={"billing": {"route": "plan"}})
+        result, data = self.run_agy(env={"STUB_GCLOUD": "rapt"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_billing_flag_overrides_the_route_per_round(self):
         self.write_adc()
         self.write_config(antigravity={"billing": {"route": "gcp"}})
@@ -1211,11 +1250,15 @@ class TestAntigravityRun(InvokeFixture):
         self.assertTrue(data["retryable"])
         self.assertIsNone(data["last_message"])
         self.assertEqual(data["usage"]["denied_actions"], ["read_file"])
-        self.assertEqual(data["denied"][0]["tool"], "read_file")
+        # The path comes from agy's log (the step it names) joined to the stream.
+        self.assertEqual(data["denied"], [{"tool": "read_file", "target": outside}])
         error = data["error"]
         self.assertIn("agy auto-denied 1 tool call(s)", error)
-        self.assertIn("read_file(<absolute dir>) in permissions.allow", error)
-        self.assertIn("--extra --add-dir <dir>", error)
+        self.assertIn(f"`{outside}` is outside the workspace", error)
+        self.assertIn(f"needs read_file({self.root / 'elsewhere'}) in permissions.allow", error)
+        self.assertIn(f"--extra --add-dir {self.root / 'elsewhere'}", error)
+        permissions = self.thread(data["thread_id"], "antigravity")["rounds"][0]["permissions"]
+        self.assertEqual(permissions["roots"], [str(Path(self.cwd).resolve())])
         self.assertFalse(any(w.startswith("permissions: ") for w in data["warnings"]))
         self.assertFalse(any(w.startswith("empty answer") for w in data["warnings"]))
         run_dir = self.run_dirs("antigravity")[0]
@@ -1226,7 +1269,8 @@ class TestAntigravityRun(InvokeFixture):
         # ``tail`` on a stream the runner has not finalised yet decides the same way:
         # the record is stripped of its finish to stand in for that window.
         path = run_dir / "thread.json"
-        state = json.loads(path.read_text())
+        saved = json.loads(path.read_text())
+        state = json.loads(json.dumps(saved))
         for key in ("finished_at", "outcome", "exit_code"):
             state["rounds"][0].pop(key, None)
         path.write_text(json.dumps(state))
@@ -1236,7 +1280,40 @@ class TestAntigravityRun(InvokeFixture):
         _, shown = self.invoke("status", data["thread_id"], "--json")
         assert shown is not None
         self.assertEqual((shown["execution"], shown["outcome"]), ("exited", "denied"))
-        self.assertEqual(shown["denied"], [{"tool": "read_file", "target": ""}])
+        self.assertEqual(shown["denied"], [{"tool": "read_file", "target": outside}])
+        # Restore the record and resume with --extra --add-dir: the added directory is
+        # a root for the verdict, so the peer learns the path is readable now.
+        path.write_text(json.dumps(saved))
+        result, data = self.run_agy(
+            "--resume",
+            data["thread_id"],
+            "--extra",
+            "--add-dir",
+            str(self.root / "elsewhere"),
+            prompt="Carry on",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        head = self.stub_calls()[-1]["prompt_head"]
+        self.assertIn(
+            f"- previously refused read_file `{outside}`: now readable "
+            f"(inside {self.root / 'elsewhere'})",
+            head,
+        )
+        rounds = self.thread(data["thread_id"], "antigravity")["rounds"]
+        self.assertEqual(
+            rounds[1]["permissions"]["roots"],
+            [str(Path(self.cwd).resolve()), str(self.root / "elsewhere")],
+        )
+        # A rule change alone is a diff line; the previous round refused nothing.
+        (self.agy_store / "settings.json").write_text(
+            json.dumps({"permissions": {"allow": ["command(rg)", f"read_file({self.root})"]}})
+        )
+        result, data = self.run_agy("--resume", data["thread_id"], prompt="Again")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        head = self.stub_calls()[-1]["prompt_head"]
+        self.assertIn(f"- newly allowed: read_file({self.root})", head)
+        self.assertNotIn("previously refused", head)
 
     def test_abandoned_soft_denied_round_is_adopted_as_denied(self):
         """A dead runner: ``wait`` adopts the round from the stream and reaches the same
@@ -1882,8 +1959,9 @@ class TestReplayFacts(unittest.TestCase):
             {"tool": "read_file", "target": "/x/b.md"},
             {"tool": "read_file", "target": "/x/a.md"},
         ]
+        replay.observed = observed
         self.assertEqual(
-            replay.refusals(observed),
+            replay.refusals(),
             [
                 {"tool": "run_command", "target": "rg x"},
                 {"tool": "read_file", "target": "/x/a.md"},
@@ -1927,6 +2005,35 @@ class TestReplayFacts(unittest.TestCase):
         )
         self.assertIn("- previously refused: write_to_file /r/c; it stays refused", note)
         self.assertTrue(note.endswith("A refused call is never retried by rephrasing it."))
+        # A refused read is judged against the roots and the read_file rules now in force.
+        reads = [
+            {"tool": "read_file", "target": "/r/plan.md"},
+            {"tool": "read_file", "target": "/r/.env"},
+            {"tool": "read_file", "target": "/w/src/a.py"},
+            {"tool": "read_file", "target": "/docs/x.md"},
+        ]
+        rules = {
+            "allow": ["read_file(/docs)"],
+            "deny": ["read_file(.env*)"],
+            "roots": ["/w"],
+        }
+        note = invoke.permissions_note(before, rules, reads)
+        assert note is not None
+        self.assertIn(
+            "- previously refused read_file `/r/plan.md`: still outside the workspace with no "
+            "read_file rule; do not retry it, ask for its text instead",
+            note,
+        )
+        self.assertIn(
+            "- previously refused read_file `/r/.env`: still denied by read_file(.env*); do not",
+            note,
+        )
+        self.assertIn(
+            "- previously refused read_file `/w/src/a.py`: now readable (inside /w)", note
+        )
+        self.assertIn(
+            "- previously refused read_file `/docs/x.md`: now readable (read_file(/docs))", note
+        )
         # Nothing changed but something was refused: the verdicts alone are the note.
         only = invoke.permissions_note(before, same, refused[:2])
         assert only is not None
