@@ -1419,6 +1419,13 @@ class TestAntigravityReadDenials(unittest.TestCase):
             read_verdict(f"{home}/a.md", ["read_file(~/notes)"], [], [])["allowed_by"],
             "read_file(~/notes)",
         )
+        # A slashless target also reads as a workspace-relative directory; "/" as a root
+        # covers everything.
+        self.assertEqual(
+            read_verdict("/work/repo/secret/key", [], ["read_file(secret)"], roots)["denied_by"],
+            ["read_file(secret)"],
+        )
+        self.assertEqual(read_verdict("/tmp/a", [], [], ["/work/repo", "/"])["verdict"], "allowed")
         # An ask rule denies: headless agy cannot ask, and ask beats allow and the workspace.
         asked = read_verdict("/work/repo/src/a.py", allow, [], roots, ["read_file(*)"])
         self.assertEqual(asked["verdict"], "denied")

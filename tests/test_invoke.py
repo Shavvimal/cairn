@@ -1294,7 +1294,25 @@ class TestAntigravityRun(InvokeFixture):
         assert shown is not None
         self.assertEqual(shown["outcome"], "denied")
         self.assertIsNone(shown["last_message"])  # "Looking." never poses as the answer
+        # Following a stream whose runner never finalises: after the grace wait, the
+        # fallback reads the log and still says denied (the record stays unfinished).
+        result, _ = self.invoke("tail", data["thread_id"], check_json=False)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "RESULT denied")
         events.write_text(kept)
+        # ``wait`` while another reader holds the thread lock (adopting): it holds for
+        # that reader's record instead of building a result from an unfinished round.
+        (run_dir / "result-01.json").unlink()
+        lock = invoke.ThreadLock()
+        lock.acquire(run_dir)
+        waiter = self.spawn("wait", data["thread_id"], "--json")
+        time.sleep(1.5)
+        lock.release()
+        out, err = waiter.communicate(timeout=60)
+        self.assertEqual(waiter.returncode, 2, err)
+        shown = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual((shown["status"], shown["exit_code"]), ("denied", 2))
+        self.assertIn("result file missing", " ".join(shown["warnings"]))
         _, shown = self.invoke("status", data["thread_id"], "--json")
         assert shown is not None
         self.assertEqual((shown["execution"], shown["outcome"]), ("exited", "denied"))
@@ -1992,6 +2010,12 @@ class TestReplayFacts(unittest.TestCase):
         self.assertFalse(invoke.denied_outcome(answered))
         self.assertEqual(invoke.stream_outcome(answered), "succeeded")
         self.assertIsNone(invoke.stream_outcome(invoke.Replay()))
+
+    def test_only_an_authentication_error_yields_to_the_adc_log(self):
+        self.assertTrue(invoke._auth_related("ERROR: authentication failed or timed out"))
+        self.assertTrue(invoke._auth_related("You are not logged into Antigravity."))
+        self.assertFalse(invoke._auth_related("input token count exceeds maximum context length"))
+        self.assertFalse(invoke._auth_related("cannot read /srv/author/x.py"))
 
     def test_permissions_note(self):
         before = {"allow": ["command(rg)"], "deny": ["command(curl)"]}

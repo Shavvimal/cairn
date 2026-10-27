@@ -33,9 +33,9 @@ outside the workspace, ended with no answer and still reported success.
 
 ### Fixed
 - A soft-denied tool call ended the turn with an empty answer and the round reported
-  `status succeeded`, exit 0, `last_message null`. agy shows no tool error for a soft
-  deny; only the result's `denied_actions` counts it, and cairn read that count after the
-  outcome was fixed. The outcome now counts it, in the live runner, in `adopt`, in
+  `status succeeded`, exit 0, `last_message null`. agy may show no tool error for a soft
+  deny; the result's `denied_actions` always counts it, and cairn read that count after
+  the outcome was fixed. The outcome now counts it, in the live runner, in `adopt`, in
   `cairn invoke tail` (which waits a moment for the runner's record before falling back to
   the stream) and in `status` (a finished round's record is authoritative, so no progress
   message poses as the answer of a denied round). An adopted `denied` round exits 2 like
@@ -48,7 +48,8 @@ outside the workspace, ended with no answer and still reported success.
 ### Changed
 - The `invoke-antigravity` skill says which credential each billing route needs (ADC on
   `gcp`, agy's own login on `plan`), that `agy models` can fail while a `gcp` run works,
-  and that plan mode reads the `--cd` tree only: files outside it go inside, through
+  and that plan mode reads the `--cd` tree with no rule: a file outside it goes inside, through
+  a `read_file(<dir>)` allow rule,
   `--extra --add-dir <dir>` (last on the line, repeated on every resume) or pasted into
   the prompt.
 

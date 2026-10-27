@@ -105,4 +105,5 @@ outside the workspace.
    is a warning, never a refusal. `adcAuth: failed` in agy's log becomes the round's error
    text, not retryable for a rejected credential.
 4. The skill text says which credential each billing route needs, that `agy models` can
-   fail while a `gcp` run works, and that plan mode reads the `--cd` tree only.
+   fail while a `gcp` run works, and that plan mode reads the `--cd` tree with no rule
+   (any other path needs a `read_file(<dir>)` rule or `--add-dir`).

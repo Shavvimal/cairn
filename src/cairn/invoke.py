@@ -117,6 +117,7 @@ EXIT_BY_OUTCOME: dict[str, int] = {
 # A prompt larger than this goes through the child's stdin (macOS ARG_MAX, D14).
 STDIN_PROMPT_BYTES = 64_000
 TAIL_FINALISE_GRACE_S = 2.0
+WAIT_ADOPTION_GRACE_S = 30.0
 PROGRESS_CAP = 200
 PROGRESS_CHARS = 200
 STATE_WRITE_INTERVAL_S = 2.0
@@ -706,9 +707,24 @@ def _soft_denials(harness: Harness, log_path: Path | None) -> list[dict]:
     return list(observe(log_path)) if callable(observe) and log_path is not None else []
 
 
+_AUTH_PHRASES = (
+    "authentication",
+    "unauthenticated",
+    "not logged in",
+    "log in",
+    "login",
+    "credential",
+    "invalid_grant",
+    "invalid_rapt",
+    "adc",
+)
+
+
 def _auth_related(error: str) -> bool:
+    """Whether a peer's own error text is about authentication (so agy's log may name
+    the cause); "input token count" or a path containing "auth" is not."""
     low = error.lower()
-    return any(marker in low for marker in ("auth", "logged in", "login", "credential", "token"))
+    return any(phrase in low for phrase in _AUTH_PHRASES)
 
 
 def _round_log(round_: dict, files: dict[str, Path]) -> Path | None:
@@ -2245,8 +2261,6 @@ def cmd_tail(
     finally:
         if reader is not None:
             reader.close()
-    if done is not None and not round_.get("finished_at"):
-        replay.observed = _soft_denials(harness, _round_log(round_, _round_files(run_dir, number)))
     if done is not None and follow and not round_.get("finished_at"):
         # The peer has spoken; the runner is finalising. Its record (outcome, exit
         # code) is the contract, so give it a moment before falling back to the stream.
@@ -2254,6 +2268,10 @@ def cmd_tail(
         while time.monotonic() < deadline and not round_.get("finished_at"):
             time.sleep(0.1)
             round_ = _select_round(ThreadState.load(run_dir / "thread.json"), number)
+    if done is not None and not round_.get("finished_at"):
+        # The fallback classifies the stream plus the peer's log, read now (after the
+        # wait), so a denial the log shows by then is not missed.
+        replay.observed = _soft_denials(harness, _round_log(round_, _round_files(run_dir, number)))
     if round_.get("finished_at"):
         outcome = str(round_.get("outcome") or "unknown")
     elif done is not None:
@@ -2282,7 +2300,14 @@ def cmd_wait(config: CairnConfig, thread_id: str, as_json: bool) -> int:
         if obs.health.execution in ("exited", "unknown"):
             break
         time.sleep(1)
-    round_ = obs.round_
+    # Both processes are gone but the record is not finished: another reader holds
+    # the thread lock and is adopting the round. Its record is the contract, so wait
+    # for it rather than build a result from an unfinished round.
+    deadline = time.monotonic() + WAIT_ADOPTION_GRACE_S
+    while not (obs.round_ or {}).get("finished_at") and time.monotonic() < deadline:
+        time.sleep(0.2)
+        obs = observe(config, run_dir)
+    round_ = obs.round_ or {}
     number = int(round_["round"])
     result_path = _round_files(run_dir, number)["result_path"]
     # The runner writes the result file after publication; a live runner lands it.

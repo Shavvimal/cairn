@@ -105,7 +105,8 @@ The engine enforces this per run:
   the rule it needs, and each refused path with the `read_file(<dir>)` rule or `--add-dir`
   that would cover it. A refusal beside a real answer stays `succeeded` with a
   `permissions:` warning that carries the same verdicts; `denied` in the result lists the
-  tool and target of each. `tail`, `status` and `wait` reach the same verdict.
+  tool and target of each. `tail`, `status` and `wait` reach the same verdict from the
+  same evidence; `wait` holds for the record of a round another reader is adopting.
 - The round record in `thread.json` keeps `permissions` (the allow, deny and ask rules in
   force when the round started, and `roots`: the workspace and every `--add-dir`); an
   `ask` rule denies headlessly. A resume after a rule change tells the peer what changed

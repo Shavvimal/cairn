@@ -753,7 +753,9 @@ def _normalise(path: str, workspace: str | None) -> str:
 
 
 def _under(path: str, root: str) -> bool:
-    root = root.rstrip("/") or "/"
+    root = root.rstrip("/")
+    if not root:  # the root is "/": everything is under it
+        return True
     return path == root or path.startswith(root + "/")
 
 
@@ -772,7 +774,8 @@ def read_verdict(
     ``ask`` rule denies here because headless agy cannot ask; a ``read_file(<dir>)``
     rule covers its subtree; a relative target is taken from the workspace (the first
     of ``roots``); a target with a wildcard matches the whole path (with a slash) or
-    the file's name (``read_file(.env*)``); ``write_file`` on a path grants
+    the file's name (``read_file(.env*)``), and a slashless target also as a
+    workspace-relative path; ``write_file`` on a path grants
     ``read_file``; ``read_file(*)`` covers all; and the workspace plus every
     ``--add-dir`` (``roots``) is readable with no rule. Paths are normalised
     (``~``, ``..``) but symlinks are not resolved. Verified live on agy 1.4.8 for the
@@ -813,11 +816,15 @@ def read_verdict(
 
 
 def _read_rule_covers(target: str, path: str, workspace: str | None) -> bool:
+    """Whether a ``read_file(<target>)`` rule covers ``path``. A target with no slash
+    matches by file name (``.env*``, how cairn's own deny set is written) and also as
+    a workspace-relative path or directory (``secret``, agy's ``read_file(dir)``):
+    the union, because the two readings have not been told apart live."""
     target = target.strip()
     if target in ("*", "/"):
         return True
-    if "/" not in target:
-        return fnmatch.fnmatch(Path(path).name, target)
+    if "/" not in target and fnmatch.fnmatch(Path(path).name, target):
+        return True
     if any(ch in target for ch in "*?["):
         return fnmatch.fnmatch(path, _normalise(target, workspace))
     return _under(path, _normalise(target, workspace))
