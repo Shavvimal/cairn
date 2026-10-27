@@ -28,8 +28,9 @@ Round lifecycle:
    SIGTERM/SIGINT forwarding. A runner that dies loses none of the stream.
 4. Finalise the outcome, save the answer, then run the publication pipeline.
    A peer that reported success with an empty answer after refusing tool calls
-   for want of a permission (headless agy) ends as ``denied`` (exit 2, retryable):
-   the error names each refused command and the allow rule it needs. Then run
+   for want of a permission (headless agy) ends as ``denied`` (exit 2, retryable),
+   whether the stream showed the refusal as a tool error or agy only counted it:
+   the error names each refused call and the allow rule it needs. Then run
    (peer export, caller export, links, exchange document, index). Pipeline
    failures never change the outcome (D11); each step lands in the round's
    publication ledger (D24) so ``cairn invoke publish`` or the next
@@ -73,11 +74,17 @@ from .harnesses import Event, Harness, InvokeRequest, detect_harness, get_harnes
 from .harnesses.antigravity import (
     ANTIGRAVITY_MODES,
     COMMAND_TOOL,
+    DENIED_ACTION_TOOLS,
+    READ_TOOL,
+    adc_token_check,
+    add_dirs_from_extra,
+    auth_failure,
     billing_env,
     billing_problem,
     billing_problems,
     command_verdict,
     observe_billing,
+    read_verdict,
     resolved_project,
 )
 from .harnesses.claude import KEYCHAIN_GUIDANCE, keychain_failure
@@ -96,6 +103,16 @@ EXIT_BUSY = 75
 EXIT_TIMEOUT = 124
 EXIT_IDLE = 125
 EXIT_CANCELLED = 130
+# The cairn exit code an outcome carries wherever it is decided (the live runner,
+# ``adopt``, ``tail`` before the runner has finalised). A ``failed`` round keeps the
+# peer's own return code, which only the runner knows.
+EXIT_BY_OUTCOME: dict[str, int] = {
+    "succeeded": EXIT_OK,
+    "denied": EXIT_DENIED,
+    "timeout": EXIT_TIMEOUT,
+    "idle_timeout": EXIT_IDLE,
+    "cancelled": EXIT_CANCELLED,
+}
 
 # A prompt larger than this goes through the child's stdin (macOS ARG_MAX, D14).
 STDIN_PROMPT_BYTES = 64_000
@@ -268,6 +285,9 @@ class Replay:
     commands: list[str] = field(default_factory=list)
     files_written: list[str] = field(default_factory=list)
     denied: list[dict] = field(default_factory=list)
+    # Soft denials the peer's own log names (``Antigravity.soft_denials``), set by
+    # whoever finalises the round; the stream shows no error for them.
+    observed: list[dict] = field(default_factory=list)
 
     def add_progress(self, text: str) -> None:
         self.progress.append(_clip(text, PROGRESS_CHARS))
@@ -303,6 +323,31 @@ class Replay:
                 self.notices.append(_clip(event.text, 500))
             elif event.kind == "done":
                 self.done = event
+
+    def refusals(self) -> list[dict]:
+        """Every call the peer's CLI refused, from three sources merged in order: the
+        stream's ``denied`` events (a ``run_command`` ended in state ``ERROR``), the
+        soft denials ``observed`` in the peer's own log (a soft deny leaves no error in
+        the stream; the harness joins the log's step numbers to their targets), and
+        finally one targetless entry per action type agy counted in the result's
+        ``denied_actions`` that the first two did not name. ``denied_actions`` counts
+        action types, not calls, so the fallback never claims a call count."""
+        merged: list[dict] = []
+        for item in [*self.denied, *self.observed]:
+            entry = {
+                "tool": str(item.get("tool") or "tool"),
+                "target": str(item.get("target") or ""),
+            }
+            if entry not in merged:
+                merged.append(entry)
+        named = {entry["tool"] for entry in merged}
+        counted = ((self.done.usage if self.done else None) or {}).get("denied_actions") or []
+        for kind in counted:
+            tool = DENIED_ACTION_TOOLS.get(str(kind), str(kind))
+            if tool not in named:
+                merged.append({"tool": tool, "target": ""})
+                named.add(tool)
+        return merged
 
 
 def replay_file(harness: Harness, path: Path) -> Replay:
@@ -645,9 +690,56 @@ def _retryable(text: str) -> bool:
 def denied_outcome(replay: Replay) -> bool:
     """A peer that said "success" with an empty final answer after its CLI refused
     tool calls did nothing usable: the round is ``denied``, not ``succeeded``. The
-    final answer is the peer's own response, not an earlier progress message."""
+    final answer is the peer's own response, not an earlier progress message. A
+    refusal counts whether the stream showed it as a tool error or agy only counted
+    it in ``denied_actions`` (a soft-denied read ends the turn with no error line)."""
     done = replay.done
-    return bool(done and done.status == "succeeded" and not done.text and replay.denied)
+    if not (done and done.status == "succeeded" and not done.text):
+        return False
+    return bool(replay.refusals())
+
+
+def _soft_denials(harness: Harness, log_path: Path | None) -> list[dict]:
+    """The soft denials a peer's own log names, for a harness that reads one (agy)."""
+    observe = getattr(harness, "soft_denials", None)
+    return list(observe(log_path)) if callable(observe) and log_path is not None else []
+
+
+_AUTH_TEXT = re.compile(
+    r"\b(authentication|unauthenticated|not logged in\w*|log in|login|credentials?|"
+    r"invalid_grant|invalid_rapt|adc)\b",
+    re.IGNORECASE,
+)
+
+
+def _auth_related(error: str) -> bool:
+    """Whether a peer's own error text is about authentication (so agy's log may name
+    the cause). Whole words only: "input token count", a path containing "auth" or
+    "readconfig" are not."""
+    return _AUTH_TEXT.search(error) is not None
+
+
+def _round_log(round_: dict, files: dict[str, Path]) -> Path | None:
+    """The peer's own log for a round, wherever it is now: ``peer-NN.log`` once the
+    round is finished, else the pre-move ``log_target``; ``None`` without one."""
+    if files["peer_log_path"].is_file():
+        return files["peer_log_path"]
+    target = round_.get("log_target")
+    return Path(target) if target and Path(target).is_file() else None
+
+
+def stream_outcome(replay: Replay) -> str | None:
+    """The outcome the event stream alone supports: the final event's status, with a
+    success that :func:`denied_outcome` rejects read as ``denied``. ``None`` without a
+    final event. Readers that see the stream before the runner has finalised the
+    round (``tail``, ``status``) use this, so they never report a dead round as
+    ``succeeded``."""
+    done = replay.done
+    if done is None:
+        return None
+    if done.status == "succeeded" and denied_outcome(replay):
+        return "denied"
+    return done.status
 
 
 def denial_lines(denied: list[dict], permissions: dict | None) -> list[str]:
@@ -655,13 +747,38 @@ def denial_lines(denied: list[dict], permissions: dict | None) -> list[str]:
     against the rules recorded for the round (so the advice matches what agy saw)."""
     allow = list((permissions or {}).get("allow") or [])
     deny = list((permissions or {}).get("deny") or [])
+    ask = list((permissions or {}).get("ask") or [])
     lines = []
     for item in denied:
         tool, target = str(item.get("tool") or "tool"), str(item.get("target") or "")
-        if tool != COMMAND_TOOL or not target:
-            lines.append(f"{tool} {target} (needs a {tool} allow rule)".replace("  ", " "))
+        if tool == READ_TOOL and target:
+            read = read_verdict(
+                target,
+                allow,
+                deny,
+                list((permissions or {}).get("roots") or []),
+                list((permissions or {}).get("ask") or []),
+            )
+            if read["verdict"] == "denied":
+                lines.append(f"`{target}` denied by {', '.join(read['denied_by'])}")
+            elif read["verdict"] == "unmatched":
+                lines.append(
+                    f"`{target}` is outside the workspace: needs {', '.join(read['suggest'])} "
+                    f"in permissions.allow, or --extra --add-dir {Path(target).parent} on the run"
+                )
+            else:
+                lines.append(f"`{target}` (the recorded rules allow it; agy still refused it)")
             continue
-        verdict = command_verdict(target, allow, deny)
+        if tool != COMMAND_TOOL or not target:
+            hint = f"needs a {tool} allow rule"
+            if tool == READ_TOOL:
+                hint = (
+                    "a path outside the workspace: needs read_file(<absolute dir>) in "
+                    "permissions.allow, or --extra --add-dir <dir> on the run"
+                )
+            lines.append(f"{tool} {target} ({hint})".replace("  ", " "))
+            continue
+        verdict = command_verdict(target, allow, deny, ask)
         if verdict["verdict"] == "denied":
             lines.append(f"`{target}` denied by {', '.join(verdict['denied_by'])}")
         elif verdict["verdict"] == "unmatched":
@@ -675,11 +792,40 @@ def denial_text(denied: list[dict], permissions: dict | None) -> str:
     path = (permissions or {}).get("path") or "agy's settings.json"
     shown = denial_lines(denied[:8], permissions)
     more = f" (+{len(denied) - 8} more)" if len(denied) > 8 else ""
-    return (
-        f"agy auto-denied {len(denied)} tool call(s){more}: {'; '.join(shown)}. Add the rule "
-        f"to permissions.allow in {path} (or run 'cairn hook install --harness antigravity "
-        "--grant-commands' for cairn's defaults), then resume"
-    )
+    # Entries are distinct (tool, target) pairs, or an action type agy counted with no
+    # target: never an exact count of calls. The remedy follows the verdicts: a rule
+    # covers a refusal (review it) or nothing does (add one); a mixed set needs both.
+    kinds = _refusal_kinds(denied, permissions)
+    remedies = []
+    if "denied" in kinds:
+        remedies.append(f"review the deny and ask rules in {path}")
+    if kinds - {"denied"}:
+        remedies.append(
+            f"add the missing rule to permissions.allow in {path} (or run 'cairn hook "
+            "install --harness antigravity --grant-commands' for cairn's defaults)"
+        )
+    remedy = " and ".join(remedies)
+    remedy = remedy[:1].upper() + remedy[1:]  # not capitalize(): it lowercases the path
+    return f"agy auto-denied {len(denied)} distinct refusal(s){more}: {'; '.join(shown)}. {remedy}, then resume"
+
+
+def _refusal_kinds(denied: list[dict], permissions: dict | None) -> set[str]:
+    """The verdict of each refusal against the recorded rules: ``denied`` (a deny or
+    ask rule covers it), ``unmatched`` (no rule does) or ``allowed`` (agy refused it
+    anyway)."""
+    rules = permissions or {}
+    allow, deny = list(rules.get("allow") or []), list(rules.get("deny") or [])
+    ask, roots = list(rules.get("ask") or []), list(rules.get("roots") or [])
+    kinds: set[str] = set()
+    for item in denied:
+        tool, target = str(item.get("tool") or ""), str(item.get("target") or "")
+        if tool == COMMAND_TOOL and target:
+            kinds.add(command_verdict(target, allow, deny, ask)["verdict"])
+        elif tool == READ_TOOL and target:
+            kinds.add(read_verdict(target, allow, deny, roots, ask)["verdict"])
+        else:
+            kinds.add("unmatched")
+    return kinds
 
 
 def permissions_note(previous: dict | None, current: dict, denied_before: list[dict]) -> str | None:
@@ -688,12 +834,16 @@ def permissions_note(previous: dict | None, current: dict, denied_before: list[d
     ``None`` when nothing changed and nothing was refused."""
     prev_allow = set((previous or {}).get("allow") or [])
     prev_deny = set((previous or {}).get("deny") or [])
+    prev_ask = set((previous or {}).get("ask") or [])
     cur_allow, cur_deny = set(current.get("allow") or []), set(current.get("deny") or [])
+    cur_ask = set(current.get("ask") or [])
     changes = [
         ("newly allowed", sorted(cur_allow - prev_allow)),
         ("no longer allowed", sorted(prev_allow - cur_allow)),
         ("newly denied", sorted(cur_deny - prev_deny)),
         ("no longer denied", sorted(prev_deny - cur_deny)),
+        ("newly asked (a refusal when headless)", sorted(cur_ask - prev_ask)),
+        ("no longer asked", sorted(prev_ask - cur_ask)),
     ]
     if previous is None:
         changes = []  # a first round has nothing to diff against
@@ -703,12 +853,31 @@ def permissions_note(previous: dict | None, current: dict, denied_before: list[d
     for label, rules in changes:
         if rules:
             lines.append(f"- {label}: {', '.join(rules)}")
+    roots = list(current.get("roots") or [])
+    ask = list(current.get("ask") or [])
     for item in denied_before:
         tool, target = str(item.get("tool") or "tool"), str(item.get("target") or "")
+        if tool == READ_TOOL and target:
+            read = read_verdict(target, sorted(cur_allow), sorted(cur_deny), roots, ask)
+            if read["verdict"] == "allowed":
+                lines.append(
+                    f"- previously refused read_file `{target}`: now readable ({read['allowed_by']})"
+                )
+            elif read["verdict"] == "denied":
+                lines.append(
+                    f"- previously refused read_file `{target}`: still denied by "
+                    f"{', '.join(read['denied_by'])}; do not retry it"
+                )
+            else:
+                lines.append(
+                    f"- previously refused read_file `{target}`: still outside the workspace "
+                    "with no read_file rule; do not retry it, ask for its text instead"
+                )
+            continue
         if tool != COMMAND_TOOL or not target:
             lines.append(f"- previously refused: {tool} {target}; it stays refused".rstrip())
             continue
-        verdict = command_verdict(target, sorted(cur_allow), sorted(cur_deny))
+        verdict = command_verdict(target, sorted(cur_allow), sorted(cur_deny), sorted(cur_ask))
         if verdict["verdict"] == "allowed":
             lines.append(f"- previously refused `{target}`: now allowed")
         elif verdict["verdict"] == "denied":
@@ -753,6 +922,12 @@ def _finish(
         billing["problem"] = billing_problem(
             str(billing.get("route")), billing.get("project"), billing["observed"]
         )
+        failure = auth_failure(billing["observed"]) if outcome == "failed" else None
+        if failure is not None and (error is None or _auth_related(error)):
+            # agy's own log names the cause ("authentication required" on stderr does
+            # not): a rejected credential needs a login, a transport failure a retry.
+            # A failure that is not about authentication keeps its own error.
+            error, retryable = failure
     answer = _read_text(answer_path).strip()
     done = replay.done
     if target is None or not answer:
@@ -777,7 +952,7 @@ def _finish(
         last_event=replay.last_event,
         usage=done.usage if done else None,
         files_written=list(replay.files_written) if reports_files else None,
-        denied=list(replay.denied),
+        denied=replay.refusals(),
         error=error,
         retryable=retryable,
         events_path=str(files["events_path"]),
@@ -799,9 +974,8 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
     files = _round_files(state.path.parent if state.path else Path("."), int(round_["round"]))
     try:
         replay = replay_file(harness, files["events_path"])
-        derived = (replay.done.status if replay.done else None) or "aborted"
-        if derived == "succeeded" and denied_outcome(replay):
-            derived = "denied"
+        replay.observed = _soft_denials(harness, _round_log(round_, files))
+        derived = stream_outcome(replay) or "aborted"
     except OSError:
         replay, derived = Replay(), "unknown"
     final = outcome or derived
@@ -817,7 +991,7 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
         if final == "aborted":
             error = error or "the runner died and the stream has no final event"
         if final == "denied":
-            error = denial_text(replay.denied, round_.get("permissions"))
+            error = denial_text(replay.refusals(), round_.get("permissions"))
     text = f"{stderr}\n{error or ''}"
     retryable = final == "denied" or (final != "cancelled" and _retryable(text))
     if keychain_failure(text):
@@ -828,7 +1002,7 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
         state,
         round_,
         outcome=final,
-        exit_code=None,
+        exit_code=EXIT_BY_OUTCOME.get(final),  # a failed peer's own code is unknown
         replay=replay,
         duration_s=max(0.0, ended - started),
         error=error,
@@ -891,6 +1065,7 @@ def observe(config: CairnConfig, run_dir: Path, *, settle: bool = True) -> Obser
     files = _round_files(run_dir, int(round_["round"]))
     try:
         replay = replay_file(harness, files["events_path"])
+        replay.observed = _soft_denials(harness, _round_log(round_, files))
     except OSError:
         replay = Replay()
     transcript = _transcript(config, harness, state, round_)
@@ -908,7 +1083,7 @@ def observe(config: CairnConfig, run_dir: Path, *, settle: bool = True) -> Obser
         runner_alive=runner_alive,
         peer_alive=peer_alive,
         heartbeat_at=beat.latest,
-        done_status=replay.done.status if replay.done else None,
+        done_status=stream_outcome(replay),
     )
     started = parse_iso(round_.get("started_at"))
     finished = parse_iso(round_.get("finished_at"))
@@ -971,11 +1146,18 @@ def observation_json(obs: Observation) -> dict:
         "peer_alive": obs.peer_alive,
         "last_event": obs.last_event,
         "progress": progress,
-        "last_message": round_.get("last_message") or obs.replay.last_message,
+        # A finished round's record is authoritative, ``None`` included: a denied
+        # round has no answer, however many progress messages the stream holds; the
+        # same holds for a stream classified denied before anyone finalised it.
+        "last_message": round_.get("last_message")
+        if round_.get("finished_at")
+        else (None if obs.health.outcome == "denied" else obs.replay.last_message),
         "files_written": round_.get("files_written")
         if round_.get("finished_at")
         else (obs.replay.files_written or None),
-        "denied": round_.get("denied") or obs.replay.denied,
+        "denied": (round_.get("denied") or [])
+        if round_.get("finished_at")
+        else obs.replay.refusals(),
         "billing": round_.get("billing"),
         "publication": round_.get("publication") or {},
         "events_path": round_.get("events_path"),
@@ -1263,6 +1445,14 @@ class Runner:
             problems = billing_problems(self.billing, os.environ)
             if problems:
                 raise UsageError("billing check failed: " + "; ".join(problems))
+            if self.billing.route == "gcp":
+                # The file can exist with a refresh token Google no longer honours
+                # (invalid_rapt); only minting a token proves the route is usable.
+                verdict, reason = adc_token_check(os.environ)
+                if verdict == "refused":
+                    raise UsageError(f"billing check failed: {reason}")
+                if verdict == "unverified":
+                    self.warnings.append(f"billing: ADC token not verified: {reason}")
         if self.peer == "antigravity":
             from .harnesses.antigravity_registration import permission_problem
 
@@ -1352,7 +1542,7 @@ class Runner:
             state.caller_session = caller
         number = len(state.rounds) + 1
         files = _round_files(self.run_dir, number)
-        permissions = self._permissions_snapshot()
+        permissions = self._permissions_snapshot(settings)
         note = None
         if permissions is not None and recorded is not None and not self.args.fork:
             previous = recorded.last_round or {}
@@ -1458,16 +1648,24 @@ class Runner:
         state.save(self.run_dir / "thread.json")
         return self._spawn_and_pump(argv, request, depth, caller)
 
-    def _permissions_snapshot(self) -> dict | None:
-        """The agy rules in force when this round starts (antigravity only), so the
-        result can judge a refusal against what the peer actually saw and the next
-        resume can tell the peer what changed."""
+    def _permissions_snapshot(self, settings: Settings) -> dict | None:
+        """The agy rules in force when this round starts (antigravity only), plus the
+        directories it may read with no rule (``roots``: the workspace and every
+        ``--add-dir``), so the result can judge a refusal against what the peer
+        actually saw and the next resume can tell the peer what changed."""
         if self.peer != "antigravity":
             return None
         from .harnesses.antigravity_registration import permission_report
 
         report = permission_report(self.config)
-        return {"path": report["path"], "allow": report["allow"], "deny": report["deny"]}
+        roots = [str(settings.cwd), *add_dirs_from_extra(settings.extra)]
+        return {
+            "path": report["path"],
+            "allow": report["allow"],
+            "deny": report["deny"],
+            "ask": report.get("ask") or [],
+            "roots": roots,
+        }
 
     def _lookup_caller_doc(self, state: ThreadState, caller: str | None) -> None:
         """Find an already exported caller document so the exchange document can be
@@ -1772,13 +1970,17 @@ class Runner:
         stderr = _tail(files["stderr_path"])
         done = replay.done
         error: str | None = self.round.get("error")
+        # The peer's own log (still at its pre-move path) names the soft denials the
+        # stream did not; read it before the outcome is decided.
+        log_target = self.round.get("log_target")
+        replay.observed = _soft_denials(self.harness, Path(log_target) if log_target else None)
         if outcome is None:
             succeeded = done is not None and done.status == "succeeded" and rc == 0
             outcome = "succeeded" if succeeded else "failed"
             if succeeded and denied_outcome(replay):
                 outcome = "denied"
         if outcome == "denied":
-            error = denial_text(replay.denied, self.round.get("permissions"))
+            error = denial_text(replay.refusals(), self.round.get("permissions"))
         elif outcome == "failed":
             error = error or (done.error if done and done.error else None) or stderr.strip()
             if not error:
@@ -1804,13 +2006,7 @@ class Runner:
             error = KEYCHAIN_GUIDANCE
         if outcome == "succeeded":
             error, retryable = None, None
-        exit_code = {
-            "succeeded": EXIT_OK,
-            "denied": EXIT_DENIED,
-            "timeout": EXIT_TIMEOUT,
-            "idle_timeout": EXIT_IDLE,
-            "cancelled": EXIT_CANCELLED,
-        }.get(outcome)
+        exit_code = EXIT_BY_OUTCOME.get(outcome)
         if exit_code is None:
             exit_code = rc if isinstance(rc, int) and rc > 0 else EXIT_FATAL
         _finish(
@@ -1829,16 +2025,10 @@ class Runner:
         if billing_issue:
             self.warnings.append(f"billing: {billing_issue}")
         refused = list(self.round.get("denied") or [])
-        if not refused and (self.round.get("usage") or {}).get("denied_actions"):
-            # agy counted a refusal the stream did not show as a tool error.
-            refused = [
-                {"tool": kind, "target": ""} for kind in self.round["usage"]["denied_actions"]
-            ]
-            self.round["denied"] = refused
         if refused and outcome != "denied":
             lines = denial_lines(refused, self.round.get("permissions"))
             self.warnings.append(
-                f"permissions: agy auto-denied {len(refused)} tool call(s), so the answer may "
+                f"permissions: agy auto-denied {len(refused)} distinct refusal(s), so the answer may "
                 f"be incomplete: {'; '.join(lines)}"
             )
         if outcome == "succeeded" and not self.round.get("last_message"):
@@ -2045,10 +2235,14 @@ def cmd_tail(
     tail = LineTail()
     done: Event | None = None
     reader = None
+    replay = (
+        Replay()
+    )  # the same classification the runner applies, for a stream it has not finalised
 
     def emit(line: bytes) -> None:
         nonlocal done
         for event in harness.parse_event(line.decode("utf-8", errors="replace")):
+            replay.feed([event])
             if event.kind == "done":
                 done = event
                 continue
@@ -2093,10 +2287,45 @@ def cmd_tail(
     finally:
         if reader is not None:
             reader.close()
+    if done is not None and follow and not round_.get("finished_at"):
+        # The peer has spoken, but the record (outcome, exit code) is the contract:
+        # follow a live runner to it (its watchdog may still turn this into a
+        # timeout), adopt once both processes are gone, and hold for another reader's
+        # adoption up to the peer's quiet threshold before falling back to the stream.
+        hold = float(config.invoke.for_peer(state.peer).quiet_after_s)
+        deadline: float | None = None
+        while not round_.get("finished_at"):
+            alive = identity_alive(round_.get("runner_pid"), round_.get("runner_started")) or (
+                identity_alive(round_.get("peer_pid"), round_.get("peer_started"))
+            )
+            if not alive:
+                observe(config, run_dir)  # adopts when the thread lock is free
+                round_ = _select_round(ThreadState.load(run_dir / "thread.json"), number)
+                if round_.get("finished_at"):
+                    break  # ours or another reader's record: the contract, always
+                deadline = deadline or (time.monotonic() + hold)
+                if time.monotonic() > deadline:
+                    break
+            time.sleep(0.2)
+            round_ = _select_round(ThreadState.load(run_dir / "thread.json"), number)
+    elif done is not None and not round_.get("finished_at"):
+        # A snapshot (--no-follow) of a round still in flight is not a verdict; and
+        # once both processes are gone the record may have landed since it was read.
+        alive = identity_alive(round_.get("runner_pid"), round_.get("runner_started")) or (
+            identity_alive(round_.get("peer_pid"), round_.get("peer_started"))
+        )
+        if alive:
+            done = None
+        else:
+            round_ = _select_round(ThreadState.load(run_dir / "thread.json"), number)
+    if done is not None and not round_.get("finished_at"):
+        # The fallback classifies the stream plus the peer's log, read now (after the
+        # wait), so a denial the log shows by then is not missed.
+        replay.observed = _soft_denials(harness, _round_log(round_, _round_files(run_dir, number)))
     if round_.get("finished_at"):
         outcome = str(round_.get("outcome") or "unknown")
     elif done is not None:
-        outcome = str(done.status or "unknown")
+        outcome = stream_outcome(replay) or "unknown"
     else:
         outcome = "running"
     if as_json:
@@ -2105,7 +2334,9 @@ def cmd_tail(
         print(f"RESULT {outcome}", flush=True)
     if outcome == "running":
         return EXIT_OK
-    return _round_exit_code(round_) if round_.get("finished_at") else EXIT_OK
+    if round_.get("finished_at"):
+        return _round_exit_code(round_)
+    return EXIT_BY_OUTCOME.get(outcome, EXIT_FATAL)
 
 
 def cmd_wait(config: CairnConfig, thread_id: str, as_json: bool) -> int:
@@ -2119,7 +2350,29 @@ def cmd_wait(config: CairnConfig, thread_id: str, as_json: bool) -> int:
         if obs.health.execution in ("exited", "unknown"):
             break
         time.sleep(1)
-    round_ = obs.round_
+    # Both processes are gone but the record is not finished: another reader holds
+    # the thread lock and is adopting the round. Its record is the contract, so wait
+    # for it, up to the peer's quiet threshold (an adoption is seconds of work); a
+    # result is never built from an unfinished round.
+    hold = float(config.invoke.for_peer(obs.state.peer).quiet_after_s)
+    deadline = time.monotonic() + hold
+    while not (obs.round_ or {}).get("finished_at") and time.monotonic() < deadline:
+        time.sleep(0.2)
+        obs = observe(config, run_dir)
+    round_ = obs.round_ or {}
+    if not round_.get("finished_at"):
+        busy = round_result(
+            obs.state.peer,
+            obs.state,
+            round_,
+            run_dir,
+            [],
+            status="busy",
+            error=f"another reader is adopting this round and has not finished it after "
+            f"{hold:g}s; run 'cairn invoke wait' again",
+        )
+        print(json.dumps(busy, ensure_ascii=False) if as_json else _summary(busy, run_dir))
+        return EXIT_BUSY
     number = int(round_["round"])
     result_path = _round_files(run_dir, number)["result_path"]
     # The runner writes the result file after publication; a live runner lands it.

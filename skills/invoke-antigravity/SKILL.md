@@ -20,11 +20,18 @@ round lands in the calling session's folder.
 
 ## Host caveat
 
-`agy` needs a cached login: the user must have run `agy` interactively once on this machine.
-Without it a headless run fails at once with "not logged into Antigravity" and the engine
-reports `retryable: false`; ask the user to log in, do not retry. Inside the Codex sandbox
-`agy` may not reach its credential store either; run with escalated permissions or from the
-Claude host.
+Which credential a run needs depends on the billing route (section 3b). On route `gcp`,
+`agy` authenticates with Application Default Credentials (ADC), not its own login, and the
+ADC refresh token expires on a schedule under a Workspace session-length policy. The engine
+probes it before every spawn and in `cairn doctor` (`gcloud auth application-default
+print-access-token`, up to 20 s, outside the run's own clock): a rejected token is exit 2,
+`billing check failed`, with the `gcloud auth application-default login` command to give the
+user; `billing: ADC token not verified` is a warning (no gcloud, no network) and the run
+starts. On route `plan` or `inherit` without ADC, `agy` needs its own
+cached login: the user must have run `agy` interactively once on this machine, else the run
+fails at once with "authentication required" and `retryable: false`; ask the user to log in,
+do not retry. `cairn doctor` reports both. Inside the Codex sandbox `agy` may not reach its
+credential store either; run with escalated permissions or from the Claude host.
 
 ## 1. Prompt
 
@@ -39,7 +46,9 @@ agy models
 ```
 
 Offer only slugs from that list (for example `gemini-3.1-pro-high`); the slug carries the
-model's own thinking level. `--effort` is cairn's separate reasoning-effort flag, one of
+model's own thinking level. `agy models` needs agy's own login, so on route `gcp` it can say
+"Please sign in" while runs work; then use the configured model or omit `--model`, do not
+ask the user to log in for it. `--effort` is cairn's separate reasoning-effort flag, one of
 `low`, `medium`, `high`, `xhigh`, `max`. Both are optional: omit them to let `agy` choose, or
 ask with the host's input tool when the user cares. Defaults come from the config
 (`cairn config show --json`, key `invoke.antigravity`). An unknown slug fails the run with
@@ -55,10 +64,18 @@ shell command runs only when an allow rule covers it (section 3a); `full` needs 
 `--mode` passes a native agy mode directly (`plan`, `accept-edits`, `auto`) and overrides the
 profile. The record stores the exact flags that ran.
 
+Plan mode reads the `--cd` tree with no rule; any other path needs a `read_file(<dir>)`
+allow rule or `--add-dir`, else the `read_file` is auto-denied and agy can end the turn right
+there with no answer. Put every file the peer must read inside `--cd`, pass `--extra
+--add-dir <dir>` (last on the line, and again on every `--resume`: the flag is recorded in
+the round's `argv` but not reapplied), or paste the text into the prompt. The brief itself
+is passed as text, so its own location needs nothing.
+
 ## 3a. Shell permissions (check once per machine)
 
-Headless `agy` cannot prompt, so a tool call that needs approval is auto-denied and the turn
-goes on without it; agy still reports success. A review that cannot run `grep`, `rg` or
+Headless `agy` cannot prompt, so a tool call that needs approval is auto-denied, with or
+without a tool error in the stream; the turn may go on without it or end right there with
+no answer, and agy reports success either way. A review that cannot run `grep`, `rg` or
 `git diff` is weak, and an implementation that cannot run its tests is unverified. Check
 once, before the first run on a machine:
 
@@ -83,11 +100,18 @@ The engine enforces this per run:
   `--skip-permission-check` starts it anyway for a task that needs no shell.
 - `review` (plan) and `auto` start and carry a `permissions:` warning instead.
 - A round whose peer was refused calls and ended with an empty answer is `status: denied`
-  (exit 2, `retryable: true`); `error` names each refused command and the rule it needs.
-  A refusal beside a real answer stays `succeeded` with a `permissions:` warning that
-  carries the same verdicts; `denied` in the result lists the tool and target of each.
-- The result records `permissions` (the allow and deny rules in force when the round
-  started). A resume after a rule change tells the peer what changed (section 7).
+  (exit 2, `retryable: true`), whether agy reported the refusal as a tool error (a shell
+  command) or only counted it (a soft-denied read); `error` names each refused command and
+  the rule it needs, and each refused path with the `read_file(<dir>)` rule or `--add-dir`
+  that would cover it. A refusal beside a real answer stays `succeeded` with a
+  `permissions:` warning that carries the same verdicts; `denied` in the result lists the
+  tool and target of each. `tail` follows the round to its record (adopting it when both
+  processes are gone), `wait` holds for the record of a round another reader is adopting
+  (then `status: busy`, exit 75), and `status` reads the record once it exists.
+- The round record in `thread.json` keeps `permissions` (the allow, deny and ask rules in
+  force when the round started, and `roots`: the workspace and every `--add-dir`); an
+  `ask` rule denies headlessly and counts as one in every verdict. A resume after a change
+  to any of the three lists tells the peer what changed (section 7).
 
 When a project needs a command outside the defaults (`poetry run pytest`, `make format`),
 add it to `permissions.allow` by hand, never to `full`.
@@ -201,15 +225,23 @@ session now; if `indexed` is false, `rg` finds them at once and `/search` after
   command rule. Run `cairn hook install --harness antigravity --grant-commands`, then start
   again; `--skip-permission-check` only for a task that needs no shell.
 - `status: denied` (exit 2, `retryable: true`): agy refused the calls in `denied` and the
-  peer answered nothing. Add the rule `error` names to `permissions.allow` (or run the
-  grant), then `--resume`; the peer is told what changed.
+  peer answered nothing. For a command, add the rule `error` names to `permissions.allow`
+  (or run the grant); for a path outside the workspace, move the file inside `--cd`, add
+  the `read_file(<dir>)` rule, or pass `--extra --add-dir <dir>`; then `--resume`; the
+  peer is told what changed.
 - `warnings` with `permissions:`: the run answered, but agy refused the calls listed, or no
   command rule exists at all. Read the verdicts; fix the rules before the next round.
 - Exit 2 before any run: an unknown effort, `--fast` (Codex only), `--fork`, a nested run
-  refused, or `billing check failed` (route `gcp` without ADC or a quota project: run the
-  `gcloud` command in the message, or set `invoke.antigravity.billing.project`).
-- `warnings` with `billing:`: the run finished but agy did not take the requested route
-  (wrong auth method or project). Tell the user which credits were used; do not retry blind.
+  refused, or `billing check failed` (route `gcp` without ADC or a quota project, or with
+  an ADC token Google rejected: give the user the `gcloud` command in the message, or set
+  `invoke.antigravity.billing.project`).
+- `warnings` with `billing: ADC token not verified`: the probe could not conclude (no
+  gcloud, no network); the run started. If it then fails with `ADC token refresh failed`,
+  the user must run `gcloud auth application-default login`; a transport failure is
+  retryable.
+- `warnings` with `billing:` otherwise: the run finished but agy did not take the requested
+  route (wrong auth method or project). Tell the user which credits were used; do not retry
+  blind.
 - Exit 1 with `invalid model selection` in `error`: pick a slug from `agy models`.
 - Exit 124 or 125: raise `--timeout-s` or `--idle-timeout-s`, or narrow the task. Never retry
   blind; read `status` first.

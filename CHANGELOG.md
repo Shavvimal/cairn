@@ -5,6 +5,60 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0]
+
+The fix for the two dead rounds in `docs/antigravity-soft-deny-postmortem.md`: a headless
+`agy` run on billing route `gcp` whose Application Default Credentials file existed but whose
+refresh token Google had expired, and a plan-mode run that was soft-denied one `read_file`
+outside the workspace, ended with no answer and still reported success.
+
+### Added
+- `cairn invoke antigravity` on route `gcp` probes the ADC token before the spawn
+  (`gcloud auth application-default print-access-token`, token discarded): a rejected
+  credential (`invalid_rapt`, the Workspace session-length policy, which gcloud with no
+  terminal reports as "Reauthentication failed. cannot prompt during non-interactive
+  execution") refuses the run with exit 2 and the login command; gcloud missing, a timeout or a transport failure is a
+  `billing:` warning, never a refusal. `cairn doctor` runs the same probe (up to 20 s): `token ok`, a
+  warn line for a rejected credential, or `token not verified` with the reason. A run agy
+  itself could not authenticate names the cause from agy's log (`ADC token refresh
+  failed: ...`), not retryable for a rejected credential.
+- A refused `read_file` names its path: agy's log says which step it soft-denied and the
+  harness joins that to the path the stream showed. The `denied` outcome's error, the
+  `permissions:` warning and the resume note judge it against the read rules in force
+  (deny beats ask beats allow, and an `ask` rule denies headlessly; `read_file(<dir>)`
+  covers its subtree; a relative target is workspace-relative; `write_file` grants read; a
+  bare target matches the file name) and the roots the round could read with no rule (the
+  workspace and every `--extra --add-dir`), which the round records as `permissions.roots`:
+  `now readable (inside <dir>)`, `still denied by read_file(.env*)`, or `still outside the
+  workspace with no read_file rule`.
+
+### Fixed
+- A soft-denied tool call ended the turn with an empty answer and the round reported
+  `status succeeded`, exit 0, `last_message null`. agy may show no tool error for a soft
+  deny; the result's `denied_actions` always counts it, and cairn read that count after
+  the outcome was fixed. The outcome now counts it, in the live runner, in `adopt`, in
+  `cairn invoke tail` (which follows a live runner to its record, adopts the round when
+  both processes are gone, and holds for another reader's adoption before classifying the
+  stream itself) and in `status` (a finished round's record is authoritative, so no progress
+  message poses as the answer of a denied round). An adopted `denied` round exits 2 like
+  a live one. Refusals merge the stream's tool errors, the log's soft denials and one
+  entry per counted action type the others did not name.
+- `cairn invoke wait` on a round that another reader is adopting (both processes gone,
+  the thread lock held, no `finished_at`) holds for that reader's record up to the peer's
+  `quiet_after_s`, then reports `status: busy` (exit 75) with the reason; it never builds a
+  result from an unfinished round.
+- The docstrings and the skill said the turn goes on after an auto-denied call. Live runs
+  show both shapes (a refusal with a tool error in the stream, a soft deny with none) and
+  both can end the turn; the text says so.
+
+### Changed
+- The `invoke-antigravity` skill says which credential each billing route needs (ADC on
+  `gcp`, agy's own login on `plan`), that `agy models` can fail while a `gcp` run works,
+  and that plan mode reads the `--cd` tree with no rule: a file outside it goes inside, through
+  a `read_file(<dir>)` allow rule,
+  `--extra --add-dir <dir>` (last on the line, repeated on every resume) or pasted into
+  the prompt.
+
 ## [2.7.1]
 
 ### Fixed

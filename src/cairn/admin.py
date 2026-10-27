@@ -731,7 +731,12 @@ def _check_antigravity_billing(config: CairnConfig) -> None:
     """Report the Antigravity billing route and, for ``gcp``, whether the ADC file and
     quota project it needs are in place (the same check ``cairn invoke`` runs before a
     spawn). Warn-only; the route is optional."""
-    from .harnesses.antigravity import ADC_AUTH_ENV, billing_problems, resolved_project
+    from .harnesses.antigravity import (
+        ADC_AUTH_ENV,
+        adc_token_check,
+        billing_problems,
+        resolved_project,
+    )
 
     billing = config.invoke.antigravity.billing
     if billing is None:
@@ -740,11 +745,15 @@ def _check_antigravity_billing(config: CairnConfig) -> None:
         problems = billing_problems(billing, os.environ)
         if problems:
             _warn("antigravity billing", f"route gcp is not ready: {problems[0]}")
+            return
+        detail = f"route gcp via ADC, quota project {resolved_project(billing, os.environ)}"
+        verdict, reason = adc_token_check(os.environ)
+        if verdict == "ok":
+            _ok("antigravity billing", f"{detail}, token ok")
+        elif verdict == "refused":
+            _warn("antigravity billing", f"route gcp is not ready: {reason}")
         else:
-            _ok(
-                "antigravity billing",
-                f"route gcp via ADC, quota project {resolved_project(billing, os.environ)}",
-            )
+            _warn("antigravity billing", f"{detail}; token not verified: {reason}")
         return
     host = f"; the host shell exports {ADC_AUTH_ENV}" if os.environ.get(ADC_AUTH_ENV) else ""
     _ok("antigravity billing", f"route {billing.route}{host}")

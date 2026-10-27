@@ -13,7 +13,10 @@
 # STUB_CMD=<line> runs a run_command step (DONE); STUB_WRITE=<path> a write_to_file step;
 # STUB_DENY=<line> a run_command step agy refused (state ERROR, "permission check
 # failed") plus denied_actions on the result, and with STUB_DENY_ANSWER unset the
-# final response is empty, exactly as the real denied round ended; STUB_SLEEP=<s>
+# final response is empty, exactly as the real denied round ended; STUB_SOFT_DENY=<path>
+# a read_file step on that path that agy soft-denied (verified live on 1.4.8: the step
+# ends DONE with no error, the --log-file gets the "soft-denying tool confirmation" line,
+# the turn ends with an empty response and denied_actions names read_file); STUB_SLEEP=<s>
 # pauses before the answer so a watcher can follow the stream mid-run.
 import json
 import os
@@ -77,7 +80,7 @@ def emit(event: dict) -> None:
     print(json.dumps(event), flush=True)
 
 
-if options.get("--log-file"):
+if options.get("--log-file") and os.environ.get("STUB_MODE") != "noauth":
     method = "adc" if os.environ.get("AGY_ADC_AUTH") == "true" else "gcp"
     project = os.environ.get("GOOGLE_CLOUD_QUOTA_PROJECT", "stub-project")
     with open(options["--log-file"], "w") as handle:
@@ -88,6 +91,33 @@ if options.get("--log-file"):
             f"googleapis.com/v1/projects/{project}/locations/global/publishers/google/"
             "models/gemini-4-argon:streamGenerateContent?alt=sse ResponseID: x\n"
         )
+
+if os.environ.get("STUB_MODE") == "noauth":
+    # Route gcp with a refresh token Google rejects (verified live on agy 1.4.8): the
+    # log names the cause, stderr and the result only say "authentication".
+    if options.get("--log-file"):
+        with open(options["--log-file"], "a") as handle:
+            handle.write(
+                "W1027 11:18:14.622381      82 cache.go:135] error getting token source: "
+                "You are not logged into Antigravity.\n"
+                "E1027 11:18:14.811000       1 adc_auth.go:80] adcAuth: failed to get token "
+                'from token source: oauth2: "invalid_grant" "reauth related error (invalid_rapt)"\n'
+            )
+    emit(
+        {
+            "event": "result",
+            "result": {
+                "conversation_id": "",
+                "status": "ERROR",
+                "response": "",
+                "error": "authentication failed or timed out",
+                "duration_seconds": 0,
+                "num_turns": 0,
+            },
+        }
+    )
+    print("Error: authentication required. Run 'agy' to log in.", file=sys.stderr)
+    sys.exit(1)
 
 if os.environ.get("STUB_MODE") == "badmodel":
     message = (
@@ -267,6 +297,25 @@ if denied:
         "mode cannot prompt for, so it was auto-denied.",
         file=sys.stderr,
     )
+soft = os.environ.get("STUB_SOFT_DENY")
+if soft:
+    info = {"name": "read_file", "parameters": {"Path": soft}}
+    step(index, "ACTIVE", "tool", tool_name="read_file", tool_info=info)
+    step(index, "DONE", "tool", tool_name="read_file", tool_info=info)
+    if options.get("--log-file"):
+        with open(options["--log-file"], "a") as handle:
+            handle.write(
+                "I1027 11:34:10.590358     584 tool_confirmation_manager.go:216] Print mode: "
+                f'soft-denying tool confirmation "ReadFile" at step {index}\n'
+                "I1027 11:34:10.610246       1 manager.go:857] CLI store manager shutting down\n"
+            )
+    index += 1
+    answer = ""
+    print(
+        'jetski: no output produced — a tool required the "read_file" permission that headless '
+        "mode cannot prompt for, so it was auto-denied.",
+        file=sys.stderr,
+    )
 if os.environ.get("STUB_SLEEP"):
     time.sleep(float(os.environ["STUB_SLEEP"]))
 if answer:
@@ -283,8 +332,13 @@ emit(
             "num_turns": 1,
             "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
             **(
-                {"denied_actions": [{"action": "command", "display_name": "RunCommand"}]}
-                if denied
+                {
+                    "denied_actions": (
+                        [{"action": "command", "display_name": "RunCommand"}] if denied else []
+                    )
+                    + ([{"action": "read_file", "display_name": "ReadFile"}] if soft else [])
+                }
+                if denied or soft
                 else {}
             ),
         },

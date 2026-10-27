@@ -126,6 +126,7 @@ class InvokeFixture(StoreFixture):
             ("codex", "codex"),
             ("claude", "claude"),
             ("agy", "antigravity"),
+            ("gcloud", "gcloud"),
             ("qmd", "qmd"),
         ):
             target = self.bin / name
@@ -1071,6 +1072,48 @@ class TestAntigravityRun(InvokeFixture):
         self.assertEqual(data["billing"]["project"], "env-project")
         self.assertIsNone(data["billing"]["problem"])
 
+    def test_gcp_route_refuses_to_spawn_when_the_adc_token_is_stale(self):
+        """The ADC file exists but Google rejects its refresh token (invalid_rapt): the
+        probe refuses the spawn with the login command. A probe that cannot conclude
+        (no network) warns and spawns; a stale token agy itself reports is named."""
+        self.write_adc("adc-project")
+        self.write_config(antigravity={"billing": {"route": "gcp"}})
+        result, _ = self.run_agy(env={"STUB_GCLOUD": "rapt"})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("billing check failed: Google rejected the ADC refresh token", result.stderr)
+        self.assertIn("cannot prompt during non-interactive execution", result.stderr)
+        self.assertIn("gcloud auth application-default login", result.stderr)
+        self.assertEqual(self.stub_calls(), [])
+        result, _ = self.run_agy(env={"STUB_GCLOUD": "invalid-grant"})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid_rapt", result.stderr)
+        self.assertEqual(self.stub_calls(), [])
+        result, data = self.run_agy(env={"STUB_GCLOUD": "fail"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        warning = next(w for w in data["warnings"] if w.startswith("billing: "))
+        self.assertIn("ADC token not verified", warning)
+        self.assertIn("could not resolve host", warning)
+        self.assertEqual(len(self.stub_calls()), 1)
+        # agy's log is read when the probe passed but agy's own refresh failed.
+        result, data = self.run_agy(env={"STUB_MODE": "noauth"})
+        self.assertEqual(result.returncode, 1)
+        assert data is not None
+        self.assertEqual(data["status"], "failed")
+        self.assertIn("ADC token refresh failed", data["error"])
+        self.assertIn("invalid_rapt", data["error"])
+        self.assertIn("gcloud auth application-default login", data["error"])
+        self.assertFalse(data["retryable"])
+        self.assertIn("ADC token refresh failed", data["billing"]["problem"])
+        text, _ = self.invoke(
+            "antigravity", "--cd", self.cwd, "--prompt", "x", env={"STUB_MODE": "noauth"}
+        )
+        self.assertIn("ADC token refresh failed", text.stdout + text.stderr)
+        # The plan route never probes.
+        self.write_config(antigravity={"billing": {"route": "plan"}})
+        result, data = self.run_agy(env={"STUB_GCLOUD": "rapt"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_billing_flag_overrides_the_route_per_round(self):
         self.write_adc()
         self.write_config(antigravity={"billing": {"route": "gcp"}})
@@ -1155,7 +1198,7 @@ class TestAntigravityRun(InvokeFixture):
         self.assertEqual(data["denied"], [{"tool": "run_command", "target": command}])
         self.assertEqual(data["usage"]["denied_actions"], ["command"])
         error = data["error"]
-        self.assertIn("agy auto-denied 1 tool call(s)", error)
+        self.assertIn("agy auto-denied 1 distinct refusal(s)", error)
         self.assertIn(
             f"`{command}` needs command(git log), command(echo) in permissions.allow", error
         )
@@ -1197,6 +1240,193 @@ class TestAntigravityRun(InvokeFixture):
         self.assertIsNone(self.thread(tid, "antigravity")["rounds"][2]["permissions"]["note"])
         self.assertNotIn("Shell permissions", self.stub_calls()[-1]["prompt_head"])
 
+    def test_soft_denied_read_with_empty_answer_is_a_denied_round(self):
+        """The second dead round: plan mode soft-denies one ``read_file`` outside the
+        workspace, the step ends DONE with no error, the turn ends with an empty answer
+        and agy says SUCCESS with ``denied_actions``. cairn ends it as ``denied``."""
+        outside = str(self.root / "elsewhere" / "plan.md")
+        result, data = self.run_agy(env={"STUB_SOFT_DENY": outside})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        assert data is not None
+        self.assertEqual(
+            (data["status"], data["outcome"], data["exit_code"]), ("denied", "denied", 2)
+        )
+        self.assertTrue(data["retryable"])
+        self.assertIsNone(data["last_message"])
+        self.assertEqual(data["usage"]["denied_actions"], ["read_file"])
+        # The path comes from agy's log (the step it names) joined to the stream.
+        self.assertEqual(data["denied"], [{"tool": "read_file", "target": outside}])
+        error = data["error"]
+        self.assertIn("agy auto-denied 1 distinct refusal(s)", error)
+        self.assertIn(f"`{outside}` is outside the workspace", error)
+        self.assertIn(f"needs read_file({self.root / 'elsewhere'}) in permissions.allow", error)
+        self.assertIn(f"--extra --add-dir {self.root / 'elsewhere'}", error)
+        permissions = self.thread(data["thread_id"], "antigravity")["rounds"][0]["permissions"]
+        self.assertEqual(permissions["roots"], [str(Path(self.cwd).resolve())])
+        self.assertEqual(permissions["ask"], [])
+        self.assertFalse(any(w.startswith("permissions: ") for w in data["warnings"]))
+        self.assertFalse(any(w.startswith("empty answer") for w in data["warnings"]))
+        run_dir = self.run_dirs("antigravity")[0]
+        self.assertEqual(json.loads((run_dir / "result-01.json").read_text())["status"], "denied")
+        self.assertEqual(
+            self.thread(data["thread_id"], "antigravity")["rounds"][0]["outcome"], "denied"
+        )
+        # ``tail`` on a stream the runner has not finalised yet decides the same way:
+        # the record is stripped of its finish to stand in for that window.
+        path = run_dir / "thread.json"
+        saved = json.loads(path.read_text())
+        state = json.loads(json.dumps(saved))
+        for key in ("finished_at", "outcome", "exit_code"):
+            state["rounds"][0].pop(key, None)
+        path.write_text(json.dumps(state))
+        result, _ = self.invoke("tail", data["thread_id"], "--no-follow", check_json=False)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "RESULT denied")
+        # Even with the count stripped from the stream, the log's soft denial decides.
+        events = run_dir / "events-01.jsonl"
+        kept = events.read_text()
+        events.write_text(
+            kept.replace(
+                '"denied_actions": [{"action": "read_file", "display_name": "ReadFile"}]',
+                '"denied_actions": []',
+            )
+        )
+        self.assertNotIn("ReadFile", events.read_text())
+        result, _ = self.invoke("tail", data["thread_id"], "--no-follow", check_json=False)
+        self.assertEqual(result.stdout.splitlines()[-1], "RESULT denied")
+        _, shown = self.invoke("status", data["thread_id"], "--json")
+        assert shown is not None
+        self.assertEqual(shown["outcome"], "denied")
+        self.assertIsNone(shown["last_message"])  # "Looking." never poses as the answer
+        # Following a stream whose runner died before finalising (``status`` above
+        # adopted the round, so the record is stripped again): ``tail`` adopts it and
+        # answers from the record, which is now finished.
+        path.write_text(json.dumps(state))
+        result, _ = self.invoke("tail", data["thread_id"], check_json=False)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "RESULT denied")
+        self.assertEqual(json.loads(path.read_text())["rounds"][0]["outcome"], "denied")
+        # With another reader holding the thread lock (adopting), ``tail`` holds for the
+        # peer's quiet threshold, then classifies the stream plus the log itself.
+        path.write_text(json.dumps(state))
+        self.write_config(antigravity={"quiet_after_s": 1})
+        lock = invoke.ThreadLock()
+        lock.acquire(run_dir)
+        started = time.monotonic()
+        tailer = self.spawn("tail", data["thread_id"])
+        out, err = tailer.communicate(timeout=60)
+        lock.release()
+        self.assertGreaterEqual(time.monotonic() - started, 1.0)  # it held, then decided
+        self.assertEqual(tailer.returncode, 2, err)
+        self.assertEqual(out.splitlines()[-1], "RESULT denied")
+        self.assertFalse(json.loads(path.read_text())["rounds"][0].get("finished_at"))
+        events.write_text(kept)
+        # ``wait`` while another reader holds the thread lock (adopting): it holds for
+        # that reader's record instead of building a result from an unfinished round.
+        (run_dir / "result-01.json").unlink(missing_ok=True)
+        self.write_config(antigravity={"quiet_after_s": 120})  # a long hold again
+        lock.acquire(run_dir)
+        waiter = self.spawn("wait", data["thread_id"], "--json")
+        time.sleep(1.5)
+        self.assertIsNone(waiter.poll())  # still holding for the record
+        lock.release()
+        out, err = waiter.communicate(timeout=60)
+        self.assertEqual(waiter.returncode, 2, err)
+        shown = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual((shown["status"], shown["exit_code"]), ("denied", 2))
+        self.assertIn("result file missing", " ".join(shown["warnings"]))
+        # Past its hold (the peer's quiet threshold), ``wait`` reports busy (exit 75)
+        # rather than an unfinished round.
+        path.write_text(json.dumps(state))
+        (run_dir / "result-01.json").unlink(missing_ok=True)  # adoption writes none
+        self.write_config(antigravity={"quiet_after_s": 1})
+        lock.acquire(run_dir)
+        result, shown = self.invoke("wait", data["thread_id"], "--json")
+        lock.release()
+        self.assertEqual(result.returncode, 75, result.stderr)
+        assert shown is not None
+        self.assertEqual(shown["status"], "busy")
+        self.assertIn("adopting this round", shown["error"])
+        _, shown = self.invoke("status", data["thread_id"], "--json")
+        assert shown is not None
+        self.assertEqual((shown["execution"], shown["outcome"]), ("exited", "denied"))
+        self.assertEqual(shown["denied"], [{"tool": "read_file", "target": outside}])
+        # Restore the record and resume with --extra --add-dir: the added directory is
+        # a root for the verdict, so the peer learns the path is readable now.
+        path.write_text(json.dumps(saved))
+        result, data = self.run_agy(
+            "--resume",
+            data["thread_id"],
+            "--extra",
+            "--add-dir",
+            str(self.root / "elsewhere"),
+            prompt="Carry on",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        head = self.stub_calls()[-1]["prompt_head"]
+        self.assertIn(
+            f"- previously refused read_file `{outside}`: now readable "
+            f"(inside {self.root / 'elsewhere'})",
+            head,
+        )
+        rounds = self.thread(data["thread_id"], "antigravity")["rounds"]
+        self.assertEqual(
+            rounds[1]["permissions"]["roots"],
+            [str(Path(self.cwd).resolve()), str(self.root / "elsewhere")],
+        )
+        # A rule change alone is a diff line; the previous round refused nothing.
+        (self.agy_store / "settings.json").write_text(
+            json.dumps({"permissions": {"allow": ["command(rg)", f"read_file({self.root})"]}})
+        )
+        result, data = self.run_agy("--resume", data["thread_id"], prompt="Again")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        head = self.stub_calls()[-1]["prompt_head"]
+        self.assertIn(f"- newly allowed: read_file({self.root})", head)
+        self.assertNotIn("previously refused", head)
+
+    def test_abandoned_soft_denied_round_is_adopted_as_denied(self):
+        """A dead runner: ``wait`` adopts the round from the stream and reaches the same
+        verdict, exit code and empty answer as the live runner would have."""
+        outside = str(self.root / "elsewhere" / "plan.md")
+        runner = self.spawn(
+            "antigravity",
+            "--json",
+            "--cd",
+            self.cwd,
+            "--prompt",
+            "x",
+            env={"STUB_SOFT_DENY": outside, "STUB_SLEEP": "3"},
+        )
+        state = self.started_round("antigravity")
+        tid = state["thread_id"]
+        peer_pid = state["rounds"][0]["peer_pid"]
+        os.kill(runner.pid, signal.SIGKILL)
+        runner.wait()
+        self.wait_for(lambda: self.gone(runner.pid))
+        self.wait_for(lambda: self.gone(peer_pid))
+        result, data = self.invoke("wait", tid, "--json")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        assert data is not None
+        self.assertEqual(
+            (data["status"], data["exit_code"], data["retryable"]), ("denied", 2, True)
+        )
+        self.assertIsNone(data["last_message"])
+        self.assertEqual(data["denied"][0]["tool"], "read_file")
+        self.assertIn("read_file", data["error"])
+        self.assertIn("result file missing", " ".join(data["warnings"]))
+        round_ = self.thread(tid, "antigravity")["rounds"][0]
+        self.assertTrue(round_["adopted_at"])
+        self.assertEqual(round_["exit_code"], 2)
+        # ``status`` reads the record, not the stream: no progress message poses as the answer.
+        _, shown = self.invoke("status", tid, "--json")
+        assert shown is not None
+        self.assertEqual((shown["execution"], shown["outcome"]), ("exited", "denied"))
+        self.assertIsNone(shown["last_message"])
+        result, _ = self.invoke("tail", tid, check_json=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout.splitlines()[-1], "RESULT denied")
+
     def test_partial_refusal_warns_and_the_result_lists_files_written(self):
         (self.agy_store / "settings.json").write_text(
             json.dumps({"permissions": {"allow": ["command(rg)"], "deny": ["command(curl)"]}})
@@ -1215,7 +1445,9 @@ class TestAntigravityRun(InvokeFixture):
         self.assertEqual(data["files_written"], [target])
         self.assertEqual(data["denied"], [{"tool": "run_command", "target": "curl https://x.test"}])
         warning = next(w for w in data["warnings"] if w.startswith("permissions: "))
-        self.assertIn("agy auto-denied 1 tool call(s), so the answer may be incomplete", warning)
+        self.assertIn(
+            "agy auto-denied 1 distinct refusal(s), so the answer may be incomplete", warning
+        )
         self.assertIn("`curl https://x.test` denied by command(curl)", warning)
         round_ = self.thread(data["thread_id"], "antigravity")["rounds"][0]
         self.assertIn("run: rg foo src", round_["progress"])
@@ -1739,7 +1971,7 @@ class TestReplayFacts(unittest.TestCase):
             {"tool": "replace_file_content", "target": "/r/b.py"},
         ]
         text = invoke.denial_text(denied, permissions)
-        self.assertIn("agy auto-denied 4 tool call(s): ", text)
+        self.assertIn("agy auto-denied 4 distinct refusal(s): ", text)
         self.assertIn("`git diff` needs command(git diff) in permissions.allow", text)
         self.assertIn("`curl x` denied by command(curl)", text)
         self.assertIn("`rg x` (the recorded rules allow it; agy still refused it)", text)
@@ -1771,6 +2003,76 @@ class TestReplayFacts(unittest.TestCase):
         self.assertEqual(invoke.tail_line(Event("notice", text="n")), "NOTICE n")
         self.assertIsNone(invoke.tail_line(Event("done", status="succeeded")))
 
+    def test_denial_text_remedy_follows_the_verdict(self):
+        rules = {"path": "/s.json", "allow": ["command(rg)"], "deny": ["command(curl)"], "ask": []}
+        unmatched = invoke.denial_text([{"tool": "run_command", "target": "git log"}], rules)
+        self.assertIn("agy auto-denied 1 distinct refusal(s):", unmatched)
+        self.assertIn("Add the missing rule to permissions.allow in /s.json", unmatched)
+        denied = invoke.denial_text([{"tool": "run_command", "target": "curl x"}], rules)
+        self.assertIn("`curl x` denied by command(curl)", denied)
+        self.assertIn("Review the deny and ask rules in /s.json, then resume", denied)
+        self.assertNotIn("permissions.allow", denied)
+        mixed = invoke.denial_text(
+            [
+                {"tool": "run_command", "target": "curl x"},
+                {"tool": "run_command", "target": "git log"},
+            ],
+            rules,
+        )
+        self.assertIn("Review the deny and ask rules in /s.json and add the missing rule", mixed)
+
+    def test_refusals_merge_the_stream_the_log_and_the_count(self):
+        """``denied_actions`` counts action types; the stream and the log name calls."""
+        done = invoke.Event(
+            "done",
+            text=None,
+            status="succeeded",
+            usage={"denied_actions": ["command", "read_file"]},
+        )
+        replay = invoke.Replay()
+        replay.feed([done])
+        self.assertTrue(invoke.denied_outcome(replay))
+        self.assertEqual(invoke.stream_outcome(replay), "denied")
+        self.assertEqual(
+            replay.refusals(),
+            [{"tool": "run_command", "target": ""}, {"tool": "read_file", "target": ""}],
+        )
+        # A stream refusal names the command; the counted ``command`` adds nothing.
+        replay.feed([invoke.Event("denied", text="rg x", error="run_command")])
+        self.assertEqual(
+            replay.refusals(),
+            [{"tool": "run_command", "target": "rg x"}, {"tool": "read_file", "target": ""}],
+        )
+        # The log names the soft-denied reads, several per counted action type.
+        observed = [
+            {"tool": "read_file", "target": "/x/a.md"},
+            {"tool": "read_file", "target": "/x/b.md"},
+            {"tool": "read_file", "target": "/x/a.md"},
+        ]
+        replay.observed = observed
+        self.assertEqual(
+            replay.refusals(),
+            [
+                {"tool": "run_command", "target": "rg x"},
+                {"tool": "read_file", "target": "/x/a.md"},
+                {"tool": "read_file", "target": "/x/b.md"},
+            ],
+        )
+        # A real answer beside a refusal is not a denied round.
+        answered = invoke.Replay()
+        answered.feed([invoke.Event("done", text="PONG", status="succeeded", usage=done.usage)])
+        self.assertFalse(invoke.denied_outcome(answered))
+        self.assertEqual(invoke.stream_outcome(answered), "succeeded")
+        self.assertIsNone(invoke.stream_outcome(invoke.Replay()))
+
+    def test_only_an_authentication_error_yields_to_the_adc_log(self):
+        self.assertTrue(invoke._auth_related("ERROR: authentication failed or timed out"))
+        self.assertTrue(invoke._auth_related("You are not logged into Antigravity."))
+        self.assertTrue(invoke._auth_related("ADC token missing"))
+        self.assertFalse(invoke._auth_related("input token count exceeds maximum context length"))
+        self.assertFalse(invoke._auth_related("cannot read /srv/author/x.py"))
+        self.assertFalse(invoke._auth_related("cannot read /srv/readconfig.py"))
+
     def test_permissions_note(self):
         before = {"allow": ["command(rg)"], "deny": ["command(curl)"]}
         same = {"allow": ["command(rg)"], "deny": ["command(curl)"]}
@@ -1791,6 +2093,17 @@ class TestReplayFacts(unittest.TestCase):
         self.assertIn("- newly allowed: command(git log)", note)
         self.assertIn("- newly denied: command(python)", note)
         self.assertIn("- no longer denied: command(curl)", note)
+        # An ask rule is a refusal when headless: it shows in the diff and the verdicts.
+        asked = invoke.permissions_note(
+            before, {**after, "ask": ["command(*)"]}, [{"tool": "run_command", "target": "rg x"}]
+        )
+        assert asked is not None
+        self.assertIn("- newly asked (a refusal when headless): command(*)", asked)
+        self.assertIn(
+            "- previously refused `rg x`: still denied by command(*) (an ask rule; headless agy "
+            "cannot ask); do not retry it",
+            asked,
+        )
         self.assertIn("- previously refused `git log -1`: now allowed", note)
         self.assertIn(
             "- previously refused `curl x`: still has no allow rule; do not retry it", note
@@ -1801,6 +2114,43 @@ class TestReplayFacts(unittest.TestCase):
         )
         self.assertIn("- previously refused: write_to_file /r/c; it stays refused", note)
         self.assertTrue(note.endswith("A refused call is never retried by rephrasing it."))
+        # A refused read is judged against the roots and the read_file rules now in force.
+        reads = [
+            {"tool": "read_file", "target": "/r/plan.md"},
+            {"tool": "read_file", "target": "/r/.env"},
+            {"tool": "read_file", "target": "/w/src/a.py"},
+            {"tool": "read_file", "target": "/docs/x.md"},
+        ]
+        rules = {
+            "allow": ["read_file(/docs)"],
+            "deny": ["read_file(.env*)"],
+            "ask": ["read_file(/w/src/b.py)"],
+            "roots": ["/w"],
+        }
+        note = invoke.permissions_note(before, rules, reads)
+        assert note is not None
+        self.assertIn(
+            "- previously refused read_file `/r/plan.md`: still outside the workspace with no "
+            "read_file rule; do not retry it, ask for its text instead",
+            note,
+        )
+        self.assertIn(
+            "- previously refused read_file `/r/.env`: still denied by read_file(.env*); do not",
+            note,
+        )
+        self.assertIn(
+            "- previously refused read_file `/w/src/a.py`: now readable (inside /w)", note
+        )
+        asked = invoke.permissions_note(
+            before, rules, [{"tool": "read_file", "target": "/w/src/b.py"}]
+        )
+        assert asked is not None
+        self.assertIn(
+            "still denied by read_file(/w/src/b.py) (an ask rule; headless agy cannot ask)", asked
+        )
+        self.assertIn(
+            "- previously refused read_file `/docs/x.md`: now readable (read_file(/docs))", note
+        )
         # Nothing changed but something was refused: the verdicts alone are the note.
         only = invoke.permissions_note(before, same, refused[:2])
         assert only is not None

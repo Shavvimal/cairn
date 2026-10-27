@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -24,6 +25,10 @@ from cairn.harnesses.antigravity import (
     MODE_BY_PROFILE,
     READ_ONLY_COMMANDS,
     TEST_COMMANDS,
+    Antigravity,
+    adc_token_check,
+    add_dirs_from_extra,
+    auth_failure,
     billing_env,
     billing_problem,
     billing_problems,
@@ -36,9 +41,11 @@ from cairn.harnesses.antigravity import (
     needs_shell_rules,
     observe_billing,
     permission_rules,
+    read_verdict,
     resolved_project,
     shell_rules_present,
     suggested_prefix,
+    tool_name,
     transcript_conversation_id,
 )
 from cairn.harnesses.claude import KEYCHAIN_GUIDANCE, KEYCHAIN_MARKERS, keychain_failure
@@ -1102,14 +1109,24 @@ class TestAntigravityBilling(unittest.TestCase):
             log = Path(tmp) / "peer-01.log"
             self.assertEqual(
                 observe_billing(log),
-                {"auth_method": None, "quota_project": None, "vertex_projects": []},
+                {
+                    "auth_method": None,
+                    "quota_project": None,
+                    "vertex_projects": [],
+                    "auth_error": None,
+                },
             )
             log.write_text(self.LOG)
             observed = observe_billing(log)
         project = "example-quota-project"
         self.assertEqual(
             observed,
-            {"auth_method": "adc", "quota_project": project, "vertex_projects": [project]},
+            {
+                "auth_method": "adc",
+                "quota_project": project,
+                "vertex_projects": [project],
+                "auth_error": None,
+            },
         )
         self.assertIsNone(billing_problem("gcp", project, observed))
         self.assertIsNone(billing_problem("gcp", None, observed))
@@ -1268,6 +1285,9 @@ class TestAntigravityPermissions(unittest.TestCase):
             ("denied", ["command(git push)"], []),
         )
         # A compound command needs every segment; the suggestion names the missing ones only.
+        asked = command_verdict("rg foo", allow, deny, ["command(*)"])
+        self.assertEqual(asked["verdict"], "denied")
+        self.assertEqual(asked["denied_by"], ["command(*) (an ask rule; headless agy cannot ask)"])
         compound = command_verdict('git log --oneline -3 && echo "---" | rg -n x', allow, deny)
         self.assertEqual(compound["verdict"], "unmatched")
         self.assertEqual(compound["unmatched"], ['echo "---"'])
@@ -1283,6 +1303,248 @@ class TestAntigravityPermissions(unittest.TestCase):
         self.assertFalse(needs_shell_rules(("--mode", "plan")))
         self.assertFalse(needs_shell_rules(("--mode", "auto")))
         self.assertFalse(needs_shell_rules(("--dangerously-skip-permissions",)))
+
+
+class TestAntigravityReadDenials(unittest.TestCase):
+    """A soft-denied ``read_file`` leaves no error in the stream: the log names it by
+    step, the harness joins the step to its path, and the verdict models agy's rules."""
+
+    LOG = (
+        "I1027 11:34:10.587050    1091 runner.go:563] Monitor agy_tool_safety FINISHED\n"
+        "I1027 11:34:10.590358     584 tool_confirmation_manager.go:216] Print mode: "
+        'soft-denying tool confirmation "ReadFile" at step 2\n'
+        "I1027 11:34:10.590400     584 tool_confirmation_manager.go:216] Print mode: "
+        'soft-denying tool confirmation "RunCommand" at step 7\n'
+        "I1027 11:34:10.610246       1 manager.go:857] CLI store manager shutting down\n"
+    )
+
+    def test_soft_denials_join_the_log_to_the_stream(self):
+        agy = Antigravity()
+        step = {
+            "step_index": 2,
+            "state": "DONE",
+            "step_type": "tool",
+            "tool_name": "read_file",
+            "tool_info": {"name": "read_file", "parameters": {"Path": "/x/plan.md"}},
+        }
+        agy.parse_event(json.dumps({"event": "step_update", "step_update": step}))
+        with TemporaryDirectory() as tmp:
+            log = Path(tmp) / "peer-01.log"
+            self.assertEqual(agy.soft_denials(log), [])  # no log yet
+            log.write_text(self.LOG)
+            self.assertEqual(
+                agy.soft_denials(log),
+                [
+                    {"tool": "read_file", "target": "/x/plan.md"},
+                    {"tool": "run_command", "target": ""},  # step 7 was not in the stream
+                ],
+            )
+        self.assertEqual(agy.soft_denials(None), [])
+        self.assertEqual(tool_name("ReadFile"), "read_file")
+        self.assertEqual(tool_name("WriteToFile"), "write_to_file")
+        self.assertEqual(tool_name("RunCommand"), "run_command")
+
+    def test_add_dirs_from_extra(self):
+        self.assertEqual(add_dirs_from_extra(()), [])
+        self.assertEqual(
+            add_dirs_from_extra(("--add-dir", "/a", "--verbose", "--add-dir=/b", "--add-dir")),
+            ["/a", "/b"],
+        )
+
+    def test_read_verdict(self):
+        allow = ["command(rg)", "read_file(/srv/docs)", "write_file(/srv/out)"]
+        deny = ["read_file(.env*)", "read_file(/srv/secret)"]
+        roots = ["/work/repo", "/extra"]
+        self.assertEqual(
+            read_verdict("/work/repo/src/a.py", allow, deny, roots)["allowed_by"],
+            "inside /work/repo",
+        )
+        self.assertEqual(read_verdict("/extra/x.md", allow, deny, roots)["verdict"], "allowed")
+        self.assertEqual(
+            read_verdict("/srv/docs/deep/file.md", allow, deny, roots)["allowed_by"],
+            "read_file(/srv/docs)",
+        )
+        self.assertEqual(
+            read_verdict("/srv/out/x", allow, deny, roots)["allowed_by"], "write_file(/srv/out)"
+        )
+        # Deny beats the workspace and every allow rule; a bare target matches the name.
+        self.assertEqual(
+            read_verdict("/work/repo/.env.prod", allow, deny, roots)["denied_by"],
+            ["read_file(.env*)"],
+        )
+        self.assertEqual(
+            read_verdict("/srv/secret/key", allow, deny, roots)["denied_by"],
+            ["read_file(/srv/secret)"],
+        )
+        outside = read_verdict("/srv/notes/plan.md", allow, deny, roots)
+        self.assertEqual(outside["verdict"], "unmatched")
+        self.assertEqual(outside["suggest"], ["read_file(/srv/notes)"])
+        # A prefix is a directory boundary, not a string prefix.
+        self.assertEqual(read_verdict("/srv/docs2/x", allow, deny, roots)["verdict"], "unmatched")
+        self.assertEqual(read_verdict("/anything", ["read_file(*)"], [], [])["verdict"], "allowed")
+        self.assertEqual(
+            read_verdict("/anything", [], ["read_file(*)"], roots)["verdict"], "denied"
+        )
+        # A relative rule is workspace-relative; deny beats the workspace default.
+        self.assertEqual(
+            read_verdict("/work/repo/secret/key", [], ["read_file(secret/)"], roots)["denied_by"],
+            ["read_file(secret/)"],
+        )
+        self.assertEqual(
+            read_verdict("/srv/elsewhere/a.md", ["read_file(../elsewhere)"], [], roots)["verdict"],
+            "unmatched",
+        )
+        self.assertEqual(
+            read_verdict("/work/elsewhere/a.md", ["read_file(../elsewhere)"], [], roots)[
+                "allowed_by"
+            ],
+            "read_file(../elsewhere)",
+        )
+        # Dot segments are normalised before the workspace check; a relative --add-dir
+        # root is taken from the workspace; a trailing slash is not a different rule.
+        self.assertEqual(
+            read_verdict("/work/repo/../secret/key", [], [], roots)["verdict"], "unmatched"
+        )
+        self.assertEqual(
+            read_verdict("/work/docs/x.md", [], [], ["/work/repo", "../docs"])["allowed_by"],
+            "inside /work/docs",
+        )
+        self.assertEqual(
+            read_verdict("/srv/docs/x", ["read_file(/srv/docs/)"], [], [])["verdict"], "allowed"
+        )
+        # A slash-containing glob matches the whole path; ``~`` expands.
+        self.assertEqual(
+            read_verdict("/work/repo/conf/x.env", [], ["read_file(conf/*.env)"], roots)["verdict"],
+            "denied",
+        )
+        home = str(Path("~/notes").expanduser())
+        self.assertEqual(
+            read_verdict(f"{home}/a.md", ["read_file(~/notes)"], [], [])["allowed_by"],
+            "read_file(~/notes)",
+        )
+        # A slashless target also reads as a workspace-relative directory; "/" as a root
+        # covers everything.
+        self.assertEqual(
+            read_verdict("/work/repo/secret/key", [], ["read_file(secret)"], roots)["denied_by"],
+            ["read_file(secret)"],
+        )
+        self.assertEqual(read_verdict("/tmp/a", [], [], ["/work/repo", "/"])["verdict"], "allowed")
+        # An ask rule denies: headless agy cannot ask, and ask beats allow and the workspace.
+        asked = read_verdict("/work/repo/src/a.py", allow, [], roots, ["read_file(*)"])
+        self.assertEqual(asked["verdict"], "denied")
+        self.assertEqual(
+            asked["denied_by"], ["read_file(*) (an ask rule; headless agy cannot ask)"]
+        )
+
+
+class TestAntigravityAdcToken(unittest.TestCase):
+    """The ADC file can exist with a refresh token Google no longer honours; only
+    minting a token proves the gcp route is usable."""
+
+    RAPT = (
+        "ERROR: (gcloud.auth.application-default.print-access-token) There was a problem "
+        "refreshing your current auth tokens: ('invalid_grant: reauth related error "
+        "(invalid_rapt)', {'error': 'invalid_grant'})"
+    )
+
+    @staticmethod
+    def _run(returncode, stderr=""):
+        def run(argv, **kwargs):
+            assert argv == ["gcloud", "auth", "application-default", "print-access-token"]
+            assert kwargs["env"] == {"HOME": "/h"} and kwargs["timeout"] == 20.0
+            return subprocess.CompletedProcess(argv, returncode, stdout="", stderr=stderr)
+
+        return run
+
+    def test_probe_verdicts(self):
+        env = {"HOME": "/h"}
+        self.assertEqual(adc_token_check(env, run=self._run(0)), ("ok", None))
+        verdict, reason = adc_token_check(env, run=self._run(1, self.RAPT))
+        self.assertEqual(verdict, "refused")
+        assert reason is not None
+        self.assertIn("Google rejected the ADC refresh token", reason)
+        self.assertIn("invalid_rapt", reason)
+        self.assertIn("gcloud auth application-default login", reason)
+        verdict, reason = adc_token_check(env, run=self._run(1, "could not resolve host"))
+        self.assertEqual(verdict, "unverified")
+        assert reason is not None
+        self.assertIn("could not resolve host", reason)
+
+        def missing(argv, **kwargs):
+            raise FileNotFoundError(argv[0])
+
+        def slow(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        self.assertEqual(
+            adc_token_check(env, run=missing),
+            ("unverified", "gcloud is not installed, so the ADC token was not probed"),
+        )
+        verdict, reason = adc_token_check(env, run=slow)
+        self.assertEqual(verdict, "unverified")
+        self.assertIn("did not finish in 20s", reason or "")
+
+    def test_log_names_a_rejected_refresh(self):
+        failed = (
+            "E1027 11:18:14.811000       1 adc_auth.go:80] adcAuth: failed to get token from "
+            'token source: oauth2: "invalid_grant" "reauth related error (invalid_rapt)"\n'
+        )
+        recovered = failed + (
+            "I1027 11:33:48.742004       1 adc_auth.go:73] adcAuth: authenticated successfully "
+            "with quota project example-quota-project, token is non-empty: true\n"
+            "I1027 11:33:48.871227       1 server_oauth.go:224] applyAuthResult: email=x@y.z, "
+            "authMethod=adc, quotaProject=example-quota-project\n"
+        )
+        with TemporaryDirectory() as tmp:
+            log = Path(tmp) / "peer-01.log"
+            log.write_text(failed)
+            observed = observe_billing(log)
+            self.assertIsNone(observed["auth_method"])
+            self.assertIn("invalid_rapt", observed["auth_error"])
+            problem = billing_problem("gcp", "example-quota-project", observed)
+            self.assertIn("ADC token refresh failed", problem or "")
+            error, retryable = auth_failure(observed) or ("", True)
+            self.assertIn("invalid_rapt", error)
+            self.assertIn("gcloud auth application-default login", error)
+            self.assertFalse(retryable)
+            # A transport failure is retryable; a success after a failure clears it.
+            log.write_text(
+                failed.replace(
+                    '"invalid_grant" "reauth related error (invalid_rapt)"', "dial tcp: i/o timeout"
+                )
+            )
+            error, retryable = auth_failure(observe_billing(log)) or ("", False)
+            self.assertIn("i/o timeout", error)
+            self.assertTrue(retryable)
+            log.write_text(recovered)
+            observed = observe_billing(log)
+            self.assertEqual(observed["auth_method"], "adc")
+            self.assertIsNone(observed["auth_error"])
+            self.assertIsNone(auth_failure(observed))
+            self.assertIsNone(auth_failure({"auth_error": None}))
+            # Any later authentication is a recovery, whatever its method.
+            log.write_text(
+                failed + "I1027 11:33:48.871227       1 server_oauth.go:224] applyAuthResult: "
+                "email=x@y.z, authMethod=gcp, quotaProject=\n"
+            )
+            self.assertIsNone(observe_billing(log)["auth_error"])
+
+    def test_only_a_rejected_credential_refuses(self):
+        env = {"HOME": "/h"}
+        proxy = "dial tcp: lookup reauth-proxy.example.test: no such host"
+        verdict, reason = adc_token_check(env, run=self._run(1, proxy))
+        self.assertEqual(verdict, "unverified")
+        self.assertIn("reauth-proxy", reason or "")
+        rapt = "reauth related error (invalid_rapt)"
+        self.assertEqual(adc_token_check(env, run=self._run(1, rapt))[0], "refused")
+        # gcloud with no terminal (the probe) reports the rejection without the OAuth code.
+        quiet = (
+            "ERROR: (gcloud.auth.application-default.print-access-token) Reauthentication "
+            "failed. cannot prompt during non-interactive execution."
+        )
+        verdict, reason = adc_token_check(env, run=self._run(1, quiet))
+        self.assertEqual(verdict, "refused")
+        self.assertIn("gcloud auth application-default login", reason or "")
 
 
 if __name__ == "__main__":

@@ -33,8 +33,12 @@ spawn), and reads the route agy actually took from its ``--log-file``:
 ``aiplatform.googleapis.com/v1/projects/<id>/`` request URLs (verified live).
 
 Permissions (``<app data>/settings.json``, key ``permissions``): headless agy cannot
-prompt, so a tool call that needs approval is auto-denied and the turn goes on without
-it; the ``result`` event then lists ``denied_actions`` and still says ``SUCCESS``. A
+prompt, so a tool call that needs approval is auto-denied, in one of two shapes seen live
+on agy 1.4.6 to 1.4.8: the step ends in state ``ERROR`` ("permission check failed"), or
+it ends ``DONE`` with no error and only agy's own log says ``Print mode: soft-denying
+tool confirmation "ReadFile" at step N``. In both shapes the ``result`` event lists
+``denied_actions`` and still says ``SUCCESS``, and in both the turn may go on without
+the call or end right there with an empty answer. A
 ``command(<prefix>)`` allow rule (word-by-word prefix match; ``command(regex:...)`` for
 a pattern) lets a shell command run in every mode but ``--dangerously-skip-permissions``,
 which needs none; every segment of a compound command (``a && b``, pipes) needs its own
@@ -46,9 +50,12 @@ name the rule a denied command needs; it is a model of agy's matcher, not agy it
 
 from __future__ import annotations
 
+import fnmatch
 import json
+import os
 import re
-from collections.abc import Mapping
+import subprocess
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -78,6 +85,25 @@ ADC_LOGIN_HINT = (
     "cloud-platform scope on the consent page"
 )
 _AUTH_LINE = re.compile(r"applyAuthResult: .*?authMethod=(\w+), quotaProject=(\S*)")
+# agy's own ADC client (Go oauth2) logs the token refresh; a rejected refresh token reads
+# ``adcAuth: failed to get token from token source: oauth2: "invalid_grant" "reauth
+# related error (invalid_rapt)"`` (verified live on agy 1.4.8), a later success
+# ``adcAuth: authenticated successfully``.
+_ADC_FAILED = re.compile(r"adcAuth: failed to get token from token source: (.*)")
+_ADC_OK = "adcAuth: authenticated successfully"
+# What gcloud or agy print when Google rejects the credential itself (as opposed to a
+# transport failure): the only case a login fixes.
+_CREDENTIAL_REJECTED = (
+    "invalid_grant",
+    "invalid_rapt",
+    "reauth related error",
+    # gcloud with no terminal (the probe's case) reports the same rejection as:
+    # "Reauthentication failed. cannot prompt during non-interactive execution."
+    "reauthentication failed",
+    "cannot prompt during non-interactive",
+    "does not have any valid credentials",
+)
+ADC_PROBE_COMMAND = ("gcloud", "auth", "application-default", "print-access-token")
 _VERTEX_URL = re.compile(r"https://aiplatform\.googleapis\.com/v1/projects/([^/\s]+)/")
 
 
@@ -183,9 +209,17 @@ WRITE_TOOLS: frozenset[str] = frozenset(
     {"write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file"}
 )
 COMMAND_TOOL = "run_command"
+READ_TOOL = "read_file"
+# ``denied_actions[].action`` in agy's result names an action type, not the tool: the
+# shell is ``command`` there and ``run_command`` in the step stream.
+DENIED_ACTION_TOOLS: dict[str, str] = {"command": COMMAND_TOOL}
 _DENIAL_MARKERS = ("permission check failed", "denied permission", "user denied")
 _PATH_PARAMETERS = ("TargetFile", "AbsolutePath", "Path", "File")
 _COMPOUND_SPLIT = re.compile(r"\s*(?:&&|\|\||\||;)\s*")
+# agy's log names a soft-denied confirmation by the tool's display name and step
+# (verified live on agy 1.4.8; the stream shows no error for it).
+_SOFT_DENY_LINE = re.compile(r'soft-denying tool confirmation "(\w+)" at step (\d+)')
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 STOP_EVENT = "Stop"
 
 
@@ -231,6 +265,26 @@ class Antigravity:
     def __init__(self) -> None:
         self._text: dict[int, list[str]] = {}
         self._tools_started: set[int] = set()
+        # step index -> (tool name, target) for every tool step seen, so a soft denial
+        # the log names by step can be joined to the path or command it refused.
+        self._targets: dict[int, tuple[str, str]] = {}
+
+    def soft_denials(self, log_path: Path | None) -> list[dict]:
+        """The calls agy's own log says it soft-denied (``Print mode: soft-denying tool
+        confirmation "ReadFile" at step 2``), each joined to the target this instance
+        saw for that step in the stream: ``{"tool", "target"}``. A step the stream did
+        not show keeps an empty target; no log, no entries."""
+        if log_path is None:
+            return []
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+        found = []
+        for display, step in _SOFT_DENY_LINE.findall(text):
+            name, target = self._targets.get(int(step), (tool_name(display), ""))
+            found.append({"tool": name, "target": target})
+        return found
 
     # ---- host side (not integrated yet) ---------------------------------------
 
@@ -395,6 +449,8 @@ class Antigravity:
         command = parameters.get("CommandLine") if name == COMMAND_TOOL else None
         command = command.strip() if isinstance(command, str) else None
         target = tool_target(name, parameters)
+        if target:
+            self._targets[key] = (name, target)
         error = info.get("error")
         events: list[Event] = []
         if key not in self._tools_started:
@@ -560,6 +616,18 @@ def permission_rules(path: Path) -> tuple[list[str], list[str]]:
     return allow, deny
 
 
+def ask_rules(path: Path) -> list[str]:
+    """The ``permissions.ask`` rules of an agy settings file. Headless agy cannot ask,
+    so for a run these deny (agy's precedence is deny, then ask, then allow)."""
+    if not path.is_file():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    permissions = data.get("permissions") if isinstance(data, dict) else None
+    if not isinstance(permissions, dict):
+        return []
+    return [r for r in permissions.get("ask") or [] if isinstance(r, str)]
+
+
 def shell_rules_present(allow: list[str]) -> bool:
     """Whether any shell command at all may run headlessly."""
     return any(rule.startswith("command(") for rule in allow)
@@ -620,22 +688,27 @@ def _command_targets(rules: list[str]) -> list[str]:
     return targets
 
 
-def command_verdict(command: str, allow: list[str], deny: list[str]) -> dict:
+def command_verdict(
+    command: str, allow: list[str], deny: list[str], ask: list[str] | None = None
+) -> dict:
     """What agy's rules say about one command line.
 
     ``{"verdict": "allowed" | "denied" | "unmatched", "denied_by": [...],
-    "unmatched": [segments], "suggest": [rules]}``: ``denied`` when a deny rule hits
-    any segment (nothing to suggest: it is denied on purpose), ``unmatched`` when a
-    segment has no allow rule (``suggest`` names the rule that would cover each one),
-    else ``allowed``.
+    "unmatched": [segments], "suggest": [rules]}``: ``denied`` when a deny rule, or an
+    ``ask`` rule (headless agy cannot ask, and ask beats allow), hits any segment
+    (nothing to suggest: it is denied on purpose), ``unmatched`` when a segment has no
+    allow rule (``suggest`` names the rule that would cover each one), else ``allowed``.
     """
     allowed, denied = _command_targets(allow), _command_targets(deny)
+    asked = _command_targets(ask or [])
     denied_by: list[str] = []
     unmatched: list[str] = []
     for segment in command_segments(command):
         hits = [t for t in denied if command_matches(t, segment)]
-        if hits:
+        asks = [t for t in asked if command_matches(t, segment)]
+        if hits or asks:
             denied_by.extend(f"command({t})" for t in hits)
+            denied_by.extend(f"command({t}) (an ask rule; headless agy cannot ask)" for t in asks)
         elif not any(command_matches(t, segment) for t in allowed):
             unmatched.append(segment)
     if denied_by:
@@ -659,6 +732,111 @@ def suggested_prefix(segment: str) -> str:
     if words[0] in SUBCOMMAND_LAUNCHERS and len(words) > 1 and not words[1].startswith("-"):
         return " ".join(words[:2])
     return words[0]
+
+
+def tool_name(display: str) -> str:
+    """agy's stream tool name for a log display name: ``ReadFile`` -> ``read_file``."""
+    return _CAMEL_BOUNDARY.sub("_", display).lower()
+
+
+def add_dirs_from_extra(extra: tuple[str, ...]) -> list[str]:
+    """Every directory the native ``--add-dir`` flag names in ``extra`` (``--add-dir X``
+    and ``--add-dir=X``), so a read verdict knows the roots this round can read."""
+    dirs: list[str] = []
+    args = list(extra)
+    for index, arg in enumerate(args):
+        if arg == "--add-dir" and index + 1 < len(args):
+            dirs.append(args[index + 1])
+        elif arg.startswith("--add-dir="):
+            dirs.append(arg[len("--add-dir=") :])
+    return [str(Path(d).expanduser()) for d in dirs if d]
+
+
+def _normalise(path: str, workspace: str | None) -> str:
+    """An absolute, dot-free path: ``~`` expanded, a relative path taken from the
+    workspace (agy's rules are workspace-relative). Symlinks are not resolved."""
+    expanded = os.path.expanduser(path)
+    if not os.path.isabs(expanded) and workspace:
+        expanded = os.path.join(workspace, expanded)
+    return os.path.normpath(expanded)
+
+
+def _under(path: str, root: str) -> bool:
+    root = root.rstrip("/")
+    if not root:  # the root is "/": everything is under it
+        return True
+    return path == root or path.startswith(root + "/")
+
+
+def read_verdict(
+    path: str,
+    allow: list[str],
+    deny: list[str],
+    roots: list[str],
+    ask: list[str] | None = None,
+) -> dict:
+    """What agy's rules say about one ``read_file`` on ``path``.
+
+    ``{"verdict": "allowed" | "denied" | "unmatched", "denied_by": [...],
+    "allowed_by": str | None, "suggest": [rules]}``. It models agy's documented
+    matcher (antigravity.google/docs/permissions): deny beats ask beats allow, and an
+    ``ask`` rule denies here because headless agy cannot ask; a ``read_file(<dir>)``
+    rule covers its subtree; a relative target is taken from the workspace (the first
+    of ``roots``); a target with a wildcard matches the whole path (with a slash) or
+    the file's name (``read_file(.env*)``), and a slashless target also as a
+    workspace-relative path; ``write_file`` on a path grants
+    ``read_file``; ``read_file(*)`` covers all; and the workspace plus every
+    ``--add-dir`` (``roots``) is readable with no rule. Paths are normalised
+    (``~``, ``..``) but symlinks are not resolved. Verified live on agy 1.4.8 for the
+    workspace, a path outside it and a name deny; the rest is from the docs.
+    """
+    workspace = _normalise(roots[0], None) if roots else None
+    path = _normalise(path, workspace)
+    denied_by: list[str] = []
+    for rule in deny:
+        parts = rule_parts(rule)
+        if parts and parts[0] == READ_TOOL and _read_rule_covers(parts[1], path, workspace):
+            denied_by.append(rule)
+    for rule in ask or []:
+        parts = rule_parts(rule)
+        if parts and parts[0] == READ_TOOL and _read_rule_covers(parts[1], path, workspace):
+            denied_by.append(f"{rule} (an ask rule; headless agy cannot ask)")
+    if denied_by:
+        return {"verdict": "denied", "denied_by": denied_by, "allowed_by": None, "suggest": []}
+    for root in roots:
+        normal = _normalise(root, workspace)
+        if _under(path, normal):
+            return {
+                "verdict": "allowed",
+                "denied_by": [],
+                "allowed_by": f"inside {normal}",
+                "suggest": [],
+            }
+    for rule in allow:
+        parts = rule_parts(rule)
+        if (
+            parts
+            and parts[0] in (READ_TOOL, "write_file")
+            and _read_rule_covers(parts[1], path, workspace)
+        ):
+            return {"verdict": "allowed", "denied_by": [], "allowed_by": rule, "suggest": []}
+    suggest = [f"{READ_TOOL}({Path(path).parent})"]
+    return {"verdict": "unmatched", "denied_by": [], "allowed_by": None, "suggest": suggest}
+
+
+def _read_rule_covers(target: str, path: str, workspace: str | None) -> bool:
+    """Whether a ``read_file(<target>)`` rule covers ``path``. A target with no slash
+    matches by file name (``.env*``, how cairn's own deny set is written) and also as
+    a workspace-relative path or directory (``secret``, agy's ``read_file(dir)``):
+    the union, because the two readings have not been told apart live."""
+    target = target.strip()
+    if target in ("*", "/"):
+        return True
+    if "/" not in target and fnmatch.fnmatch(Path(path).name, target):
+        return True
+    if any(ch in target for ch in "*?["):
+        return fnmatch.fnmatch(path, _normalise(target, workspace))
+    return _under(path, _normalise(target, workspace))
 
 
 def is_denial(message: str) -> bool:
@@ -739,6 +917,58 @@ def billing_problems(billing: BillingPolicy, env: Mapping[str, str]) -> list[str
     return []
 
 
+def credential_rejected(text: str) -> bool:
+    """Whether ``text`` (gcloud's stderr, agy's log line) says Google rejected the ADC
+    refresh token, which only ``gcloud auth application-default login`` fixes."""
+    low = text.lower()
+    return any(marker in low for marker in _CREDENTIAL_REJECTED)
+
+
+def adc_token_check(
+    env: Mapping[str, str],
+    *,
+    timeout_s: float = 20.0,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> tuple[str, str | None]:
+    """Whether the Application Default Credentials mint an access token right now.
+
+    ``("ok", None)`` when ``gcloud auth application-default print-access-token`` exits
+    0 (the token itself is discarded); ``("refused", reason)`` when gcloud's stderr says
+    Google rejected the credential (``invalid_rapt`` is the Workspace session-length
+    policy expiring the refresh token on a schedule), with the login hint; and
+    ``("unverified", reason)`` when nothing can be concluded: gcloud is not installed,
+    the probe timed out, or it failed for a reason that is not a rejection (no
+    network). The file-level checks in :func:`billing_problems` stay separate and
+    pure. ``env`` is the environment agy would start with, so
+    ``GOOGLE_APPLICATION_CREDENTIALS`` and ``CLOUDSDK_CONFIG`` relocate the file for
+    the probe the way they do for agy.
+    """
+    try:
+        probe = run(
+            list(ADC_PROBE_COMMAND),
+            env=dict(env),
+            stdin=subprocess.DEVNULL,  # never an interactive prompt
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except FileNotFoundError:
+        return "unverified", "gcloud is not installed, so the ADC token was not probed"
+    except subprocess.TimeoutExpired:
+        return "unverified", f"the ADC token probe did not finish in {timeout_s:g}s"
+    except OSError as exc:
+        return "unverified", f"the ADC token probe could not start: {exc}"
+    if probe.returncode == 0:
+        return "ok", None
+    stderr = " ".join((probe.stderr or "").split())
+    reason = _clip(stderr, 300) or f"gcloud exited {probe.returncode}"
+    if credential_rejected(stderr):
+        return "refused", f"Google rejected the ADC refresh token ({reason}); {ADC_LOGIN_HINT}"
+    return "unverified", f"the ADC token probe failed ({reason})"
+
+
 def billing_env(billing: BillingPolicy, env: Mapping[str, str]) -> dict[str, str]:
     """The child environment for ``billing``: a copy of ``env`` with the route applied."""
     child = dict(env)
@@ -759,14 +989,43 @@ def observe_billing(log_path: Path) -> dict:
     try:
         text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return {"auth_method": None, "quota_project": None, "vertex_projects": []}
+        return {
+            "auth_method": None,
+            "quota_project": None,
+            "vertex_projects": [],
+            "auth_error": None,
+        }
     matches = _AUTH_LINE.findall(text)
     method, project = matches[-1] if matches else (None, None)
+    # The last refresh failure counts only when no authentication (ADC or any other
+    # method's applyAuthResult) follows it: a later success is a recovery.
+    auth_error = None
+    failures = list(_ADC_FAILED.finditer(text))
+    if failures:
+        last = failures[-1].start()
+        later_ok = text.rfind(_ADC_OK) > last or any(
+            m.start() > last for m in _AUTH_LINE.finditer(text)
+        )
+        if not later_ok:
+            auth_error = _clip(failures[-1].group(1).strip(), 300)
     return {
         "auth_method": method,
         "quota_project": project or None,
         "vertex_projects": sorted(set(_VERTEX_URL.findall(text))),
+        "auth_error": auth_error,
     }
+
+
+def auth_failure(observed: dict) -> tuple[str, bool] | None:
+    """``(error, retryable)`` for a round whose log shows agy's ADC refresh failed with
+    no success after it, else ``None``. A rejected credential is not retryable (only a
+    login fixes it); a transport failure is."""
+    error = observed.get("auth_error")
+    if not error:
+        return None
+    if credential_rejected(error):
+        return f"ADC token refresh failed: {error}; {ADC_LOGIN_HINT}", False
+    return f"ADC token refresh failed: {error}; retry when the token endpoint is reachable", True
 
 
 def billing_problem(route: str, project: str | None, observed: dict) -> str | None:
@@ -781,6 +1040,8 @@ def billing_problem(route: str, project: str | None, observed: dict) -> str | No
     vertex = observed.get("vertex_projects") or []
     if route == "gcp":
         if method is None:
+            if observed.get("auth_error"):
+                return f"agy's ADC token refresh failed: {observed['auth_error']}"
             return "agy's log has no applyAuthResult line; the billing route is unverified"
         if method != "adc":
             return f"gcp route requested but agy authenticated with authMethod={method}"

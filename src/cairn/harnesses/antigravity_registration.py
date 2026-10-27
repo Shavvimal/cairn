@@ -22,6 +22,7 @@ from ..storage import atomic_write, lock_path, locked
 from .antigravity import (
     READ_ONLY_COMMANDS,
     TEST_COMMANDS,
+    ask_rules,
     command_rules,
     default_deny_rules,
     grant_rules,
@@ -104,13 +105,15 @@ def grant_read_only_commands(config: CairnConfig | None, *, tests: bool = True) 
 
 
 def permission_report(config: CairnConfig | None) -> dict:
-    """``{"path", "allow", "deny", "error"}``: the rules agy applies to a headless run."""
+    """``{"path", "allow", "deny", "ask", "error"}``: the rules agy applies to a headless
+    run (an ``ask`` rule denies there, since nobody can answer)."""
     path = agy_settings(config)
     try:
         allow, deny = permission_rules(path)
+        ask = ask_rules(path)
     except (OSError, ValueError) as exc:
-        return {"path": str(path), "allow": [], "deny": [], "error": str(exc)}
-    return {"path": str(path), "allow": allow, "deny": deny, "error": None}
+        return {"path": str(path), "allow": [], "deny": [], "ask": [], "error": str(exc)}
+    return {"path": str(path), "allow": allow, "deny": deny, "ask": ask, "error": None}
 
 
 def permission_warning(config: CairnConfig | None) -> str | None:
