@@ -15,8 +15,9 @@ outside the workspace, ended with no answer and still reported success.
 ### Added
 - `cairn invoke antigravity` on route `gcp` probes the ADC token before the spawn
   (`gcloud auth application-default print-access-token`, token discarded): a rejected
-  credential (`invalid_rapt`, the Workspace session-length policy) refuses the run with
-  exit 2 and the login command; gcloud missing, a timeout or a transport failure is a
+  credential (`invalid_rapt`, the Workspace session-length policy, which gcloud with no
+  terminal reports as "Reauthentication failed. cannot prompt during non-interactive
+  execution") refuses the run with exit 2 and the login command; gcloud missing, a timeout or a transport failure is a
   `billing:` warning, never a refusal. `cairn doctor` runs the same probe (up to 20 s): `token ok`, a
   warn line for a rejected credential, or `token not verified` with the reason. A run agy
   itself could not authenticate names the cause from agy's log (`ADC token refresh
@@ -36,8 +37,9 @@ outside the workspace, ended with no answer and still reported success.
   `status succeeded`, exit 0, `last_message null`. agy may show no tool error for a soft
   deny; the result's `denied_actions` always counts it, and cairn read that count after
   the outcome was fixed. The outcome now counts it, in the live runner, in `adopt`, in
-  `cairn invoke tail` (which waits a moment for the runner's record before falling back to
-  the stream) and in `status` (a finished round's record is authoritative, so no progress
+  `cairn invoke tail` (which follows a live runner to its record, adopts the round when
+  both processes are gone, and holds for another reader's adoption before classifying the
+  stream itself) and in `status` (a finished round's record is authoritative, so no progress
   message poses as the answer of a denied round). An adopted `denied` round exits 2 like
   a live one. Refusals merge the stream's tool errors, the log's soft denials and one
   entry per counted action type the others did not name.

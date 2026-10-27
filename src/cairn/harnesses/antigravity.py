@@ -97,6 +97,10 @@ _CREDENTIAL_REJECTED = (
     "invalid_grant",
     "invalid_rapt",
     "reauth related error",
+    # gcloud with no terminal (the probe's case) reports the same rejection as:
+    # "Reauthentication failed. cannot prompt during non-interactive execution."
+    "reauthentication failed",
+    "cannot prompt during non-interactive",
     "does not have any valid credentials",
 )
 ADC_PROBE_COMMAND = ("gcloud", "auth", "application-default", "print-access-token")
@@ -684,22 +688,27 @@ def _command_targets(rules: list[str]) -> list[str]:
     return targets
 
 
-def command_verdict(command: str, allow: list[str], deny: list[str]) -> dict:
+def command_verdict(
+    command: str, allow: list[str], deny: list[str], ask: list[str] | None = None
+) -> dict:
     """What agy's rules say about one command line.
 
     ``{"verdict": "allowed" | "denied" | "unmatched", "denied_by": [...],
-    "unmatched": [segments], "suggest": [rules]}``: ``denied`` when a deny rule hits
-    any segment (nothing to suggest: it is denied on purpose), ``unmatched`` when a
-    segment has no allow rule (``suggest`` names the rule that would cover each one),
-    else ``allowed``.
+    "unmatched": [segments], "suggest": [rules]}``: ``denied`` when a deny rule, or an
+    ``ask`` rule (headless agy cannot ask, and ask beats allow), hits any segment
+    (nothing to suggest: it is denied on purpose), ``unmatched`` when a segment has no
+    allow rule (``suggest`` names the rule that would cover each one), else ``allowed``.
     """
     allowed, denied = _command_targets(allow), _command_targets(deny)
+    asked = _command_targets(ask or [])
     denied_by: list[str] = []
     unmatched: list[str] = []
     for segment in command_segments(command):
         hits = [t for t in denied if command_matches(t, segment)]
-        if hits:
+        asks = [t for t in asked if command_matches(t, segment)]
+        if hits or asks:
             denied_by.extend(f"command({t})" for t in hits)
+            denied_by.extend(f"command({t}) (an ask rule; headless agy cannot ask)" for t in asks)
         elif not any(command_matches(t, segment) for t in allowed):
             unmatched.append(segment)
     if denied_by:

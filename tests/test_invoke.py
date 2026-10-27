@@ -1081,8 +1081,12 @@ class TestAntigravityRun(InvokeFixture):
         result, _ = self.run_agy(env={"STUB_GCLOUD": "rapt"})
         self.assertEqual(result.returncode, 2)
         self.assertIn("billing check failed: Google rejected the ADC refresh token", result.stderr)
-        self.assertIn("invalid_rapt", result.stderr)
+        self.assertIn("cannot prompt during non-interactive execution", result.stderr)
         self.assertIn("gcloud auth application-default login", result.stderr)
+        self.assertEqual(self.stub_calls(), [])
+        result, _ = self.run_agy(env={"STUB_GCLOUD": "invalid-grant"})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid_rapt", result.stderr)
         self.assertEqual(self.stub_calls(), [])
         result, data = self.run_agy(env={"STUB_GCLOUD": "fail"})
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1294,25 +1298,31 @@ class TestAntigravityRun(InvokeFixture):
         assert shown is not None
         self.assertEqual(shown["outcome"], "denied")
         self.assertIsNone(shown["last_message"])  # "Looking." never poses as the answer
-        # Following a stream whose runner never finalises (``status`` above adopted the
-        # round, so the record is stripped again): after the grace wait the fallback
-        # reads the log, where the denial appeared only during the wait, and says denied.
+        # Following a stream whose runner died before finalising (``status`` above
+        # adopted the round, so the record is stripped again): ``tail`` adopts it and
+        # answers from the record, which is now finished.
         path.write_text(json.dumps(state))
-        peer_log = run_dir / "peer-01.log"
-        log_text = peer_log.read_text()
-        peer_log.write_text("")
+        result, _ = self.invoke("tail", data["thread_id"], check_json=False)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "RESULT denied")
+        self.assertEqual(json.loads(path.read_text())["rounds"][0]["outcome"], "denied")
+        # With another reader holding the thread lock (adopting), ``tail`` holds for the
+        # peer's quiet threshold, then classifies the stream plus the log itself.
+        path.write_text(json.dumps(state))
+        self.write_config(antigravity={"quiet_after_s": 1})
+        lock = invoke.ThreadLock()
+        lock.acquire(run_dir)
         tailer = self.spawn("tail", data["thread_id"])
-        time.sleep(0.5)
-        peer_log.write_text(log_text)
         out, err = tailer.communicate(timeout=60)
+        lock.release()
         self.assertEqual(tailer.returncode, 2, err)
         self.assertEqual(out.splitlines()[-1], "RESULT denied")
         self.assertFalse(json.loads(path.read_text())["rounds"][0].get("finished_at"))
         events.write_text(kept)
         # ``wait`` while another reader holds the thread lock (adopting): it holds for
         # that reader's record instead of building a result from an unfinished round.
-        (run_dir / "result-01.json").unlink()
-        lock = invoke.ThreadLock()
+        (run_dir / "result-01.json").unlink(missing_ok=True)
+        self.write_config(antigravity={"quiet_after_s": 120})  # a long hold again
         lock.acquire(run_dir)
         waiter = self.spawn("wait", data["thread_id"], "--json")
         time.sleep(1.5)
@@ -1989,6 +1999,16 @@ class TestReplayFacts(unittest.TestCase):
         self.assertEqual(invoke.tail_line(Event("notice", text="n")), "NOTICE n")
         self.assertIsNone(invoke.tail_line(Event("done", status="succeeded")))
 
+    def test_denial_text_counts_calls_only_when_targets_are_known(self):
+        self.assertIn(
+            "agy auto-denied 1 tool call(s):",
+            invoke.denial_text([{"tool": "run_command", "target": "rg x"}], None),
+        )
+        self.assertIn(
+            "agy auto-denied 1 refusal(s):",
+            invoke.denial_text([{"tool": "read_file", "target": ""}], None),
+        )
+
     def test_refusals_merge_the_stream_the_log_and_the_count(self):
         """``denied_actions`` counts action types; the stream and the log name calls."""
         done = invoke.Event(
@@ -2061,6 +2081,17 @@ class TestReplayFacts(unittest.TestCase):
         self.assertIn("- newly allowed: command(git log)", note)
         self.assertIn("- newly denied: command(python)", note)
         self.assertIn("- no longer denied: command(curl)", note)
+        # An ask rule is a refusal when headless: it shows in the diff and the verdicts.
+        asked = invoke.permissions_note(
+            before, {**after, "ask": ["command(*)"]}, [{"tool": "run_command", "target": "rg x"}]
+        )
+        assert asked is not None
+        self.assertIn("- newly asked (a refusal when headless): command(*)", asked)
+        self.assertIn(
+            "- previously refused `rg x`: still denied by command(*) (an ask rule; headless agy "
+            "cannot ask); do not retry it",
+            asked,
+        )
         self.assertIn("- previously refused `git log -1`: now allowed", note)
         self.assertIn(
             "- previously refused `curl x`: still has no allow rule; do not retry it", note

@@ -116,7 +116,6 @@ EXIT_BY_OUTCOME: dict[str, int] = {
 
 # A prompt larger than this goes through the child's stdin (macOS ARG_MAX, D14).
 STDIN_PROMPT_BYTES = 64_000
-TAIL_FINALISE_GRACE_S = 2.0
 PROGRESS_CAP = 200
 PROGRESS_CHARS = 200
 STATE_WRITE_INTERVAL_S = 2.0
@@ -748,6 +747,7 @@ def denial_lines(denied: list[dict], permissions: dict | None) -> list[str]:
     against the rules recorded for the round (so the advice matches what agy saw)."""
     allow = list((permissions or {}).get("allow") or [])
     deny = list((permissions or {}).get("deny") or [])
+    ask = list((permissions or {}).get("ask") or [])
     lines = []
     for item in denied:
         tool, target = str(item.get("tool") or "tool"), str(item.get("target") or "")
@@ -778,7 +778,7 @@ def denial_lines(denied: list[dict], permissions: dict | None) -> list[str]:
                 )
             lines.append(f"{tool} {target} ({hint})".replace("  ", " "))
             continue
-        verdict = command_verdict(target, allow, deny)
+        verdict = command_verdict(target, allow, deny, ask)
         if verdict["verdict"] == "denied":
             lines.append(f"`{target}` denied by {', '.join(verdict['denied_by'])}")
         elif verdict["verdict"] == "unmatched":
@@ -792,8 +792,10 @@ def denial_text(denied: list[dict], permissions: dict | None) -> str:
     path = (permissions or {}).get("path") or "agy's settings.json"
     shown = denial_lines(denied[:8], permissions)
     more = f" (+{len(denied) - 8} more)" if len(denied) > 8 else ""
+    # A targetless entry stands for an action type agy counted, not for one call.
+    unit = "tool call(s)" if all(d.get("target") for d in denied) else "refusal(s)"
     return (
-        f"agy auto-denied {len(denied)} tool call(s){more}: {'; '.join(shown)}. Add the rule "
+        f"agy auto-denied {len(denied)} {unit}{more}: {'; '.join(shown)}. Add the rule "
         f"to permissions.allow in {path} (or run 'cairn hook install --harness antigravity "
         "--grant-commands' for cairn's defaults), then resume"
     )
@@ -805,12 +807,16 @@ def permissions_note(previous: dict | None, current: dict, denied_before: list[d
     ``None`` when nothing changed and nothing was refused."""
     prev_allow = set((previous or {}).get("allow") or [])
     prev_deny = set((previous or {}).get("deny") or [])
+    prev_ask = set((previous or {}).get("ask") or [])
     cur_allow, cur_deny = set(current.get("allow") or []), set(current.get("deny") or [])
+    cur_ask = set(current.get("ask") or [])
     changes = [
         ("newly allowed", sorted(cur_allow - prev_allow)),
         ("no longer allowed", sorted(prev_allow - cur_allow)),
         ("newly denied", sorted(cur_deny - prev_deny)),
         ("no longer denied", sorted(prev_deny - cur_deny)),
+        ("newly asked (a refusal when headless)", sorted(cur_ask - prev_ask)),
+        ("no longer asked", sorted(prev_ask - cur_ask)),
     ]
     if previous is None:
         changes = []  # a first round has nothing to diff against
@@ -844,7 +850,7 @@ def permissions_note(previous: dict | None, current: dict, denied_before: list[d
         if tool != COMMAND_TOOL or not target:
             lines.append(f"- previously refused: {tool} {target}; it stays refused".rstrip())
             continue
-        verdict = command_verdict(target, sorted(cur_allow), sorted(cur_deny))
+        verdict = command_verdict(target, sorted(cur_allow), sorted(cur_deny), sorted(cur_ask))
         if verdict["verdict"] == "allowed":
             lines.append(f"- previously refused `{target}`: now allowed")
         elif verdict["verdict"] == "denied":
@@ -2255,11 +2261,22 @@ def cmd_tail(
         if reader is not None:
             reader.close()
     if done is not None and follow and not round_.get("finished_at"):
-        # The peer has spoken; the runner is finalising. Its record (outcome, exit
-        # code) is the contract, so give it a moment before falling back to the stream.
-        deadline = time.monotonic() + TAIL_FINALISE_GRACE_S
-        while time.monotonic() < deadline and not round_.get("finished_at"):
-            time.sleep(0.1)
+        # The peer has spoken, but the record (outcome, exit code) is the contract:
+        # follow a live runner to it (its watchdog may still turn this into a
+        # timeout), adopt once both processes are gone, and hold for another reader's
+        # adoption up to the peer's quiet threshold before falling back to the stream.
+        hold = float(config.invoke.for_peer(state.peer).quiet_after_s)
+        deadline: float | None = None
+        while not round_.get("finished_at"):
+            alive = identity_alive(round_.get("runner_pid"), round_.get("runner_started")) or (
+                identity_alive(round_.get("peer_pid"), round_.get("peer_started"))
+            )
+            if not alive:
+                observe(config, run_dir)  # adopts when the thread lock is free
+                deadline = deadline or (time.monotonic() + hold)
+                if time.monotonic() > deadline:
+                    break
+            time.sleep(0.2)
             round_ = _select_round(ThreadState.load(run_dir / "thread.json"), number)
     if done is not None and not round_.get("finished_at"):
         # The fallback classifies the stream plus the peer's log, read now (after the

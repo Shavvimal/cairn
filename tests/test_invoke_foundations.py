@@ -1285,6 +1285,9 @@ class TestAntigravityPermissions(unittest.TestCase):
             ("denied", ["command(git push)"], []),
         )
         # A compound command needs every segment; the suggestion names the missing ones only.
+        asked = command_verdict("rg foo", allow, deny, ["command(*)"])
+        self.assertEqual(asked["verdict"], "denied")
+        self.assertEqual(asked["denied_by"], ["command(*) (an ask rule; headless agy cannot ask)"])
         compound = command_verdict('git log --oneline -3 && echo "---" | rg -n x', allow, deny)
         self.assertEqual(compound["verdict"], "unmatched")
         self.assertEqual(compound["unmatched"], ['echo "---"'])
@@ -1534,6 +1537,14 @@ class TestAntigravityAdcToken(unittest.TestCase):
         self.assertIn("reauth-proxy", reason or "")
         rapt = "reauth related error (invalid_rapt)"
         self.assertEqual(adc_token_check(env, run=self._run(1, rapt))[0], "refused")
+        # gcloud with no terminal (the probe) reports the rejection without the OAuth code.
+        quiet = (
+            "ERROR: (gcloud.auth.application-default.print-access-token) Reauthentication "
+            "failed. cannot prompt during non-interactive execution."
+        )
+        verdict, reason = adc_token_check(env, run=self._run(1, quiet))
+        self.assertEqual(verdict, "refused")
+        self.assertIn("gcloud auth application-default login", reason or "")
 
 
 if __name__ == "__main__":
