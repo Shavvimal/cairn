@@ -1,10 +1,9 @@
 # Stub `gcloud` for tests/test_invoke.py: only `auth application-default
 # print-access-token` is modelled. STUB_GCLOUD=ok (default) prints a token and exits
 # 0; rapt fails the way a Workspace session policy expiry does (verified live on
-# 2026-10-27); slow never answers, so the probe's timeout decides.
+# 2026-10-27); fail is a transport failure, which the probe must not treat as a rejection.
 import os
 import sys
-import time
 
 mode = os.environ.get("STUB_GCLOUD", "ok")
 if sys.argv[1:4] != ["auth", "application-default", "print-access-token"]:
@@ -19,8 +18,6 @@ if mode == "rapt":
         file=sys.stderr,
     )
     sys.exit(1)
-if mode == "slow":
-    time.sleep(float(os.environ.get("STUB_GCLOUD_SLEEP", "30")))
 if mode == "fail":
     print("ERROR: could not resolve host oauth2.googleapis.com", file=sys.stderr)
     sys.exit(1)

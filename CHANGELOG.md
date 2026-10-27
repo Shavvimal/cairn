@@ -17,15 +17,16 @@ outside the workspace, ended with no answer and still reported success.
   (`gcloud auth application-default print-access-token`, token discarded): a rejected
   credential (`invalid_rapt`, the Workspace session-length policy) refuses the run with
   exit 2 and the login command; gcloud missing, a timeout or a transport failure is a
-  `billing:` warning, never a refusal. `cairn doctor` runs the same probe: `token ok`, a
+  `billing:` warning, never a refusal. `cairn doctor` runs the same probe (up to 20 s): `token ok`, a
   warn line for a rejected credential, or `token not verified` with the reason. A run agy
   itself could not authenticate names the cause from agy's log (`ADC token refresh
   failed: ...`), not retryable for a rejected credential.
 - A refused `read_file` names its path: agy's log says which step it soft-denied and the
   harness joins that to the path the stream showed. The `denied` outcome's error, the
   `permissions:` warning and the resume note judge it against the read rules in force
-  (deny beats all, `read_file(<dir>)` covers its subtree, `write_file` grants read, a bare
-  target matches the file name) and the roots the round could read with no rule (the
+  (deny beats ask beats allow, and an `ask` rule denies headlessly; `read_file(<dir>)`
+  covers its subtree; a relative target is workspace-relative; `write_file` grants read; a
+  bare target matches the file name) and the roots the round could read with no rule (the
   workspace and every `--extra --add-dir`), which the round records as `permissions.roots`:
   `now readable (inside <dir>)`, `still denied by read_file(.env*)`, or `still outside the
   workspace with no read_file rule`.
@@ -40,8 +41,9 @@ outside the workspace, ended with no answer and still reported success.
   message poses as the answer of a denied round). An adopted `denied` round exits 2 like
   a live one. Refusals merge the stream's tool errors, the log's soft denials and one
   entry per counted action type the others did not name.
-- The docstrings and the skill said the turn goes on after an auto-denied call. A soft
-  deny can end it; the text says so.
+- The docstrings and the skill said the turn goes on after an auto-denied call. Live runs
+  show both shapes (a refusal with a tool error in the stream, a soft deny with none) and
+  both can end the turn; the text says so.
 
 ### Changed
 - The `invoke-antigravity` skill says which credential each billing route needs (ADC on

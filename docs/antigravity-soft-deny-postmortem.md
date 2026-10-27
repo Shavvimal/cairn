@@ -77,7 +77,8 @@ settings.json (e.g. read_file(<target>)).
 
 - On route `gcp`, the login that matters is ADC, and only minting a token proves it.
 - A headless agy denial can end the whole turn, so an empty answer with any denial is a
-  failure, whether or not the stream shows an error.
+  failure, whether or not the stream shows an error (later runs on agy 1.4.8 showed a
+  read denial with a stream error too; both shapes exist).
 - Keep every file a peer must read inside its workspace, pass `--extra --add-dir <dir>`,
   or paste the text into the prompt.
 

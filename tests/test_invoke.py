@@ -1259,6 +1259,7 @@ class TestAntigravityRun(InvokeFixture):
         self.assertIn(f"--extra --add-dir {self.root / 'elsewhere'}", error)
         permissions = self.thread(data["thread_id"], "antigravity")["rounds"][0]["permissions"]
         self.assertEqual(permissions["roots"], [str(Path(self.cwd).resolve())])
+        self.assertEqual(permissions["ask"], [])
         self.assertFalse(any(w.startswith("permissions: ") for w in data["warnings"]))
         self.assertFalse(any(w.startswith("empty answer") for w in data["warnings"]))
         run_dir = self.run_dirs("antigravity")[0]
@@ -1277,6 +1278,23 @@ class TestAntigravityRun(InvokeFixture):
         result, _ = self.invoke("tail", data["thread_id"], "--no-follow", check_json=False)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(result.stdout.splitlines()[-1], "RESULT denied")
+        # Even with the count stripped from the stream, the log's soft denial decides.
+        events = run_dir / "events-01.jsonl"
+        kept = events.read_text()
+        events.write_text(
+            kept.replace(
+                '"denied_actions": [{"action": "read_file", "display_name": "ReadFile"}]',
+                '"denied_actions": []',
+            )
+        )
+        self.assertNotIn("ReadFile", events.read_text())
+        result, _ = self.invoke("tail", data["thread_id"], "--no-follow", check_json=False)
+        self.assertEqual(result.stdout.splitlines()[-1], "RESULT denied")
+        _, shown = self.invoke("status", data["thread_id"], "--json")
+        assert shown is not None
+        self.assertEqual(shown["outcome"], "denied")
+        self.assertIsNone(shown["last_message"])  # "Looking." never poses as the answer
+        events.write_text(kept)
         _, shown = self.invoke("status", data["thread_id"], "--json")
         assert shown is not None
         self.assertEqual((shown["execution"], shown["outcome"]), ("exited", "denied"))
@@ -2015,6 +2033,7 @@ class TestReplayFacts(unittest.TestCase):
         rules = {
             "allow": ["read_file(/docs)"],
             "deny": ["read_file(.env*)"],
+            "ask": ["read_file(/w/src/b.py)"],
             "roots": ["/w"],
         }
         note = invoke.permissions_note(before, rules, reads)
@@ -2030,6 +2049,13 @@ class TestReplayFacts(unittest.TestCase):
         )
         self.assertIn(
             "- previously refused read_file `/w/src/a.py`: now readable (inside /w)", note
+        )
+        asked = invoke.permissions_note(
+            before, rules, [{"tool": "read_file", "target": "/w/src/b.py"}]
+        )
+        assert asked is not None
+        self.assertIn(
+            "still denied by read_file(/w/src/b.py) (an ask rule; headless agy cannot ask)", asked
         )
         self.assertIn(
             "- previously refused read_file `/docs/x.md`: now readable (read_file(/docs))", note

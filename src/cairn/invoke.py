@@ -706,6 +706,20 @@ def _soft_denials(harness: Harness, log_path: Path | None) -> list[dict]:
     return list(observe(log_path)) if callable(observe) and log_path is not None else []
 
 
+def _auth_related(error: str) -> bool:
+    low = error.lower()
+    return any(marker in low for marker in ("auth", "logged in", "login", "credential", "token"))
+
+
+def _round_log(round_: dict, files: dict[str, Path]) -> Path | None:
+    """The peer's own log for a round, wherever it is now: ``peer-NN.log`` once the
+    round is finished, else the pre-move ``log_target``; ``None`` without one."""
+    if files["peer_log_path"].is_file():
+        return files["peer_log_path"]
+    target = round_.get("log_target")
+    return Path(target) if target and Path(target).is_file() else None
+
+
 def stream_outcome(replay: Replay) -> str | None:
     """The outcome the event stream alone supports: the final event's status, with a
     success that :func:`denied_outcome` rejects read as ``denied``. ``None`` without a
@@ -729,7 +743,13 @@ def denial_lines(denied: list[dict], permissions: dict | None) -> list[str]:
     for item in denied:
         tool, target = str(item.get("tool") or "tool"), str(item.get("target") or "")
         if tool == READ_TOOL and target:
-            read = read_verdict(target, allow, deny, list((permissions or {}).get("roots") or []))
+            read = read_verdict(
+                target,
+                allow,
+                deny,
+                list((permissions or {}).get("roots") or []),
+                list((permissions or {}).get("ask") or []),
+            )
             if read["verdict"] == "denied":
                 lines.append(f"`{target}` denied by {', '.join(read['denied_by'])}")
             elif read["verdict"] == "unmatched":
@@ -792,10 +812,11 @@ def permissions_note(previous: dict | None, current: dict, denied_before: list[d
         if rules:
             lines.append(f"- {label}: {', '.join(rules)}")
     roots = list(current.get("roots") or [])
+    ask = list(current.get("ask") or [])
     for item in denied_before:
         tool, target = str(item.get("tool") or "tool"), str(item.get("target") or "")
         if tool == READ_TOOL and target:
-            read = read_verdict(target, sorted(cur_allow), sorted(cur_deny), roots)
+            read = read_verdict(target, sorted(cur_allow), sorted(cur_deny), roots, ask)
             if read["verdict"] == "allowed":
                 lines.append(
                     f"- previously refused read_file `{target}`: now readable ({read['allowed_by']})"
@@ -860,9 +881,10 @@ def _finish(
             str(billing.get("route")), billing.get("project"), billing["observed"]
         )
         failure = auth_failure(billing["observed"]) if outcome == "failed" else None
-        if failure is not None:
+        if failure is not None and (error is None or _auth_related(error)):
             # agy's own log names the cause ("authentication required" on stderr does
             # not): a rejected credential needs a login, a transport failure a retry.
+            # A failure that is not about authentication keeps its own error.
             error, retryable = failure
     answer = _read_text(answer_path).strip()
     done = replay.done
@@ -910,11 +932,7 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
     files = _round_files(state.path.parent if state.path else Path("."), int(round_["round"]))
     try:
         replay = replay_file(harness, files["events_path"])
-        log_target = round_.get("log_target")
-        log_path = files["peer_log_path"] if files["peer_log_path"].is_file() else None
-        if log_path is None and log_target and Path(log_target).is_file():
-            log_path = Path(log_target)
-        replay.observed = _soft_denials(harness, log_path)
+        replay.observed = _soft_denials(harness, _round_log(round_, files))
         derived = stream_outcome(replay) or "aborted"
     except OSError:
         replay, derived = Replay(), "unknown"
@@ -1005,6 +1023,7 @@ def observe(config: CairnConfig, run_dir: Path, *, settle: bool = True) -> Obser
     files = _round_files(run_dir, int(round_["round"]))
     try:
         replay = replay_file(harness, files["events_path"])
+        replay.observed = _soft_denials(harness, _round_log(round_, files))
     except OSError:
         replay = Replay()
     transcript = _transcript(config, harness, state, round_)
@@ -1086,10 +1105,11 @@ def observation_json(obs: Observation) -> dict:
         "last_event": obs.last_event,
         "progress": progress,
         # A finished round's record is authoritative, ``None`` included: a denied
-        # round has no answer, however many progress messages the stream holds.
+        # round has no answer, however many progress messages the stream holds; the
+        # same holds for a stream classified denied before anyone finalised it.
         "last_message": round_.get("last_message")
         if round_.get("finished_at")
-        else obs.replay.last_message,
+        else (None if obs.health.outcome == "denied" else obs.replay.last_message),
         "files_written": round_.get("files_written")
         if round_.get("finished_at")
         else (obs.replay.files_written or None),
@@ -1601,6 +1621,7 @@ class Runner:
             "path": report["path"],
             "allow": report["allow"],
             "deny": report["deny"],
+            "ask": report.get("ask") or [],
             "roots": roots,
         }
 
@@ -2224,6 +2245,8 @@ def cmd_tail(
     finally:
         if reader is not None:
             reader.close()
+    if done is not None and not round_.get("finished_at"):
+        replay.observed = _soft_denials(harness, _round_log(round_, _round_files(run_dir, number)))
     if done is not None and follow and not round_.get("finished_at"):
         # The peer has spoken; the runner is finalising. Its record (outcome, exit
         # code) is the contract, so give it a moment before falling back to the stream.

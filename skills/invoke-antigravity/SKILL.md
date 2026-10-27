@@ -23,10 +23,11 @@ round lands in the calling session's folder.
 Which credential a run needs depends on the billing route (section 3b). On route `gcp`,
 `agy` authenticates with Application Default Credentials (ADC), not its own login, and the
 ADC refresh token expires on a schedule under a Workspace session-length policy. The engine
-probes it before every spawn (`gcloud auth application-default print-access-token`): a
-rejected token is exit 2, `billing check failed`, with the `gcloud auth application-default
-login` command to give the user; `billing: ADC token not verified` is a warning (no gcloud,
-no network) and the run starts. On route `plan` or `inherit` without ADC, `agy` needs its own
+probes it before every spawn and in `cairn doctor` (`gcloud auth application-default
+print-access-token`, up to 20 s, outside the run's own clock): a rejected token is exit 2,
+`billing check failed`, with the `gcloud auth application-default login` command to give the
+user; `billing: ADC token not verified` is a warning (no gcloud, no network) and the run
+starts. On route `plan` or `inherit` without ADC, `agy` needs its own
 cached login: the user must have run `agy` interactively once on this machine, else the run
 fails at once with "authentication required" and `retryable: false`; ask the user to log in,
 do not retry. `cairn doctor` reports both. Inside the Codex sandbox `agy` may not reach its
@@ -63,17 +64,18 @@ shell command runs only when an allow rule covers it (section 3a); `full` needs 
 `--mode` passes a native agy mode directly (`plan`, `accept-edits`, `auto`) and overrides the
 profile. The record stores the exact flags that ran.
 
-Plan mode reads the `--cd` tree only. A `read_file` on any other path is soft-denied, and
-agy can end the turn right there with no answer. Put every file the peer must read inside
-`--cd`, pass `--extra --add-dir <dir>` (last on the line, and again on every `--resume`:
-`--extra` is not recorded), or paste the text into the prompt. The brief itself is passed as
-text, so its own location needs nothing.
+Plan mode reads the `--cd` tree with no rule; any other path needs a `read_file(<dir>)`
+allow rule or `--add-dir`, else the `read_file` is auto-denied and agy can end the turn right
+there with no answer. Put every file the peer must read inside `--cd`, pass `--extra
+--add-dir <dir>` (last on the line, and again on every `--resume`: the flag is recorded in
+the round's `argv` but not reapplied), or paste the text into the prompt. The brief itself
+is passed as text, so its own location needs nothing.
 
 ## 3a. Shell permissions (check once per machine)
 
-Headless `agy` cannot prompt, so a tool call that needs approval is auto-denied: a refused
-shell command lets the turn go on without it, a soft-denied read can end the turn with no
-answer, and agy reports success either way. A review that cannot run `grep`, `rg` or
+Headless `agy` cannot prompt, so a tool call that needs approval is auto-denied, with or
+without a tool error in the stream; the turn may go on without it or end right there with
+no answer, and agy reports success either way. A review that cannot run `grep`, `rg` or
 `git diff` is weak, and an implementation that cannot run its tests is unverified. Check
 once, before the first run on a machine:
 
@@ -104,9 +106,10 @@ The engine enforces this per run:
   that would cover it. A refusal beside a real answer stays `succeeded` with a
   `permissions:` warning that carries the same verdicts; `denied` in the result lists the
   tool and target of each. `tail`, `status` and `wait` reach the same verdict.
-- The result records `permissions` (the allow and deny rules in force when the round
-  started, and `roots`: the workspace and every `--add-dir`). A resume after a rule change
-  tells the peer what changed (section 7).
+- The round record in `thread.json` keeps `permissions` (the allow, deny and ask rules in
+  force when the round started, and `roots`: the workspace and every `--add-dir`); an
+  `ask` rule denies headlessly. A resume after a rule change tells the peer what changed
+  (section 7).
 
 When a project needs a command outside the defaults (`poetry run pytest`, `make format`),
 add it to `permissions.allow` by hand, never to `full`.

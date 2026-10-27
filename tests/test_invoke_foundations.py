@@ -1302,10 +1302,6 @@ class TestAntigravityPermissions(unittest.TestCase):
         self.assertFalse(needs_shell_rules(("--dangerously-skip-permissions",)))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestAntigravityReadDenials(unittest.TestCase):
     """A soft-denied ``read_file`` leaves no error in the stream: the log names it by
     step, the harness joins the step to its path, and the verdict models agy's rules."""
@@ -1383,6 +1379,52 @@ class TestAntigravityReadDenials(unittest.TestCase):
         # A prefix is a directory boundary, not a string prefix.
         self.assertEqual(read_verdict("/srv/docs2/x", allow, deny, roots)["verdict"], "unmatched")
         self.assertEqual(read_verdict("/anything", ["read_file(*)"], [], [])["verdict"], "allowed")
+        self.assertEqual(
+            read_verdict("/anything", [], ["read_file(*)"], roots)["verdict"], "denied"
+        )
+        # A relative rule is workspace-relative; deny beats the workspace default.
+        self.assertEqual(
+            read_verdict("/work/repo/secret/key", [], ["read_file(secret/)"], roots)["denied_by"],
+            ["read_file(secret/)"],
+        )
+        self.assertEqual(
+            read_verdict("/srv/elsewhere/a.md", ["read_file(../elsewhere)"], [], roots)["verdict"],
+            "unmatched",
+        )
+        self.assertEqual(
+            read_verdict("/work/elsewhere/a.md", ["read_file(../elsewhere)"], [], roots)[
+                "allowed_by"
+            ],
+            "read_file(../elsewhere)",
+        )
+        # Dot segments are normalised before the workspace check; a relative --add-dir
+        # root is taken from the workspace; a trailing slash is not a different rule.
+        self.assertEqual(
+            read_verdict("/work/repo/../secret/key", [], [], roots)["verdict"], "unmatched"
+        )
+        self.assertEqual(
+            read_verdict("/work/docs/x.md", [], [], ["/work/repo", "../docs"])["allowed_by"],
+            "inside /work/docs",
+        )
+        self.assertEqual(
+            read_verdict("/srv/docs/x", ["read_file(/srv/docs/)"], [], [])["verdict"], "allowed"
+        )
+        # A slash-containing glob matches the whole path; ``~`` expands.
+        self.assertEqual(
+            read_verdict("/work/repo/conf/x.env", [], ["read_file(conf/*.env)"], roots)["verdict"],
+            "denied",
+        )
+        home = str(Path("~/notes").expanduser())
+        self.assertEqual(
+            read_verdict(f"{home}/a.md", ["read_file(~/notes)"], [], [])["allowed_by"],
+            "read_file(~/notes)",
+        )
+        # An ask rule denies: headless agy cannot ask, and ask beats allow and the workspace.
+        asked = read_verdict("/work/repo/src/a.py", allow, [], roots, ["read_file(*)"])
+        self.assertEqual(asked["verdict"], "denied")
+        self.assertEqual(
+            asked["denied_by"], ["read_file(*) (an ask rule; headless agy cannot ask)"]
+        )
 
 
 class TestAntigravityAdcToken(unittest.TestCase):
@@ -1470,3 +1512,22 @@ class TestAntigravityAdcToken(unittest.TestCase):
             self.assertIsNone(observed["auth_error"])
             self.assertIsNone(auth_failure(observed))
             self.assertIsNone(auth_failure({"auth_error": None}))
+            # Any later authentication is a recovery, whatever its method.
+            log.write_text(
+                failed + "I1027 11:33:48.871227       1 server_oauth.go:224] applyAuthResult: "
+                "email=x@y.z, authMethod=gcp, quotaProject=\n"
+            )
+            self.assertIsNone(observe_billing(log)["auth_error"])
+
+    def test_only_a_rejected_credential_refuses(self):
+        env = {"HOME": "/h"}
+        proxy = "dial tcp: lookup reauth-proxy.example.test: no such host"
+        verdict, reason = adc_token_check(env, run=self._run(1, proxy))
+        self.assertEqual(verdict, "unverified")
+        self.assertIn("reauth-proxy", reason or "")
+        rapt = "reauth related error (invalid_rapt)"
+        self.assertEqual(adc_token_check(env, run=self._run(1, rapt))[0], "refused")
+
+
+if __name__ == "__main__":
+    unittest.main()

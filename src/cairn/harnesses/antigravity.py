@@ -33,13 +33,12 @@ spawn), and reads the route agy actually took from its ``--log-file``:
 ``aiplatform.googleapis.com/v1/projects/<id>/`` request URLs (verified live).
 
 Permissions (``<app data>/settings.json``, key ``permissions``): headless agy cannot
-prompt, so a tool call that needs approval is auto-denied. A refused shell command ends
-its step in state ``ERROR`` ("permission check failed") and the turn goes on without it.
-A soft-denied ``read_file`` (a path outside the workspace in plan mode, verified live on
-agy 1.4.8) leaves no error in the stream: its step ends ``DONE``, the log says
-``Print mode: soft-denying tool confirmation "ReadFile" at step N``, and the turn ends
-right there with an empty answer. Either way the ``result`` event lists
-``denied_actions`` and still says ``SUCCESS``. A
+prompt, so a tool call that needs approval is auto-denied, in one of two shapes seen live
+on agy 1.4.6 to 1.4.8: the step ends in state ``ERROR`` ("permission check failed"), or
+it ends ``DONE`` with no error and only agy's own log says ``Print mode: soft-denying
+tool confirmation "ReadFile" at step N``. In both shapes the ``result`` event lists
+``denied_actions`` and still says ``SUCCESS``, and in both the turn may go on without
+the call or end right there with an empty answer. A
 ``command(<prefix>)`` allow rule (word-by-word prefix match; ``command(regex:...)`` for
 a pattern) lets a shell command run in every mode but ``--dangerously-skip-permissions``,
 which needs none; every segment of a compound command (``a && b``, pipes) needs its own
@@ -53,6 +52,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import re
 import subprocess
 from collections.abc import Callable, Mapping
@@ -96,7 +96,7 @@ _ADC_OK = "adcAuth: authenticated successfully"
 _CREDENTIAL_REJECTED = (
     "invalid_grant",
     "invalid_rapt",
-    "reauth",
+    "reauth related error",
     "does not have any valid credentials",
 )
 ADC_PROBE_COMMAND = ("gcloud", "auth", "application-default", "print-access-token")
@@ -612,6 +612,18 @@ def permission_rules(path: Path) -> tuple[list[str], list[str]]:
     return allow, deny
 
 
+def ask_rules(path: Path) -> list[str]:
+    """The ``permissions.ask`` rules of an agy settings file. Headless agy cannot ask,
+    so for a run these deny (agy's precedence is deny, then ask, then allow)."""
+    if not path.is_file():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    permissions = data.get("permissions") if isinstance(data, dict) else None
+    if not isinstance(permissions, dict):
+        return []
+    return [r for r in permissions.get("ask") or [] if isinstance(r, str)]
+
+
 def shell_rules_present(allow: list[str]) -> bool:
     """Whether any shell command at all may run headlessly."""
     return any(rule.startswith("command(") for rule in allow)
@@ -731,54 +743,84 @@ def add_dirs_from_extra(extra: tuple[str, ...]) -> list[str]:
     return [str(Path(d).expanduser()) for d in dirs if d]
 
 
+def _normalise(path: str, workspace: str | None) -> str:
+    """An absolute, dot-free path: ``~`` expanded, a relative path taken from the
+    workspace (agy's rules are workspace-relative). Symlinks are not resolved."""
+    expanded = os.path.expanduser(path)
+    if not os.path.isabs(expanded) and workspace:
+        expanded = os.path.join(workspace, expanded)
+    return os.path.normpath(expanded)
+
+
 def _under(path: str, root: str) -> bool:
-    root = str(Path(root).expanduser())
-    return path == root or path.startswith(root.rstrip("/") + "/")
+    root = root.rstrip("/") or "/"
+    return path == root or path.startswith(root + "/")
 
 
-def read_verdict(path: str, allow: list[str], deny: list[str], roots: list[str]) -> dict:
+def read_verdict(
+    path: str,
+    allow: list[str],
+    deny: list[str],
+    roots: list[str],
+    ask: list[str] | None = None,
+) -> dict:
     """What agy's rules say about one ``read_file`` on ``path``.
 
     ``{"verdict": "allowed" | "denied" | "unmatched", "denied_by": [...],
     "allowed_by": str | None, "suggest": [rules]}``. It models agy's documented
-    matcher (antigravity.google/docs/permissions): deny beats everything, a
-    ``read_file(<absolute>)`` rule covers its subtree, ``write_file`` on a path grants
-    ``read_file`` on it, ``read_file(*)`` covers all, a rule with no slash matches the
-    file's name (``read_file(.env*)``), and the workspace plus every ``--add-dir``
-    (``roots``) is readable with no rule. Verified live on agy 1.4.8 for the
-    workspace, a path outside it and a name deny; the subtree rule is from the docs.
-    ``ask`` rules are not modelled: headless agy cannot ask, so they deny.
+    matcher (antigravity.google/docs/permissions): deny beats ask beats allow, and an
+    ``ask`` rule denies here because headless agy cannot ask; a ``read_file(<dir>)``
+    rule covers its subtree; a relative target is taken from the workspace (the first
+    of ``roots``); a target with a wildcard matches the whole path (with a slash) or
+    the file's name (``read_file(.env*)``); ``write_file`` on a path grants
+    ``read_file``; ``read_file(*)`` covers all; and the workspace plus every
+    ``--add-dir`` (``roots``) is readable with no rule. Paths are normalised
+    (``~``, ``..``) but symlinks are not resolved. Verified live on agy 1.4.8 for the
+    workspace, a path outside it and a name deny; the rest is from the docs.
     """
-    path = str(Path(path).expanduser())
+    workspace = _normalise(roots[0], None) if roots else None
+    path = _normalise(path, workspace)
     denied_by: list[str] = []
     for rule in deny:
         parts = rule_parts(rule)
-        if parts and parts[0] == READ_TOOL and _read_rule_covers(parts[1], path):
+        if parts and parts[0] == READ_TOOL and _read_rule_covers(parts[1], path, workspace):
             denied_by.append(rule)
+    for rule in ask or []:
+        parts = rule_parts(rule)
+        if parts and parts[0] == READ_TOOL and _read_rule_covers(parts[1], path, workspace):
+            denied_by.append(f"{rule} (an ask rule; headless agy cannot ask)")
     if denied_by:
         return {"verdict": "denied", "denied_by": denied_by, "allowed_by": None, "suggest": []}
     for root in roots:
-        if _under(path, root):
+        normal = _normalise(root, workspace)
+        if _under(path, normal):
             return {
                 "verdict": "allowed",
                 "denied_by": [],
-                "allowed_by": f"inside {root}",
+                "allowed_by": f"inside {normal}",
                 "suggest": [],
             }
     for rule in allow:
         parts = rule_parts(rule)
-        if parts and parts[0] in (READ_TOOL, "write_file") and _read_rule_covers(parts[1], path):
+        if (
+            parts
+            and parts[0] in (READ_TOOL, "write_file")
+            and _read_rule_covers(parts[1], path, workspace)
+        ):
             return {"verdict": "allowed", "denied_by": [], "allowed_by": rule, "suggest": []}
     suggest = [f"{READ_TOOL}({Path(path).parent})"]
     return {"verdict": "unmatched", "denied_by": [], "allowed_by": None, "suggest": suggest}
 
 
-def _read_rule_covers(target: str, path: str) -> bool:
+def _read_rule_covers(target: str, path: str, workspace: str | None) -> bool:
+    target = target.strip()
     if target in ("*", "/"):
         return True
-    if "/" in target:
-        return _under(path, target)
-    return fnmatch.fnmatch(Path(path).name, target)
+    if "/" not in target:
+        return fnmatch.fnmatch(Path(path).name, target)
+    if any(ch in target for ch in "*?["):
+        return fnmatch.fnmatch(path, _normalise(target, workspace))
+    return _under(path, _normalise(target, workspace))
 
 
 def is_denial(message: str) -> bool:
@@ -889,6 +931,7 @@ def adc_token_check(
         probe = run(
             list(ADC_PROBE_COMMAND),
             env=dict(env),
+            stdin=subprocess.DEVNULL,  # never an interactive prompt
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
@@ -938,11 +981,17 @@ def observe_billing(log_path: Path) -> dict:
         }
     matches = _AUTH_LINE.findall(text)
     method, project = matches[-1] if matches else (None, None)
-    # The last refresh failure counts only when no success follows it.
+    # The last refresh failure counts only when no authentication (ADC or any other
+    # method's applyAuthResult) follows it: a later success is a recovery.
     auth_error = None
     failures = list(_ADC_FAILED.finditer(text))
-    if failures and text.rfind(_ADC_OK) < failures[-1].start():
-        auth_error = _clip(failures[-1].group(1).strip(), 300)
+    if failures:
+        last = failures[-1].start()
+        later_ok = text.rfind(_ADC_OK) > last or any(
+            m.start() > last for m in _AUTH_LINE.finditer(text)
+        )
+        if not later_ok:
+            auth_error = _clip(failures[-1].group(1).strip(), 300)
     return {
         "auth_method": method,
         "quota_project": project or None,
