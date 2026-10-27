@@ -793,15 +793,39 @@ def denial_text(denied: list[dict], permissions: dict | None) -> str:
     shown = denial_lines(denied[:8], permissions)
     more = f" (+{len(denied) - 8} more)" if len(denied) > 8 else ""
     # Entries are distinct (tool, target) pairs, or an action type agy counted with no
-    # target: never an exact count of calls.
-    if all(" denied by " in line for line in shown):
-        remedy = f"Review the deny and ask rules in {path}"
-    else:
-        remedy = (
-            f"Add the rule to permissions.allow in {path} (or run 'cairn hook install "
-            "--harness antigravity --grant-commands' for cairn's defaults)"
+    # target: never an exact count of calls. The remedy follows the verdicts: a rule
+    # covers a refusal (review it) or nothing does (add one); a mixed set needs both.
+    kinds = _refusal_kinds(denied, permissions)
+    remedies = []
+    if "denied" in kinds:
+        remedies.append(f"review the deny and ask rules in {path}")
+    if kinds - {"denied"}:
+        remedies.append(
+            f"add the missing rule to permissions.allow in {path} (or run 'cairn hook "
+            "install --harness antigravity --grant-commands' for cairn's defaults)"
         )
+    remedy = " and ".join(remedies)
+    remedy = remedy[:1].upper() + remedy[1:]  # not capitalize(): it lowercases the path
     return f"agy auto-denied {len(denied)} distinct refusal(s){more}: {'; '.join(shown)}. {remedy}, then resume"
+
+
+def _refusal_kinds(denied: list[dict], permissions: dict | None) -> set[str]:
+    """The verdict of each refusal against the recorded rules: ``denied`` (a deny or
+    ask rule covers it), ``unmatched`` (no rule does) or ``allowed`` (agy refused it
+    anyway)."""
+    rules = permissions or {}
+    allow, deny = list(rules.get("allow") or []), list(rules.get("deny") or [])
+    ask, roots = list(rules.get("ask") or []), list(rules.get("roots") or [])
+    kinds: set[str] = set()
+    for item in denied:
+        tool, target = str(item.get("tool") or ""), str(item.get("target") or "")
+        if tool == COMMAND_TOOL and target:
+            kinds.add(command_verdict(target, allow, deny, ask)["verdict"])
+        elif tool == READ_TOOL and target:
+            kinds.add(read_verdict(target, allow, deny, roots, ask)["verdict"])
+        else:
+            kinds.add("unmatched")
+    return kinds
 
 
 def permissions_note(previous: dict | None, current: dict, denied_before: list[dict]) -> str | None:
@@ -2285,12 +2309,15 @@ def cmd_tail(
             time.sleep(0.2)
             round_ = _select_round(ThreadState.load(run_dir / "thread.json"), number)
     elif done is not None and not round_.get("finished_at"):
-        # A snapshot (--no-follow) of a round still in flight is not a verdict.
+        # A snapshot (--no-follow) of a round still in flight is not a verdict; and
+        # once both processes are gone the record may have landed since it was read.
         alive = identity_alive(round_.get("runner_pid"), round_.get("runner_started")) or (
             identity_alive(round_.get("peer_pid"), round_.get("peer_started"))
         )
         if alive:
             done = None
+        else:
+            round_ = _select_round(ThreadState.load(run_dir / "thread.json"), number)
     if done is not None and not round_.get("finished_at"):
         # The fallback classifies the stream plus the peer's log, read now (after the
         # wait), so a denial the log shows by then is not missed.

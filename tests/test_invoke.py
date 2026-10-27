@@ -2007,11 +2007,19 @@ class TestReplayFacts(unittest.TestCase):
         rules = {"path": "/s.json", "allow": ["command(rg)"], "deny": ["command(curl)"], "ask": []}
         unmatched = invoke.denial_text([{"tool": "run_command", "target": "git log"}], rules)
         self.assertIn("agy auto-denied 1 distinct refusal(s):", unmatched)
-        self.assertIn("Add the rule to permissions.allow in /s.json", unmatched)
+        self.assertIn("Add the missing rule to permissions.allow in /s.json", unmatched)
         denied = invoke.denial_text([{"tool": "run_command", "target": "curl x"}], rules)
         self.assertIn("`curl x` denied by command(curl)", denied)
         self.assertIn("Review the deny and ask rules in /s.json, then resume", denied)
         self.assertNotIn("permissions.allow", denied)
+        mixed = invoke.denial_text(
+            [
+                {"tool": "run_command", "target": "curl x"},
+                {"tool": "run_command", "target": "git log"},
+            ],
+            rules,
+        )
+        self.assertIn("Review the deny and ask rules in /s.json and add the missing rule", mixed)
 
     def test_refusals_merge_the_stream_the_log_and_the_count(self):
         """``denied_actions`` counts action types; the stream and the log name calls."""
