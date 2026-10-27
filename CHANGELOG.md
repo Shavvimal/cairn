@@ -8,9 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- The Claude Code update instructions (README, the Claude harness reference) start with
-  `/plugin marketplace update cairn`: without the marketplace refresh, `/plugin update
-  cairn@cairn` reinstalls the version the marketplace last saw.
+- The Claude Code update instructions (README, the Claude harness reference) are one
+  command, `/plugin marketplace update cairn`: in a session it refreshes the marketplace
+  and updates the plugins installed from it, and closing the panel reloads them.
+  `/plugin update cairn@cairn` on its own reinstalls the version the marketplace last saw.
 
 ## [2.8.0]
 
