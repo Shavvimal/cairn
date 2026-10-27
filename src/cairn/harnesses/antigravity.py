@@ -189,6 +189,9 @@ WRITE_TOOLS: frozenset[str] = frozenset(
 )
 COMMAND_TOOL = "run_command"
 READ_TOOL = "read_file"
+# ``denied_actions[].action`` in agy's result names an action type, not the tool: the
+# shell is ``command`` there and ``run_command`` in the step stream.
+DENIED_ACTION_TOOLS: dict[str, str] = {"command": COMMAND_TOOL}
 _DENIAL_MARKERS = ("permission check failed", "denied permission", "user denied")
 _PATH_PARAMETERS = ("TargetFile", "AbsolutePath", "Path", "File")
 _COMPOUND_SPLIT = re.compile(r"\s*(?:&&|\|\||\||;)\s*")

@@ -1223,7 +1223,25 @@ class TestAntigravityRun(InvokeFixture):
         self.assertEqual(
             self.thread(data["thread_id"], "antigravity")["rounds"][0]["outcome"], "denied"
         )
-        # The adopt path (a dead runner, ``cairn invoke wait``) reaches the same verdict.
+        # ``tail`` on a stream the runner has not finalised yet decides the same way:
+        # the record is stripped of its finish to stand in for that window.
+        path = run_dir / "thread.json"
+        state = json.loads(path.read_text())
+        for key in ("finished_at", "outcome", "exit_code"):
+            state["rounds"][0].pop(key, None)
+        path.write_text(json.dumps(state))
+        result, _ = self.invoke("tail", data["thread_id"], "--no-follow", check_json=False)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "RESULT denied")
+        _, shown = self.invoke("status", data["thread_id"], "--json")
+        assert shown is not None
+        self.assertEqual((shown["execution"], shown["outcome"]), ("exited", "denied"))
+        self.assertEqual(shown["denied"], [{"tool": "read_file", "target": ""}])
+
+    def test_abandoned_soft_denied_round_is_adopted_as_denied(self):
+        """A dead runner: ``wait`` adopts the round from the stream and reaches the same
+        verdict, exit code and empty answer as the live runner would have."""
+        outside = str(self.root / "elsewhere" / "plan.md")
         runner = self.spawn(
             "antigravity",
             "--json",
@@ -1243,9 +1261,24 @@ class TestAntigravityRun(InvokeFixture):
         result, data = self.invoke("wait", tid, "--json")
         self.assertEqual(result.returncode, 2, result.stderr)
         assert data is not None
-        self.assertEqual(data["status"], "denied")
-        self.assertIn("read_file", data["error"])
+        self.assertEqual(
+            (data["status"], data["exit_code"], data["retryable"]), ("denied", 2, True)
+        )
+        self.assertIsNone(data["last_message"])
         self.assertEqual(data["denied"][0]["tool"], "read_file")
+        self.assertIn("read_file", data["error"])
+        self.assertIn("result file missing", " ".join(data["warnings"]))
+        round_ = self.thread(tid, "antigravity")["rounds"][0]
+        self.assertTrue(round_["adopted_at"])
+        self.assertEqual(round_["exit_code"], 2)
+        # ``status`` reads the record, not the stream: no progress message poses as the answer.
+        _, shown = self.invoke("status", tid, "--json")
+        assert shown is not None
+        self.assertEqual((shown["execution"], shown["outcome"]), ("exited", "denied"))
+        self.assertIsNone(shown["last_message"])
+        result, _ = self.invoke("tail", tid, check_json=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout.splitlines()[-1], "RESULT denied")
 
     def test_partial_refusal_warns_and_the_result_lists_files_written(self):
         (self.agy_store / "settings.json").write_text(
@@ -1820,6 +1853,49 @@ class TestReplayFacts(unittest.TestCase):
         self.assertEqual(invoke.tail_line(Event("progress", text="run: cat")), "STEP run: cat")
         self.assertEqual(invoke.tail_line(Event("notice", text="n")), "NOTICE n")
         self.assertIsNone(invoke.tail_line(Event("done", status="succeeded")))
+
+    def test_refusals_merge_the_stream_the_log_and_the_count(self):
+        """``denied_actions`` counts action types; the stream and the log name calls."""
+        done = invoke.Event(
+            "done",
+            text=None,
+            status="succeeded",
+            usage={"denied_actions": ["command", "read_file"]},
+        )
+        replay = invoke.Replay()
+        replay.feed([done])
+        self.assertTrue(invoke.denied_outcome(replay))
+        self.assertEqual(invoke.stream_outcome(replay), "denied")
+        self.assertEqual(
+            replay.refusals(),
+            [{"tool": "run_command", "target": ""}, {"tool": "read_file", "target": ""}],
+        )
+        # A stream refusal names the command; the counted ``command`` adds nothing.
+        replay.feed([invoke.Event("denied", text="rg x", error="run_command")])
+        self.assertEqual(
+            replay.refusals(),
+            [{"tool": "run_command", "target": "rg x"}, {"tool": "read_file", "target": ""}],
+        )
+        # The log names the soft-denied reads, several per counted action type.
+        observed = [
+            {"tool": "read_file", "target": "/x/a.md"},
+            {"tool": "read_file", "target": "/x/b.md"},
+            {"tool": "read_file", "target": "/x/a.md"},
+        ]
+        self.assertEqual(
+            replay.refusals(observed),
+            [
+                {"tool": "run_command", "target": "rg x"},
+                {"tool": "read_file", "target": "/x/a.md"},
+                {"tool": "read_file", "target": "/x/b.md"},
+            ],
+        )
+        # A real answer beside a refusal is not a denied round.
+        answered = invoke.Replay()
+        answered.feed([invoke.Event("done", text="PONG", status="succeeded", usage=done.usage)])
+        self.assertFalse(invoke.denied_outcome(answered))
+        self.assertEqual(invoke.stream_outcome(answered), "succeeded")
+        self.assertIsNone(invoke.stream_outcome(invoke.Replay()))
 
     def test_permissions_note(self):
         before = {"allow": ["command(rg)"], "deny": ["command(curl)"]}

@@ -74,6 +74,7 @@ from .harnesses import Event, Harness, InvokeRequest, detect_harness, get_harnes
 from .harnesses.antigravity import (
     ANTIGRAVITY_MODES,
     COMMAND_TOOL,
+    DENIED_ACTION_TOOLS,
     READ_TOOL,
     billing_env,
     billing_problem,
@@ -98,9 +99,20 @@ EXIT_BUSY = 75
 EXIT_TIMEOUT = 124
 EXIT_IDLE = 125
 EXIT_CANCELLED = 130
+# The cairn exit code an outcome carries wherever it is decided (the live runner,
+# ``adopt``, ``tail`` before the runner has finalised). A ``failed`` round keeps the
+# peer's own return code, which only the runner knows.
+EXIT_BY_OUTCOME: dict[str, int] = {
+    "succeeded": EXIT_OK,
+    "denied": EXIT_DENIED,
+    "timeout": EXIT_TIMEOUT,
+    "idle_timeout": EXIT_IDLE,
+    "cancelled": EXIT_CANCELLED,
+}
 
 # A prompt larger than this goes through the child's stdin (macOS ARG_MAX, D14).
 STDIN_PROMPT_BYTES = 64_000
+TAIL_FINALISE_GRACE_S = 2.0
 PROGRESS_CAP = 200
 PROGRESS_CHARS = 200
 STATE_WRITE_INTERVAL_S = 2.0
@@ -306,15 +318,30 @@ class Replay:
             elif event.kind == "done":
                 self.done = event
 
-    def refusals(self) -> list[dict]:
-        """Every call the peer's CLI refused: the stream's ``denied`` events when it
-        showed them (a ``run_command`` ended in state ``ERROR``), else one entry per
-        action agy counted in the result's ``denied_actions`` (a soft deny leaves no
-        error in the stream, only that count), with no target."""
-        if self.denied:
-            return list(self.denied)
+    def refusals(self, observed: list[dict] | None = None) -> list[dict]:
+        """Every call the peer's CLI refused, from three sources merged in order: the
+        stream's ``denied`` events (a ``run_command`` ended in state ``ERROR``), the
+        soft denials ``observed`` in the peer's own log (a soft deny leaves no error in
+        the stream; the harness joins the log's step numbers to their targets), and
+        finally one targetless entry per action type agy counted in the result's
+        ``denied_actions`` that the first two did not name. ``denied_actions`` counts
+        action types, not calls, so the fallback never claims a call count."""
+        merged: list[dict] = []
+        for item in [*self.denied, *(observed or [])]:
+            entry = {
+                "tool": str(item.get("tool") or "tool"),
+                "target": str(item.get("target") or ""),
+            }
+            if entry not in merged:
+                merged.append(entry)
+        named = {entry["tool"] for entry in merged}
         counted = ((self.done.usage if self.done else None) or {}).get("denied_actions") or []
-        return [{"tool": str(kind), "target": ""} for kind in counted]
+        for kind in counted:
+            tool = DENIED_ACTION_TOOLS.get(str(kind), str(kind))
+            if tool not in named:
+                merged.append({"tool": tool, "target": ""})
+                named.add(tool)
+        return merged
 
 
 def replay_file(harness: Harness, path: Path) -> Replay:
@@ -666,6 +693,20 @@ def denied_outcome(replay: Replay) -> bool:
     return bool(replay.refusals())
 
 
+def stream_outcome(replay: Replay) -> str | None:
+    """The outcome the event stream alone supports: the final event's status, with a
+    success that :func:`denied_outcome` rejects read as ``denied``. ``None`` without a
+    final event. Readers that see the stream before the runner has finalised the
+    round (``tail``, ``status``) use this, so they never report a dead round as
+    ``succeeded``."""
+    done = replay.done
+    if done is None:
+        return None
+    if done.status == "succeeded" and denied_outcome(replay):
+        return "denied"
+    return done.status
+
+
 def denial_lines(denied: list[dict], permissions: dict | None) -> list[str]:
     """One line per refused call: the command and the rule that would allow it, judged
     against the rules recorded for the round (so the advice matches what agy saw)."""
@@ -821,9 +862,7 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
     files = _round_files(state.path.parent if state.path else Path("."), int(round_["round"]))
     try:
         replay = replay_file(harness, files["events_path"])
-        derived = (replay.done.status if replay.done else None) or "aborted"
-        if derived == "succeeded" and denied_outcome(replay):
-            derived = "denied"
+        derived = stream_outcome(replay) or "aborted"
     except OSError:
         replay, derived = Replay(), "unknown"
     final = outcome or derived
@@ -850,7 +889,7 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
         state,
         round_,
         outcome=final,
-        exit_code=None,
+        exit_code=EXIT_BY_OUTCOME.get(final),  # a failed peer's own code is unknown
         replay=replay,
         duration_s=max(0.0, ended - started),
         error=error,
@@ -930,7 +969,7 @@ def observe(config: CairnConfig, run_dir: Path, *, settle: bool = True) -> Obser
         runner_alive=runner_alive,
         peer_alive=peer_alive,
         heartbeat_at=beat.latest,
-        done_status=replay.done.status if replay.done else None,
+        done_status=stream_outcome(replay),
     )
     started = parse_iso(round_.get("started_at"))
     finished = parse_iso(round_.get("finished_at"))
@@ -993,11 +1032,17 @@ def observation_json(obs: Observation) -> dict:
         "peer_alive": obs.peer_alive,
         "last_event": obs.last_event,
         "progress": progress,
-        "last_message": round_.get("last_message") or obs.replay.last_message,
+        # A finished round's record is authoritative, ``None`` included: a denied
+        # round has no answer, however many progress messages the stream holds.
+        "last_message": round_.get("last_message")
+        if round_.get("finished_at")
+        else obs.replay.last_message,
         "files_written": round_.get("files_written")
         if round_.get("finished_at")
         else (obs.replay.files_written or None),
-        "denied": round_.get("denied") or obs.replay.denied,
+        "denied": (round_.get("denied") or [])
+        if round_.get("finished_at")
+        else obs.replay.refusals(),
         "billing": round_.get("billing"),
         "publication": round_.get("publication") or {},
         "events_path": round_.get("events_path"),
@@ -1826,13 +1871,7 @@ class Runner:
             error = KEYCHAIN_GUIDANCE
         if outcome == "succeeded":
             error, retryable = None, None
-        exit_code = {
-            "succeeded": EXIT_OK,
-            "denied": EXIT_DENIED,
-            "timeout": EXIT_TIMEOUT,
-            "idle_timeout": EXIT_IDLE,
-            "cancelled": EXIT_CANCELLED,
-        }.get(outcome)
+        exit_code = EXIT_BY_OUTCOME.get(outcome)
         if exit_code is None:
             exit_code = rc if isinstance(rc, int) and rc > 0 else EXIT_FATAL
         _finish(
@@ -2061,10 +2100,14 @@ def cmd_tail(
     tail = LineTail()
     done: Event | None = None
     reader = None
+    replay = (
+        Replay()
+    )  # the same classification the runner applies, for a stream it has not finalised
 
     def emit(line: bytes) -> None:
         nonlocal done
         for event in harness.parse_event(line.decode("utf-8", errors="replace")):
+            replay.feed([event])
             if event.kind == "done":
                 done = event
                 continue
@@ -2109,10 +2152,17 @@ def cmd_tail(
     finally:
         if reader is not None:
             reader.close()
+    if done is not None and follow and not round_.get("finished_at"):
+        # The peer has spoken; the runner is finalising. Its record (outcome, exit
+        # code) is the contract, so give it a moment before falling back to the stream.
+        deadline = time.monotonic() + TAIL_FINALISE_GRACE_S
+        while time.monotonic() < deadline and not round_.get("finished_at"):
+            time.sleep(0.1)
+            round_ = _select_round(ThreadState.load(run_dir / "thread.json"), number)
     if round_.get("finished_at"):
         outcome = str(round_.get("outcome") or "unknown")
     elif done is not None:
-        outcome = str(done.status or "unknown")
+        outcome = stream_outcome(replay) or "unknown"
     else:
         outcome = "running"
     if as_json:
@@ -2121,7 +2171,9 @@ def cmd_tail(
         print(f"RESULT {outcome}", flush=True)
     if outcome == "running":
         return EXIT_OK
-    return _round_exit_code(round_) if round_.get("finished_at") else EXIT_OK
+    if round_.get("finished_at"):
+        return _round_exit_code(round_)
+    return EXIT_BY_OUTCOME.get(outcome, EXIT_FATAL)
 
 
 def cmd_wait(config: CairnConfig, thread_id: str, as_json: bool) -> int:
