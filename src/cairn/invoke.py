@@ -28,8 +28,9 @@ Round lifecycle:
    SIGTERM/SIGINT forwarding. A runner that dies loses none of the stream.
 4. Finalise the outcome, save the answer, then run the publication pipeline.
    A peer that reported success with an empty answer after refusing tool calls
-   for want of a permission (headless agy) ends as ``denied`` (exit 2, retryable):
-   the error names each refused command and the allow rule it needs. Then run
+   for want of a permission (headless agy) ends as ``denied`` (exit 2, retryable),
+   whether the stream showed the refusal as a tool error or agy only counted it:
+   the error names each refused call and the allow rule it needs. Then run
    (peer export, caller export, links, exchange document, index). Pipeline
    failures never change the outcome (D11); each step lands in the round's
    publication ledger (D24) so ``cairn invoke publish`` or the next
@@ -73,6 +74,7 @@ from .harnesses import Event, Harness, InvokeRequest, detect_harness, get_harnes
 from .harnesses.antigravity import (
     ANTIGRAVITY_MODES,
     COMMAND_TOOL,
+    READ_TOOL,
     billing_env,
     billing_problem,
     billing_problems,
@@ -303,6 +305,16 @@ class Replay:
                 self.notices.append(_clip(event.text, 500))
             elif event.kind == "done":
                 self.done = event
+
+    def refusals(self) -> list[dict]:
+        """Every call the peer's CLI refused: the stream's ``denied`` events when it
+        showed them (a ``run_command`` ended in state ``ERROR``), else one entry per
+        action agy counted in the result's ``denied_actions`` (a soft deny leaves no
+        error in the stream, only that count), with no target."""
+        if self.denied:
+            return list(self.denied)
+        counted = ((self.done.usage if self.done else None) or {}).get("denied_actions") or []
+        return [{"tool": str(kind), "target": ""} for kind in counted]
 
 
 def replay_file(harness: Harness, path: Path) -> Replay:
@@ -645,9 +657,13 @@ def _retryable(text: str) -> bool:
 def denied_outcome(replay: Replay) -> bool:
     """A peer that said "success" with an empty final answer after its CLI refused
     tool calls did nothing usable: the round is ``denied``, not ``succeeded``. The
-    final answer is the peer's own response, not an earlier progress message."""
+    final answer is the peer's own response, not an earlier progress message. A
+    refusal counts whether the stream showed it as a tool error or agy only counted
+    it in ``denied_actions`` (a soft-denied read ends the turn with no error line)."""
     done = replay.done
-    return bool(done and done.status == "succeeded" and not done.text and replay.denied)
+    if not (done and done.status == "succeeded" and not done.text):
+        return False
+    return bool(replay.refusals())
 
 
 def denial_lines(denied: list[dict], permissions: dict | None) -> list[str]:
@@ -659,7 +675,13 @@ def denial_lines(denied: list[dict], permissions: dict | None) -> list[str]:
     for item in denied:
         tool, target = str(item.get("tool") or "tool"), str(item.get("target") or "")
         if tool != COMMAND_TOOL or not target:
-            lines.append(f"{tool} {target} (needs a {tool} allow rule)".replace("  ", " "))
+            hint = f"needs a {tool} allow rule"
+            if tool == READ_TOOL:
+                hint = (
+                    "a path outside the workspace: needs read_file(<absolute dir>) in "
+                    "permissions.allow, or --extra --add-dir <dir> on the run"
+                )
+            lines.append(f"{tool} {target} ({hint})".replace("  ", " "))
             continue
         verdict = command_verdict(target, allow, deny)
         if verdict["verdict"] == "denied":
@@ -777,7 +799,7 @@ def _finish(
         last_event=replay.last_event,
         usage=done.usage if done else None,
         files_written=list(replay.files_written) if reports_files else None,
-        denied=list(replay.denied),
+        denied=replay.refusals(),
         error=error,
         retryable=retryable,
         events_path=str(files["events_path"]),
@@ -817,7 +839,7 @@ def adopt(config: CairnConfig, state: ThreadState, round_: dict, *, outcome: str
         if final == "aborted":
             error = error or "the runner died and the stream has no final event"
         if final == "denied":
-            error = denial_text(replay.denied, round_.get("permissions"))
+            error = denial_text(replay.refusals(), round_.get("permissions"))
     text = f"{stderr}\n{error or ''}"
     retryable = final == "denied" or (final != "cancelled" and _retryable(text))
     if keychain_failure(text):
@@ -1778,7 +1800,7 @@ class Runner:
             if succeeded and denied_outcome(replay):
                 outcome = "denied"
         if outcome == "denied":
-            error = denial_text(replay.denied, self.round.get("permissions"))
+            error = denial_text(replay.refusals(), self.round.get("permissions"))
         elif outcome == "failed":
             error = error or (done.error if done and done.error else None) or stderr.strip()
             if not error:
@@ -1829,12 +1851,6 @@ class Runner:
         if billing_issue:
             self.warnings.append(f"billing: {billing_issue}")
         refused = list(self.round.get("denied") or [])
-        if not refused and (self.round.get("usage") or {}).get("denied_actions"):
-            # agy counted a refusal the stream did not show as a tool error.
-            refused = [
-                {"tool": kind, "target": ""} for kind in self.round["usage"]["denied_actions"]
-            ]
-            self.round["denied"] = refused
         if refused and outcome != "denied":
             lines = denial_lines(refused, self.round.get("permissions"))
             self.warnings.append(

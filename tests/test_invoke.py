@@ -1197,6 +1197,56 @@ class TestAntigravityRun(InvokeFixture):
         self.assertIsNone(self.thread(tid, "antigravity")["rounds"][2]["permissions"]["note"])
         self.assertNotIn("Shell permissions", self.stub_calls()[-1]["prompt_head"])
 
+    def test_soft_denied_read_with_empty_answer_is_a_denied_round(self):
+        """The second dead round: plan mode soft-denies one ``read_file`` outside the
+        workspace, the step ends DONE with no error, the turn ends with an empty answer
+        and agy says SUCCESS with ``denied_actions``. cairn ends it as ``denied``."""
+        outside = str(self.root / "elsewhere" / "plan.md")
+        result, data = self.run_agy(env={"STUB_SOFT_DENY": outside})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        assert data is not None
+        self.assertEqual(
+            (data["status"], data["outcome"], data["exit_code"]), ("denied", "denied", 2)
+        )
+        self.assertTrue(data["retryable"])
+        self.assertIsNone(data["last_message"])
+        self.assertEqual(data["usage"]["denied_actions"], ["read_file"])
+        self.assertEqual(data["denied"][0]["tool"], "read_file")
+        error = data["error"]
+        self.assertIn("agy auto-denied 1 tool call(s)", error)
+        self.assertIn("read_file(<absolute dir>) in permissions.allow", error)
+        self.assertIn("--extra --add-dir <dir>", error)
+        self.assertFalse(any(w.startswith("permissions: ") for w in data["warnings"]))
+        self.assertFalse(any(w.startswith("empty answer") for w in data["warnings"]))
+        run_dir = self.run_dirs("antigravity")[0]
+        self.assertEqual(json.loads((run_dir / "result-01.json").read_text())["status"], "denied")
+        self.assertEqual(
+            self.thread(data["thread_id"], "antigravity")["rounds"][0]["outcome"], "denied"
+        )
+        # The adopt path (a dead runner, ``cairn invoke wait``) reaches the same verdict.
+        runner = self.spawn(
+            "antigravity",
+            "--json",
+            "--cd",
+            self.cwd,
+            "--prompt",
+            "x",
+            env={"STUB_SOFT_DENY": outside, "STUB_SLEEP": "3"},
+        )
+        state = self.started_round("antigravity")
+        tid = state["thread_id"]
+        peer_pid = state["rounds"][0]["peer_pid"]
+        os.kill(runner.pid, signal.SIGKILL)
+        runner.wait()
+        self.wait_for(lambda: self.gone(runner.pid))
+        self.wait_for(lambda: self.gone(peer_pid))
+        result, data = self.invoke("wait", tid, "--json")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "denied")
+        self.assertIn("read_file", data["error"])
+        self.assertEqual(data["denied"][0]["tool"], "read_file")
+
     def test_partial_refusal_warns_and_the_result_lists_files_written(self):
         (self.agy_store / "settings.json").write_text(
             json.dumps({"permissions": {"allow": ["command(rg)"], "deny": ["command(curl)"]}})

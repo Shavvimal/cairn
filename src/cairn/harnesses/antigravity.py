@@ -33,8 +33,13 @@ spawn), and reads the route agy actually took from its ``--log-file``:
 ``aiplatform.googleapis.com/v1/projects/<id>/`` request URLs (verified live).
 
 Permissions (``<app data>/settings.json``, key ``permissions``): headless agy cannot
-prompt, so a tool call that needs approval is auto-denied and the turn goes on without
-it; the ``result`` event then lists ``denied_actions`` and still says ``SUCCESS``. A
+prompt, so a tool call that needs approval is auto-denied. A refused shell command ends
+its step in state ``ERROR`` ("permission check failed") and the turn goes on without it.
+A soft-denied ``read_file`` (a path outside the workspace in plan mode, verified live on
+agy 1.4.8) leaves no error in the stream: its step ends ``DONE``, the log says
+``Print mode: soft-denying tool confirmation "ReadFile" at step N``, and the turn ends
+right there with an empty answer. Either way the ``result`` event lists
+``denied_actions`` and still says ``SUCCESS``. A
 ``command(<prefix>)`` allow rule (word-by-word prefix match; ``command(regex:...)`` for
 a pattern) lets a shell command run in every mode but ``--dangerously-skip-permissions``,
 which needs none; every segment of a compound command (``a && b``, pipes) needs its own
@@ -183,6 +188,7 @@ WRITE_TOOLS: frozenset[str] = frozenset(
     {"write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file"}
 )
 COMMAND_TOOL = "run_command"
+READ_TOOL = "read_file"
 _DENIAL_MARKERS = ("permission check failed", "denied permission", "user denied")
 _PATH_PARAMETERS = ("TargetFile", "AbsolutePath", "Path", "File")
 _COMPOUND_SPLIT = re.compile(r"\s*(?:&&|\|\||\||;)\s*")
