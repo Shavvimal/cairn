@@ -118,10 +118,20 @@ codex plugin add cairn@cairn
 cairn hook install --harness codex
 ```
 
-Then restart Codex and review changed hooks. For Claude, upgrade the engine with
-`uv tool upgrade cairn`, run `/plugin update cairn@cairn` and `/reload-plugins`, then
-`cairn hook install --harness claude`. The guided workflow also refreshes existing
-cron entries and verifies incremental sync and search.
+Then restart Codex and review changed hooks.
+
+For a manual Claude Code update:
+
+```text
+/plugin marketplace update cairn   # refresh the marketplace so the new version is visible
+/plugin update cairn@cairn         # install the new plugin version
+/reload-plugins                    # load the updated skills
+```
+
+Then upgrade the engine with `uv tool upgrade cairn` and run
+`cairn hook install --harness claude`. Without the marketplace refresh, `/plugin update`
+reinstalls the version the marketplace last saw. The guided workflow also refreshes
+existing cron entries and verifies incremental sync and search.
 
 If your installed setup skill still says “fresh setup only”, refresh the plugin using
 the [Claude](references/harnesses/claude.md) or [Codex](references/harnesses/codex.md)

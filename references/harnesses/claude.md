@@ -65,7 +65,8 @@ Use the current session ID supplied by Claude or verified `CLAUDE_CODE_SESSION_I
 variable Claude Code exports to every tool process; `CLAUDE_SESSION_ID` is only a template
 variable inside skill text and is never set in a shell); pass it
 explicitly to mutations. The plugin manifest is `.claude-plugin/plugin.json`.
-Update the engine with `uv tool upgrade cairn`, then `/plugin update cairn@cairn` and
+Update the engine with `uv tool upgrade cairn`, then `/plugin marketplace update cairn`
+(refresh the marketplace so the new version is visible), `/plugin update cairn@cairn` and
 `/reload-plugins`. Re-run `cairn hook install` after an engine reinstall.
 
 Bundled `hooks/hooks.json` supplies SessionEnd through `hooks/launch.sh`. `cairn hook
