@@ -792,13 +792,16 @@ def denial_text(denied: list[dict], permissions: dict | None) -> str:
     path = (permissions or {}).get("path") or "agy's settings.json"
     shown = denial_lines(denied[:8], permissions)
     more = f" (+{len(denied) - 8} more)" if len(denied) > 8 else ""
-    # A targetless entry stands for an action type agy counted, not for one call.
-    unit = "tool call(s)" if all(d.get("target") for d in denied) else "refusal(s)"
-    return (
-        f"agy auto-denied {len(denied)} {unit}{more}: {'; '.join(shown)}. Add the rule "
-        f"to permissions.allow in {path} (or run 'cairn hook install --harness antigravity "
-        "--grant-commands' for cairn's defaults), then resume"
-    )
+    # Entries are distinct (tool, target) pairs, or an action type agy counted with no
+    # target: never an exact count of calls.
+    if all(" denied by " in line for line in shown):
+        remedy = f"Review the deny and ask rules in {path}"
+    else:
+        remedy = (
+            f"Add the rule to permissions.allow in {path} (or run 'cairn hook install "
+            "--harness antigravity --grant-commands' for cairn's defaults)"
+        )
+    return f"agy auto-denied {len(denied)} distinct refusal(s){more}: {'; '.join(shown)}. {remedy}, then resume"
 
 
 def permissions_note(previous: dict | None, current: dict, denied_before: list[dict]) -> str | None:
@@ -2001,7 +2004,7 @@ class Runner:
         if refused and outcome != "denied":
             lines = denial_lines(refused, self.round.get("permissions"))
             self.warnings.append(
-                f"permissions: agy auto-denied {len(refused)} tool call(s), so the answer may "
+                f"permissions: agy auto-denied {len(refused)} distinct refusal(s), so the answer may "
                 f"be incomplete: {'; '.join(lines)}"
             )
         if outcome == "succeeded" and not self.round.get("last_message"):
@@ -2273,11 +2276,21 @@ def cmd_tail(
             )
             if not alive:
                 observe(config, run_dir)  # adopts when the thread lock is free
+                round_ = _select_round(ThreadState.load(run_dir / "thread.json"), number)
+                if round_.get("finished_at"):
+                    break  # ours or another reader's record: the contract, always
                 deadline = deadline or (time.monotonic() + hold)
                 if time.monotonic() > deadline:
                     break
             time.sleep(0.2)
             round_ = _select_round(ThreadState.load(run_dir / "thread.json"), number)
+    elif done is not None and not round_.get("finished_at"):
+        # A snapshot (--no-follow) of a round still in flight is not a verdict.
+        alive = identity_alive(round_.get("runner_pid"), round_.get("runner_started")) or (
+            identity_alive(round_.get("peer_pid"), round_.get("peer_started"))
+        )
+        if alive:
+            done = None
     if done is not None and not round_.get("finished_at"):
         # The fallback classifies the stream plus the peer's log, read now (after the
         # wait), so a denial the log shows by then is not missed.

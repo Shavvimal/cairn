@@ -1198,7 +1198,7 @@ class TestAntigravityRun(InvokeFixture):
         self.assertEqual(data["denied"], [{"tool": "run_command", "target": command}])
         self.assertEqual(data["usage"]["denied_actions"], ["command"])
         error = data["error"]
-        self.assertIn("agy auto-denied 1 tool call(s)", error)
+        self.assertIn("agy auto-denied 1 distinct refusal(s)", error)
         self.assertIn(
             f"`{command}` needs command(git log), command(echo) in permissions.allow", error
         )
@@ -1257,7 +1257,7 @@ class TestAntigravityRun(InvokeFixture):
         # The path comes from agy's log (the step it names) joined to the stream.
         self.assertEqual(data["denied"], [{"tool": "read_file", "target": outside}])
         error = data["error"]
-        self.assertIn("agy auto-denied 1 tool call(s)", error)
+        self.assertIn("agy auto-denied 1 distinct refusal(s)", error)
         self.assertIn(f"`{outside}` is outside the workspace", error)
         self.assertIn(f"needs read_file({self.root / 'elsewhere'}) in permissions.allow", error)
         self.assertIn(f"--extra --add-dir {self.root / 'elsewhere'}", error)
@@ -1312,9 +1312,11 @@ class TestAntigravityRun(InvokeFixture):
         self.write_config(antigravity={"quiet_after_s": 1})
         lock = invoke.ThreadLock()
         lock.acquire(run_dir)
+        started = time.monotonic()
         tailer = self.spawn("tail", data["thread_id"])
         out, err = tailer.communicate(timeout=60)
         lock.release()
+        self.assertGreaterEqual(time.monotonic() - started, 1.0)  # it held, then decided
         self.assertEqual(tailer.returncode, 2, err)
         self.assertEqual(out.splitlines()[-1], "RESULT denied")
         self.assertFalse(json.loads(path.read_text())["rounds"][0].get("finished_at"))
@@ -1443,7 +1445,9 @@ class TestAntigravityRun(InvokeFixture):
         self.assertEqual(data["files_written"], [target])
         self.assertEqual(data["denied"], [{"tool": "run_command", "target": "curl https://x.test"}])
         warning = next(w for w in data["warnings"] if w.startswith("permissions: "))
-        self.assertIn("agy auto-denied 1 tool call(s), so the answer may be incomplete", warning)
+        self.assertIn(
+            "agy auto-denied 1 distinct refusal(s), so the answer may be incomplete", warning
+        )
         self.assertIn("`curl https://x.test` denied by command(curl)", warning)
         round_ = self.thread(data["thread_id"], "antigravity")["rounds"][0]
         self.assertIn("run: rg foo src", round_["progress"])
@@ -1967,7 +1971,7 @@ class TestReplayFacts(unittest.TestCase):
             {"tool": "replace_file_content", "target": "/r/b.py"},
         ]
         text = invoke.denial_text(denied, permissions)
-        self.assertIn("agy auto-denied 4 tool call(s): ", text)
+        self.assertIn("agy auto-denied 4 distinct refusal(s): ", text)
         self.assertIn("`git diff` needs command(git diff) in permissions.allow", text)
         self.assertIn("`curl x` denied by command(curl)", text)
         self.assertIn("`rg x` (the recorded rules allow it; agy still refused it)", text)
@@ -1999,15 +2003,15 @@ class TestReplayFacts(unittest.TestCase):
         self.assertEqual(invoke.tail_line(Event("notice", text="n")), "NOTICE n")
         self.assertIsNone(invoke.tail_line(Event("done", status="succeeded")))
 
-    def test_denial_text_counts_calls_only_when_targets_are_known(self):
-        self.assertIn(
-            "agy auto-denied 1 tool call(s):",
-            invoke.denial_text([{"tool": "run_command", "target": "rg x"}], None),
-        )
-        self.assertIn(
-            "agy auto-denied 1 refusal(s):",
-            invoke.denial_text([{"tool": "read_file", "target": ""}], None),
-        )
+    def test_denial_text_remedy_follows_the_verdict(self):
+        rules = {"path": "/s.json", "allow": ["command(rg)"], "deny": ["command(curl)"], "ask": []}
+        unmatched = invoke.denial_text([{"tool": "run_command", "target": "git log"}], rules)
+        self.assertIn("agy auto-denied 1 distinct refusal(s):", unmatched)
+        self.assertIn("Add the rule to permissions.allow in /s.json", unmatched)
+        denied = invoke.denial_text([{"tool": "run_command", "target": "curl x"}], rules)
+        self.assertIn("`curl x` denied by command(curl)", denied)
+        self.assertIn("Review the deny and ask rules in /s.json, then resume", denied)
+        self.assertNotIn("permissions.allow", denied)
 
     def test_refusals_merge_the_stream_the_log_and_the_count(self):
         """``denied_actions`` counts action types; the stream and the log name calls."""
