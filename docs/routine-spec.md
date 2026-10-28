@@ -94,7 +94,7 @@ line (`invoke.py:1175-1220`) and the source exporters (`sync.py:52-54`).
       "inbox_dir": "~/projects/site/inbox",
       "runs_dir": "~/projects/site/inbox/runs"
     },
-    "prepare": ["cairn", "recall", "digest", "--day", "{{DAY}}", "--json"],
+    "prepare": ["cairn", "recall", "digest", "{{DAY}}", "--out", "{{DIGEST_DIR}}", "--json"],
     "validate": ["pnpm", "--dir", "~/projects/site", "validate", "--day", "{{DAY}}", "--attempt", "{{ATTEMPT_DIR}}"]
   }
 }
@@ -916,7 +916,8 @@ Flags:
    1. Attempt number `n` = 1 + the highest `attempt-<k>` under
       `<data_root>/routines/<name>/<DAY>/`, else 1.
    2. Create the directories (3.4). Failure: failed stamp, reason `render-error`, not
-      counted as an attempt. Continue to the next day.
+      counted as an attempt. The run then stops (step 11), and the remaining days are
+      deferred.
    3. Render the prompt to `<ATTEMPT_DIR>/prompt.md`. Render `prepare`, `validate` and
       the profile args (to `<ATTEMPT_DIR>/profile-args.json`). An unknown variable here
       ends the run: exit 2, no stamp (3.5).
@@ -926,8 +927,8 @@ Flags:
       If `remaining <= 0`: failed stamp, reason `budget-exhausted`, not counted as an
       attempt, no invoke. A `null` cost counts as 0.
    5. `prepare` (when set): run the rendered argv with `cwd=cd`, the child environment
-      (6.2.2), stdout to `<DIGEST_DIR>/prepare.out`, stderr to
-      `<ATTEMPT_DIR>/prepare.err`, timeout 600 s through `procs.run_capped` (process
+      (6.2.2), stdout to `<ATTEMPT_DIR>/prepare.out`, stderr to the routine log (its
+      head and tail), timeout 600 s through `procs.run_capped` (process
       group kill, as `sync.py:139` uses it). Exit 0: continue. Exit 3: the day has no
       input; skip invoke and `validate`, write a done stamp with status `empty`. Any
       other exit or a timeout: failed stamp, reason `prepare-exit-<code>` or

@@ -169,6 +169,7 @@ Clone the repo and `uv pip install -e .`. The editable install finds `cairn.conf
 /recall yesterday              # temporal: scan session history by date
 /recall last week
 /recall authentication work    # topic: BM25 search across QMD collections
+/recall digest yesterday       # one day's sessions condensed, every line cited to its frame
 ```
 
 ### `/search` — fast inline lookup
@@ -231,6 +232,95 @@ back from agy's log afterwards). `cairn invoke antigravity --billing ROUTE` over
 in [references/peer-review.md](references/peer-review.md); the design is in
 [docs/agent-exchange-plan.md](docs/agent-exchange-plan.md).
 
+### `cairn routine`: run a peer on a schedule
+
+A routine is a named job in config. Once a day, at a local time, launchd starts
+`cairn routine run NAME`. The run finds every UTC day in its window that has no done stamp,
+refreshes the listed session exports once, and for each day, oldest first, renders a prompt
+file, runs an optional `prepare` command, runs `cairn invoke <peer>` and then your
+`validate` command. cairn knows nothing about what the peer writes: every path comes from
+config. The config template ships one example, which runs nothing until you install it:
+
+```json
+"routines": {
+  "example-daily": {
+    "peer": "claude",
+    "prompt_file": "~/projects/site/prompts/daily.md",
+    "cd": "~/projects/site",
+    "profile": "scheduled",
+    "at": "05:20",
+    "sources": ["claude", "codex"],
+    "outputs": { "journal_dir": "{{DATA_ROOT}}/journal" },
+    "validate": ["true"]
+  }
+}
+```
+
+`peer` is `claude` or `codex`. `at` is `HH:MM` local time; the day a run works on is always
+`yesterday-utc`. Optional fields: `model`, `catch_up_days` (1 to 30, default 3),
+`timeout_s`, `budget_usd_per_day` (Claude only; the remainder for the day goes to
+`--max-budget-usd`), `outputs` (named directories, created before each attempt) and
+`prepare`. `prepare` and `validate` are argv lists, never shell strings; both run in `cd`.
+Path fields expand a leading `~` and `{{DATA_ROOT}}`, nothing else, and must end up absolute.
+
+```bash
+cairn routine run example-daily --dry-run   # print each due day's argv and rendered prompt; run nothing
+cairn routine install example-daily         # add the launchd job dev.cairn.routine.example-daily
+cairn routine kickstart example-daily       # ask launchd to start it now
+cairn routine status example-daily          # config, paths, per-day stamps, last run, cost, log tail
+cairn routine list [--json]                 # every routine with install state and last exit
+cairn routine run example-daily --day 2026-10-27 --force   # re-run one day as a new attempt
+cairn routine uninstall example-daily       # remove the job; stamps, attempts and the log stay
+```
+
+The prompt file, each `prepare` and `validate` element and the profile's `extra_args` are
+rendered per day and per attempt:
+
+| Variable | Value |
+|---|---|
+| `{{DAY}}` | the UTC day, `YYYY-MM-DD` |
+| `{{DATA_ROOT}}` | the resolved `data_root` |
+| `{{ATTEMPT_DIR}}` | `<data_root>/routines/<name>/<DAY>/attempt-<n>` |
+| `{{DIGEST_DIR}}` | `<ATTEMPT_DIR>/digest`, created empty before each attempt; pass it to `prepare` as `--out` |
+| `{{<KEY>}}` | one per `outputs` key, upper-cased: `journal_dir` gives `{{JOURNAL_DIR}}` |
+
+An unknown variable stops the run with exit 2 and no stamp, because a typo would fail every
+day the same way. `cairn invoke` itself never renders a template.
+
+Exit codes are the contract. `prepare` exit 0 continues, exit 3 means the day had no input
+(the day is stamped `empty`, and invoke and `validate` are skipped), anything else fails the
+day. After an invoke exit 0, `validate` exit 0 stamps the day `done`, exit 3 stamps it
+`empty`, and anything else (a timeout or a missing executable too) fails it. A day is done
+only after `validate` passes: an invoke that exits non-zero fails the day without running
+`validate`. A failed day is retried on the next run, up to 3 counted attempts. The run
+stops at its first failed day and defers the rest, so a systemic fault (a logged-out peer, a
+broken validator) costs one attempt per run, not one per day. `prepare` has 600 s,
+`validate` 900 s.
+
+Catch-up: launchd runs a job whose time passed during sleep once on wake, and coalesces
+several missed times into one run. That run picks up every window day still without a done
+stamp, so two days asleep cost nothing. A machine that was powered off misses the run
+entirely; the next one covers what is still inside `catch_up_days`. An older day shows as
+`expired` in `status`, and `cairn routine run NAME --day DATE` recovers it. Sources are
+refreshed with `--since` set to the ISO date one day before the oldest due day, so the
+window covers the whole UTC day in any time zone. Every listed source must refresh, or each
+day fails with `incomplete-input` and no invoke runs.
+
+Each round runs with `--owner routine:<name>`, so the peer session carries that owner label.
+A digest does not skip these sessions: it copies `owner` into each one's front matter, and
+the consumer decides what to do with them. One run at a time per routine: a second
+start logs `skipped-lock` and exits 0. `routine run` refuses to start inside a peer run.
+State lives in `$XDG_STATE_HOME/cairn/routines/<name>/` (default `~/.local/state`), each
+attempt keeps its prompt, args, invoke result, `prepare.out` (the stdout of `prepare`),
+`validate.out` and `validate.err` under `{{ATTEMPT_DIR}}`. The stderr of `prepare` goes to
+the log, `<data_root>/logs/routine-<name>.log`. Attempt
+directories are not pruned in this version.
+
+Scheduling is launchd only (macOS) in this version. On another OS `cairn routine install`
+prints the crontab line it would need and exits 2. The step-by-step operator workflow is
+[skills/cairn/workflows/routine.md](skills/cairn/workflows/routine.md); the design is in
+[docs/routine-spec.md](docs/routine-spec.md).
+
 ## Configuration
 
 Config is data, not code. `cairn config init` writes `~/.config/cairn/config.json` (XDG) —
@@ -271,6 +361,46 @@ Each collection carries a `sync` block — its on/off switch and policy:
 
 To change later, edit `sync.enabled` per collection and re-run `cairn doctor` — no reinstall.
 
+**Config profiles.** Besides the built-in `review`, `edit` and `full`, Claude and Codex take
+named profiles under `invoke.<peer>.profiles`. Each one is a built-in `base` plus
+`extra_args`, a native argv list emitted after the base's flags:
+
+```json
+"profiles": {
+  "scheduled": { "base": "edit", "extra_args": ["--permission-mode", "dontAsk", "--allowedTools", "Read,Glob,Grep,Edit,Write", "--add-dir", "{{JOURNAL_DIR}}"] }
+}
+```
+
+`--profile scheduled`, `invoke.claude.profile` and a routine's `profile` all accept the name.
+A profile cannot drop its base's deny rules or switch to a looser permission mode, and flags
+cairn sets itself (`--model`, `--resume`, `--output-format` and the like) are refused. It can
+widen what its base approves without a prompt, which is the point: in Claude, deny beats
+allow, so `--allowedTools "Bash(pnpm:*)"` plus `--disallowedTools "Bash(pnpm publish:*)"`
+runs every pnpm script except publishing. Write Bash rules in the prefix form
+`Bash(cmd:*)`; Claude does not match the space form `Bash(cmd *)`, and config validation
+warns about it. Codex `extra_args` take only `--add-dir DIR` and `-c KEY=VALUE` pairs.
+`{{NAME}}` tokens are rendered only by `cairn routine run`; plain `cairn invoke` refuses a
+profile that holds one. Set and remove profiles from the CLI:
+
+```bash
+cairn config set invoke.claude.profiles.scheduled '{"base": "edit", "extra_args": ["--permission-mode", "dontAsk"]}'
+cairn config set invoke.claude.profiles.scheduled.extra_args '["--permission-mode", "dontAsk", "--add-dir", "{{JOURNAL_DIR}}"]'
+cairn config unset invoke.claude.profiles.scheduled
+```
+
+`config set` also takes `routines.<name>` (a JSON object), `routines.<name>.<field>` and
+`routines.<name>.outputs.<key>`; argv fields take only JSON arrays. `config unset` removes a
+routine, an optional routine field, an output or a profile, and re-validates the file.
+
+**Owner labels.** `cairn invoke <peer> --owner LABEL` records who started a round, separate
+from the calling session: the thread, each round, the result line, the exchange document and
+the peer session's front matter carry `owner: LABEL`. A routine passes `routine:<name>`. On
+resume the recorded owner stays, and a different `--owner` is refused.
+
+**Journal.** The `journal` collection (`"journal": { "sync": { "enabled": true } }`) is
+store-less: nothing is exported into it, and `cairn sync` registers `<data_root>/journal` in
+QMD once a routine has written markdown there.
+
 ## Keeping it fresh
 
 `cairn sync` is a single orchestration command; each collection runs as its own subprocess, so one failing source never blocks the others. Two triggers keep context current:
@@ -288,6 +418,14 @@ actual hook discovery. Codex 0.160.0/0.163.0 currently expose portable skills/on
 but omit portable hooks; Cairn installs a narrowly owned user hook as a fallback. If a
 client discovers the bundled hook, setup removes the fallback instead. Unrelated host
 hooks are preserved. Trust is still the host's decision; inspect `/hooks`.
+
+The environment that cron, the hook launcher, the Codex and Antigravity hook registrations
+and a routine's launchd job record pins `CAIRN_CONFIG`, `PATH`, the XDG and QMD paths. It
+no longer pins `CLAUDE_CONFIG_DIR` or `CODEX_HOME` unless the host shell set them. With
+`CLAUDE_CONFIG_DIR` exported, headless `claude -p` looks for its account file at
+`<CLAUDE_CONFIG_DIR>/.claude.json` instead of `~/.claude.json` and reports `Not logged in`.
+An existing install keeps the old values until `cairn hook install` and `cairn cron install`
+run again.
 
 Codex SessionEnd occurs on normal shutdown, archive/delete of an open conversation, or
 its idle-session timeout; switching tabs does not immediately end the session. Check
@@ -336,7 +474,25 @@ Recall uses the shared exported Markdown store, independent of the active harnes
 cairn recall list yesterday --all-projects --refresh --json
 cairn recall list "last week" --source codex --project /absolute/project
 cairn recall expand codex:FULL_ID --max-msgs 30 --max-chars 20000
+cairn recall digest yesterday --all-projects --json
+cairn recall frame claude:FULL_ID 12 --frames DIR/claude-SHORTID.frames.jsonl
 ```
+
+`digest` condenses one UTC day of sessions for a model to read, with provenance. Each
+session gives two files in `--out` (default `$XDG_CACHE_HOME/cairn/digests/DATE/`):
+`<source>-<shortid>.md`, the condensed body with one `<!-- fN TS ROLE -->` marker per frame,
+and `<source>-<shortid>.frames.jsonl`, one row per frame with its offset, length and hash.
+The digest ordinal `N` is the stable id; the `cairn:turn` markers in an export are length
+frames, not ids. `cairn recall frame REF ORDINAL` prints one frame as exported, and with
+`--frames` it warns when the frame changed since the digest. Dates are those of the
+exported frames: a Codex tool result that arrives after midnight stays on its call's day.
+
+`--json` prints `{"sessions": [...], "skipped": [...]}`: one row per written session (`ref`,
+`path`, `frames_path`, `role`, `parent`, `project`, `cwd`, `frames_today`, `chars`,
+`truncated`), and one `{"ref", "reason"}` per legacy or corrupt export left out. Exit 0
+means at least one session was written. Exit 3 means an empty day: no session qualified,
+so the directory holds only its marker. This is the routine's `prepare` contract, so a
+digest as `prepare` stamps such a day `empty`.
 
 Dates are UTC and match recorded activity, not every day between start and finish.
 Listing defaults strictly to the current directory; use `--all-projects` to broaden it.

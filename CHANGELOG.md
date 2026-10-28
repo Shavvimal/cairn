@@ -5,6 +5,84 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.0]
+
+### Added
+- `cairn recall digest DATE`: one UTC day of sessions condensed for a model to read, with
+  provenance. Each session gives `<source>-<shortid>.md` (user text, assistant prose,
+  one line per tool call, the head and tail of each tool output, no reasoning) and
+  `<source>-<shortid>.frames.jsonl` (ordinal, UTC time, role, offset from the
+  `## Conversation` heading, length, `sha1_8`, `in_window`, `kept` for every frame of
+  the session). A `<!-- fN TS ROLE -->` marker cites frame ordinal `N`, the stable id;
+  the `cairn:turn` markers stay length frames. The window must be one day.
+  `--min-msgs` defaults to 1, so short sessions appear. `--max-chars` (default 40000)
+  caps each body by whole frames, keeping user frames, then the tail, then the head.
+  Output goes to `$XDG_CACHE_HOME/cairn/digests/DATE/` by default; `--out` refuses a
+  non-empty directory without the `.cairn-digest` marker. A peer session from
+  `cairn invoke` keeps the start of its prompt and one answer per round, and names its
+  caller as `parent`. A legacy or corrupt export is skipped with a warning, never
+  guessed, and `--json` lists both under `skipped`; exit 3 means an empty day (nothing written).
+- `cairn recall frame REF ORDINAL [--frames FILE]`: prints one frame exactly as exported.
+  With the sidecar it checks offset, length and hash, and on a change prints a warning
+  on stderr and the current frame, exit 0.
+- `cairn routine install | uninstall | run | list | status | kickstart`: a named job under
+  `routines` in config that runs a prompt file through `claude` or `codex` once a day.
+  launchd starts `cairn routine run NAME` at `at` (local time); each run handles every UTC
+  day in the last `catch_up_days` (default 3) without a done stamp, oldest first: refresh
+  the listed `sources` once (`--since` the ISO date before the oldest day), render the
+  prompt, run `prepare`, run `cairn invoke <peer> --owner routine:NAME`, run `validate`.
+  Template variables `{{DAY}}`, `{{DATA_ROOT}}`, `{{ATTEMPT_DIR}}`, `{{DIGEST_DIR}}` and
+  one `{{KEY}}` per `outputs` key; an unknown one exits 2 with no stamp. Exit 0 from
+  `validate` stamps the day `done`, 3 stamps it `empty`, anything else fails it; `prepare`
+  exit 3 stamps `empty` and skips the peer. A day is done only after `validate` passes. A
+  failed day is retried up to 3 attempts, and a run stops at its first failed day.
+  `budget_usd_per_day` (Claude only) caps a day's spend through `--max-budget-usd`.
+  `run --dry-run` prints every argv and the rendered prompt; `run --day D --force` re-runs
+  one day. Stamps live under `$XDG_STATE_HOME/cairn/routines/NAME/`, each attempt under
+  `<data_root>/routines/NAME/DAY/attempt-N/`, the log at
+  `<data_root>/logs/routine-NAME.log`. `kickstart` leaves a running instance alone unless
+  `--force-restart`. launchd only (macOS): on another OS `install` prints the crontab line
+  and exits 2. The config template ships `example-daily`, which runs nothing until
+  installed. The workflow is `skills/cairn/workflows/routine.md`.
+- Config profiles: `invoke.claude.profiles` and `invoke.codex.profiles` hold named profiles,
+  each a built-in `base` (`review`, `edit`, `full`) plus `extra_args` emitted after the
+  base's flags. A profile cannot drop its base's deny rules or switch to a looser
+  permission mode; flags cairn sets itself are refused. Claude: one `--permission-mode`
+  (the profile's replaces the base's), `--disallowedTools` appends to `review`'s list,
+  `--allowedTools` and `--disallowedTools` take one comma-joined string, and a Bash rule in
+  the space form `Bash(cmd *)` warns, because Claude matches only `Bash(cmd:*)`. Codex:
+  only `--add-dir DIR` and `-c KEY=VALUE` pairs; a resume drops `--add-dir` with a warning.
+  A resumed thread reuses the recorded profile args, not today's config. An explicit
+  `--permission-mode` or `--sandbox` replaces only the mode of a config profile.
+- `cairn invoke --profile-args-file PATH`: plumbing for `cairn routine run`, a JSON array of
+  rendered args that replaces a config profile's `extra_args` for one round. Plain `cairn
+  invoke` refuses a profile whose args hold a `{{NAME}}` token.
+- `cairn invoke --owner LABEL`: an owner label on the thread, each round, the result line,
+  the exchange document and the peer session's front matter (`owner:`, kept across
+  re-exports). A resume keeps the recorded owner and refuses a different one.
+- The `journal` collection in the config template: a store-less collection that `cairn
+  sync` registers as `<data_root>/journal` once a routine has written markdown there.
+  `config show` labels a store-less collection other than `service-docs` as `notes`.
+- `cairn config unset KEY` for `routines.<name>`, an optional routine field, a routine
+  output and `invoke.<peer>.profiles.<name>`. It re-validates the file and restores it on
+  failure. Unsetting a routine reminds you that its launchd job stays until `cairn routine
+  uninstall`.
+
+### Changed
+- `--profile` and `invoke.<peer>.profile` accept a config profile name next to the
+  built-ins.
+- `cairn config set` takes JSON objects for `routines.<name>` and
+  `invoke.<peer>.profiles.<name>`, JSON arrays for argv fields (`prepare`, `validate`,
+  `extra_args`), and a JSON array or comma list for `routines.<name>.sources`.
+
+### Fixed
+- The recorded background environment (cron line, hook launcher, Codex and Antigravity hook
+  registrations, a routine's launchd job) no longer pins `CLAUDE_CONFIG_DIR` and
+  `CODEX_HOME` unless the host set them. With `CLAUDE_CONFIG_DIR` exported, headless
+  `claude -p` read `<dir>/.claude.json` instead of `~/.claude.json` and reported `Not
+  logged in`. An existing install picks up the change on the next `cairn hook install` and
+  `cairn cron install`.
+
 ## [2.8.1]
 
 ### Changed

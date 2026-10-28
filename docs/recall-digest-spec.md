@@ -66,7 +66,7 @@ cairn recall digest DATE [--all-projects | --project P] [--source S]...
 | `--include-subagents` | off | Also digest subagent transcripts (records with `parent_session_id`, `src/cairn/store.py:123-126`). |
 | `--min-msgs N` | `1` | Skip a session whose front matter `user_message_count` is below `N`. Same test as `recall list` (`src/cairn/recall.py:109-114`): a subagent is exempt, and a record with an unknown count (`None`) passes. The default is 1, not 3, so that short sessions appear. `N < 0` fails with exit 1 (parity with `src/cairn/recall.py:84-85`). |
 | `--out DIR` | `$XDG_CACHE_HOME/cairn/digests/YYYY-MM-DD/` (falls back to `~/.cache`, as `catalog_path` does at `src/cairn/catalog.py:38-41`) | Output directory. See 2.3 for the safety rule. The default sits outside the corpus and outside the current directory, so a digest never lands in a git repository or in the QMD-indexed data root. |
-| `--json` | off | Print one JSON array of written-session rows to stdout (section 8.3). Without it, print a human summary. |
+| `--json` | off | Print one JSON object to stdout, `{"sessions": [rows], "skipped": [{ref, reason}]}` (section 8.4, answer 2). Without it, print a human summary. |
 | `--max-chars N` | `40000` | Hard cap on each digest body, applied to whole frames (section 5.3). Must be positive, else exit 1. |
 | `--refresh` | off | Export first through `recall.refresh(args.source)` (`src/cairn/recall.py:21-47`), exactly as `recall list --refresh` does (`src/cairn/recall.py:86-87`). Not in the brief: added because an unattended routine at 00:05 must not digest a store that missed the last hour. A refresh failure exits 1 before anything is written. |
 
@@ -74,10 +74,10 @@ Exit codes:
 
 | Code | When |
 |---|---|
-| 0 | Success, including a day with zero qualifying sessions (an empty JSON array or `0 sessions`). Legacy files that were skipped do not change the code. |
+| 0 | At least one session was written. Sessions skipped as legacy or corrupt (section 3.4) do not change the code: each prints a stderr warning and appears in `skipped[]` of the `--json` output. |
 | 1 | `ValueError`, `ConfigError`, `OSError` or `subprocess.TimeoutExpired`, caught by the existing handler at `src/cairn/recall.py:155-157`: bad date, multi-day window, bad limit, refresh failure, unsafe `--out`. |
 | 2 | argparse usage error (argparse's own exit). |
-| 3 | Partial: at least one session in the window was skipped because its frames did not walk (section 3.4, "corrupt"). Every other session was still written. A routine can alert on 3 and still use the output. |
+| 3 | Empty day: zero sessions were written (no qualifying session, or every candidate was skipped). This matches the routine's `prepare` contract (0 continue, 3 empty day, any other code failed). The output directory still gets its marker and loses stale digest files. |
 
 ### 2.2 `cairn recall frame`
 
@@ -282,7 +282,8 @@ Decision: the digest refuses both cases and assigns no ordinals.
   `Warning: skipping SOURCE:ID: legacy export without frames; run cairn SOURCE export --all`
   on stderr, and leave the exit code unchanged.
 - Corrupt (a heading with markers whose walk fails): skip the session, print
-  `Warning: skipping SOURCE:ID: frame walk failed at character K`, and exit 3 at the end.
+  `Warning: skipping SOURCE:ID: frame walk failed at character K`, list it in `skipped[]`
+  with reason `corrupt`, and leave the exit code to the count of written sessions (2.1).
 
 Justification:
 
@@ -483,9 +484,11 @@ For each candidate record, in this order:
    as a `user_message` before the prompt; `user_message` at
    `src/cairn/sources/codex.py:214-225` takes both event and response items). If the
    match names a caller, `role: peer`, `parent` = the caller reference.
-4. Orphan peer. A preamble match that names no caller (`an operator`), or a caller whose
+4. Orphan peer. A preamble match that names no caller (`an operator`, or an owner label
+   such as `routine:daily` from `cairn invoke --owner`), or a caller whose
    reference fails `_LINK_REF`-style validation (`src/cairn/mutations.py:36-37`):
-   `role: primary`, `parent: null`, `orphan_peer: true`. It is condensed as a primary
+   `role: primary`, `parent: null`, `orphan_peer: true`. An owner label from the
+   preamble fills `owner` when the front matter has none. It is condensed as a primary
    session, so nothing is lost when lineage is unknown.
 5. Otherwise `role: primary`, `parent: null`.
 
@@ -520,10 +523,15 @@ Regex (applied with `re.match` to the user text, after the header line and blank
 INVOKE_PREAMBLE = re.compile(
     r"\[cairn invoke\] You are (?P<peer>[a-z][a-z0-9-]*) being invoked by "
     r"(?:(?P<caller_source>[a-z][a-z0-9-]*) session "
-    r"(?P<caller>(?P<ref_source>[a-z][a-z0-9-]*):\S+)|an operator) "
+    r"(?P<caller>(?P<ref_source>[a-z][a-z0-9-]*):\S+)|an operator"
+    r"|(?P<owner>[A-Za-z0-9][A-Za-z0-9._:-]{0,127})) "
     r"via cairn \(round (?P<round>\d+)\)\."
 )
 ```
+
+The `owner` branch matches `who` when `cairn invoke --owner LABEL` runs with no caller
+(`preamble()` in `src/cairn/invoke.py`); the label follows `OWNER_RE`
+(`src/cairn/mutations.py`).
 
 After a match, require `caller_source == ref_source` when a caller is present; if not,
 treat the match as an orphan. Callers come from `--parent` (`claude:` or `codex:` only,
@@ -675,7 +683,9 @@ the first `## Artifacts` section, take each list item: ``- `PATH` `` (Claude and
 `render_artifacts`, `src/cairn/rendering.py:92-100`) gives `PATH`; `- [LABEL](URI)`
 (Antigravity, `src/cairn/sources/antigravity.py:440-446`) gives `URI`. The `**Created:**`
 and `**Modified:**` labels are not kept. Codex documents have no `## Artifacts` section
-(`src/cairn/sources/codex.py:596-620`), so the list is empty.
+(`src/cairn/sources/codex.py:596-620`), so the list is empty. Each item is written as a
+double-quoted string, `"` escaped as `\"` (`_escape_scalar`, `src/cairn/frontmatter.py`),
+like every other string value.
 
 Example (fixture values only):
 
@@ -697,8 +707,8 @@ frames_today: 6
 frames_total: 14
 raw_chars_today: 18342
 artifacts:
-  - src/widget/retry.py
-  - tests/test_retry.py
+  - "src/widget/retry.py"
+  - "tests/test_retry.py"
 truncated_frames: 0
 truncated_chars: 0
 ---
@@ -751,30 +761,34 @@ The first frame's offset is 17: `len("## Conversation\n")` is 16, plus the blank
 
 ### 8.4 `--json` stdout
 
-One JSON array (`json.dumps(rows, indent=2)`, as `recall list` does at
+One JSON object, `{"sessions": rows, "skipped": skipped}` (`json.dumps(..., indent=2)`, as `recall list` does at
 `src/cairn/recall.py:134-135`), one object per written session, sorted by `first_ts`
 then `ref`:
 
 ```json
-[
-  {
-    "ref": "claude:3f2a9c1e-7b4d-4e2a-9c1e-000000000001",
-    "path": "~/.cache/cairn/digests/2026-03-28/claude-3f2a9c1e7b4d.md",
-    "frames_path": "~/.cache/cairn/digests/2026-03-28/claude-3f2a9c1e7b4d.frames.jsonl",
-    "role": "primary",
-    "parent": null,
-    "project": "demo",
-    "cwd": "/tmp/demo",
-    "frames_today": 6,
-    "chars": 1388,
-    "truncated": {"frames_dropped": 0, "chars_dropped": 0}
-  }
-]
+{
+  "sessions": [
+    {
+      "ref": "claude:3f2a9c1e-7b4d-4e2a-9c1e-000000000001",
+      "path": "~/.cache/cairn/digests/2026-03-28/claude-3f2a9c1e7b4d.md",
+      "frames_path": "~/.cache/cairn/digests/2026-03-28/claude-3f2a9c1e7b4d.frames.jsonl",
+      "role": "primary",
+      "parent": null,
+      "project": "demo",
+      "cwd": "/tmp/demo",
+      "frames_today": 6,
+      "chars": 1388,
+      "truncated": {"frames_dropped": 0, "chars_dropped": 0}
+    }
+  ],
+  "skipped": []
+}
 ```
 
 `path` and `frames_path` are absolute in real output (the `~` above is for the
 example). `chars` is the digest body length. Skipped sessions (legacy, corrupt) are not
-rows; they are stderr warnings, and corrupt ones set exit 3.
+rows; they are stderr warnings and entries of `skipped[]`. With `--json`, stdout is one
+object, `{"sessions": [rows], "skipped": [{"ref", "reason"}]}` (answer 2).
 
 Without `--json`, stdout is one line per written session,
 `REF  ROLE  frames_today=N  chars=C  [truncated F]`, then
@@ -826,7 +840,8 @@ fenced `## Conversation` line, then these messages:
 | `test_frame_warns_on_rerender` | Edit one character inside frame 4's body and fix its `N` (simulating a re-render): `recall frame --frames ... 4` exits 0, prints the new body, and stderr contains `changed since the digest`. |
 | `test_frame_ordinal_out_of_range` | Exit 1 with `out of range`. |
 | `test_legacy_file_is_skipped_not_guessed` | The legacy document from `tests/test_shared_store.py:333-336` with today's date: no output file, a `legacy export without frames` warning, exit 0. `recall frame legacy 0` exits 1. |
-| `test_corrupt_frame_sets_exit_3` | Change one declared `N` in a second session: that session is skipped with `frame walk failed at character`, the fixture session is still written, exit 3. |
+| `test_corrupt_frame_is_skipped_with_exit_0` | Change one declared `N` in a second session: that session is skipped with `frame walk failed at character`, the fixture session is still written, exit 0. |
+| `test_only_skipped_sessions_is_an_empty_day` | The only candidate is legacy: no session written, `skipped[]` lists it, exit 3. |
 
 ### 9.3 Window and condensing tests
 
@@ -944,7 +959,7 @@ Do the steps in order. Run `make check` (ruff, ruff format, mypy, unittest;
 ## 13. Maintainer answers (proposed by the implementing agent, 2026-10-28, pending the owner's review)
 
 1. `owner` is written by `cairn invoke --owner` into the preserved tail of the peer session's front matter in the `exported` step (see `docs/routine-spec.md` section 5). Exporters stay unchanged. Digest copies it when present.
-2. `--json` also lists skipped sessions in a `skipped[]` array with `{ref, reason: legacy|corrupt}`.
+2. `--json` also lists skipped sessions in a `skipped[]` array with `{ref, reason: legacy|corrupt}`; stdout is `{"sessions": [...], "skipped": [...]}`. Exit codes follow the routine's `prepare` contract: 0 when at least one session was written (skips only warn), 3 when zero sessions were written for the day, 1 on an error, 2 on usage.
 3. A hash mismatch in `recall frame` prints the warning and exits 0; the frame it prints is still the best available evidence.
 4. `expand` moves to the anchored walker in a later PR, tracked as a follow-up issue.
 5. Yes, a peer digest keeps the first 300 characters of its prompt.

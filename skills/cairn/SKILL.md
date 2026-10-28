@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: Exports, lists, annotates, and resumes local AI coding sessions (Claude Code, Codex, Cursor) plus Granola meetings and service docs to searchable markdown via the cairn CLI. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "resume session", "add session note", "close session", "log session", "sync docs", "sync service docs", or "meeting transcripts". Covers per-source export/list/context/note/close/log, Claude and Codex resume, the top-level sync/doctor/config/cron commands, and the config-driven enablement model. Requires the cairn CLI - install via /cairn:setup.
+description: Exports, lists, annotates, and resumes local AI coding sessions (Claude Code, Codex, Cursor) plus Granola meetings and service docs to searchable markdown via the cairn CLI. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "resume session", "add session note", "close session", "log session", "sync docs", "sync service docs", "meeting transcripts", or "scheduled routine". Covers per-source export/list/context/note/close/log, Claude and Codex resume, the top-level sync/doctor/config/cron/routine commands, and the config-driven enablement model. Requires the cairn CLI - install via /cairn:setup.
 allowed-tools: Bash, Read
 ---
 
@@ -89,10 +89,15 @@ Config resolution: `$CAIRN_CONFIG`, else `$XDG_CONFIG_HOME/cairn/config.json` (e
 ```bash
 cairn sync [--hook | --cron | --all]   # sync enabled sources, then refresh QMD index
 cairn recall list <date> | expand <id> # temporal session timeline (drives /cairn:recall)
+cairn recall digest <date> | frame <ref> <n>  # one day condensed with provenance; open a cited frame
 cairn doctor [--strict-index]          # check install, config, qmd + index, cron, PATH, stores
 cairn config show [--json]             # print resolved config + integrations
-cairn config init [--enable ...] | set KEY VALUE | path
+cairn config init [--enable ...] | set KEY VALUE | unset KEY | path
 cairn cron install | uninstall         # manage the hourly sync crontab entry
+cairn routine install | uninstall NAME # add / remove a routine's launchd job (macOS)
+cairn routine run NAME [--day D] [--force] [--dry-run]   # run the due days now
+cairn routine list | status NAME [--json]   # routines, stamps, last run, cost, log tail
+cairn routine kickstart NAME [--force-restart]   # ask launchd to start the job now
 cairn help                             # overview an agent can read to drive the tool
 cairn --version
 ```
@@ -100,6 +105,11 @@ cairn --version
 `--hook` is the legacy fast sync (on_hook sources only); `--cron` is the hourly
 full sync; `--all` also updates and embeds every enabled source using its configured window. Temporal recall has
 its own skill (`/cairn:recall`); `cairn recall --help` shows its args.
+
+A routine runs a prompt file through `claude` or `codex` once a day for each UTC day without
+a done stamp, and stamps a day done only after its `validate` command exits 0 (3 means done
+and empty). Set one up, dry-run, install, read status and re-run a day: see
+`workflows/routine.md`.
 
 ## Peer agents and fan-out health
 
@@ -121,6 +131,10 @@ cairn agents wait --session SOURCE:ID [--timeout-s N]      # block until the fan
 The `invoke-codex`, `invoke-claude` and `invoke-antigravity` skills drive these; the doctrine for adversarial
 review lives in `references/peer-review.md`. Defaults (model, effort, profile, timeouts) are
 config as data under the `invoke` block: `cairn config set invoke.codex.effort medium`.
+Claude and Codex also take named profiles under `invoke.<peer>.profiles`: a built-in `base`
+plus native `extra_args`, usable as `--profile NAME`. A profile cannot drop its base's deny
+rules or switch to a looser permission mode. `--owner LABEL` records who started a round
+(`routine:<name>` for a routine) on the thread, the result line and the peer session.
 
 ## One folder per session
 
@@ -150,5 +164,6 @@ Each source's data location, frontmatter schema, and source-specific commands:
 ## Annotation workflow
 
 To log/annotate the current session (CLI forms, natural-language parsing, auto-summary,
-status and tag values): see `workflows/log-session.md`. Valid tags live in
+status and tag values): see `workflows/log-session.md`. To schedule a daily peer run, see
+`workflows/routine.md`. Valid tags live in
 `schema/tags.yaml`.

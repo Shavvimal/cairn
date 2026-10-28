@@ -45,6 +45,13 @@ not an operating-system sandbox; Claude's own sandbox settings are separate.
 `--permission-mode` passes a native mode directly and overrides the profile. The record
 stores the exact flags that ran.
 
+`--profile` also accepts a name from `invoke.claude.profiles` in the config: a built-in
+`base` plus `extra_args` such as `--allowedTools` and `--disallowedTools`, each one
+comma-joined string. Such a profile cannot drop its base's deny rules or switch to a looser
+permission mode, and deny beats allow. Bash rules use the prefix form `Bash(cmd:*)`. A
+profile holding `{{NAME}}` tokens runs only through `cairn routine run`. `--owner LABEL`
+records who started the round (a routine passes `routine:<name>`); a resume keeps it.
+
 ## 4. Run in the background
 
 Start it the way the host reference describes (Claude: `Bash` with `run_in_background:
