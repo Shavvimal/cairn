@@ -122,6 +122,39 @@ class TestBackgroundEnvironment(StoreFixture):
             self.assertEqual(relative["QMD_CONFIG_DIR"], os.path.abspath("relative-qmd"))
             self.assertEqual(relative["INDEX_PATH"], os.path.abspath("relative-index.sqlite"))
 
+    def test_background_environment_can_omit_agent_homes(self):
+        with patch.dict(os.environ):
+            os.environ.pop("CODEX_HOME", None)
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            environment = background_environment(config.get_config())
+            self.assertNotIn("CODEX_HOME", environment)
+            self.assertNotIn("CLAUDE_CONFIG_DIR", environment)
+            pinned = background_environment(config.get_config(), pin_agent_homes=True)
+            home = Path.home()
+            self.assertEqual(pinned["CODEX_HOME"], str((home / ".codex").resolve()))
+            self.assertEqual(pinned["CLAUDE_CONFIG_DIR"], str((home / ".claude").resolve()))
+
+    def test_background_environment_keeps_agent_homes_the_host_set(self):
+        with patch.dict(os.environ, {"CODEX_HOME": "relative-codex"}):
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            environment = background_environment(config.get_config())
+            self.assertEqual(environment["CODEX_HOME"], os.path.abspath("relative-codex"))
+            self.assertNotIn("CLAUDE_CONFIG_DIR", environment)
+
+    def test_hook_registrations_omit_unset_agent_homes(self):
+        from cairn.harnesses.antigravity_registration import hook_command
+
+        with patch.dict(os.environ):
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            os.environ.pop("CODEX_HOME", None)
+            command = hook_command(config.get_config())
+            hooks.install_launcher(config.get_config())
+        self.assertNotIn("CLAUDE_CONFIG_DIR=", command)
+        self.assertNotIn("CODEX_HOME=", command)
+        launcher = hooks.launcher_path().read_text()
+        self.assertNotIn("CLAUDE_CONFIG_DIR", launcher)
+        self.assertNotIn("CODEX_HOME", launcher)
+
     def test_recorded_config_directory_preserves_a_symlinked_config_file(self):
         directory = self.root / "xdg/qmd"
         directory.mkdir(parents=True)

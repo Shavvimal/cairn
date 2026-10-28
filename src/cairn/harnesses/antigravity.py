@@ -334,8 +334,18 @@ class Antigravity:
 
     # ---- invoke --------------------------------------------------------------
 
-    def policy_argv(self, profile: str, native: tuple[str, ...] = ()) -> tuple[str, ...]:
-        """The exact native permission flags: ``native`` when given, else the profile's."""
+    def policy_argv(
+        self,
+        profile: str,
+        native: tuple[str, ...] = (),
+        profile_args: tuple[str, ...] | None = None,
+    ) -> tuple[str, ...]:
+        """The exact native permission flags: ``native`` when given, else the profile's.
+
+        Antigravity takes no config profiles, so ``profile_args`` must be ``None``.
+        """
+        if profile_args is not None:
+            raise ValueError("antigravity takes no config profiles")
         if native:
             return native
         try:
