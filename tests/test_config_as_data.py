@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from cairn import config, sync
@@ -122,7 +123,8 @@ class TestInvokePolicyParsing(unittest.TestCase):
         data = json.loads(config.example_template_text())
         policy = config._build(data, Path("/tmp/x.json"), None).invoke
         self.assertEqual((policy.codex.model, policy.codex.effort), ("gpt-6-astra", "high"))
-        self.assertEqual(policy.claude, config.PeerPolicy())
+        self.assertEqual(replace(policy.claude, profiles={}), config.PeerPolicy())
+        self.assertEqual(policy.claude.profiles["scheduled"].base, "edit")
 
 
 class TestSyncPlan(unittest.TestCase):

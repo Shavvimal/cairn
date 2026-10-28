@@ -36,6 +36,17 @@ LINK_ROLES: Final[frozenset[str]] = frozenset({"parent", "child", "peer"})
 _LINK_SOURCES: Final[tuple[str, ...]] = tuple(s.source for s in SOURCES if s.session_type)
 _LINK_REF: Final[re.Pattern[str]] = re.compile(rf"^({'|'.join(_LINK_SOURCES)}):\S+$")
 
+# An owner label (``cairn invoke --owner``): safe to emit unquoted in front matter.
+OWNER_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def invalid_owner_message(owner: str) -> str:
+    """Canonical error text for an owner label outside :data:`OWNER_RE`."""
+    return (
+        "--owner must be 1 to 128 characters from A-Z, a-z, 0-9, '.', '_', ':' and '-', "
+        f"got {owner!r}"
+    )
+
 
 def is_valid_status(status: str) -> bool:
     """Whether ``status`` is a recognised session lifecycle status (see VALID_STATUSES)."""
@@ -189,13 +200,32 @@ def add_link(find_file: FindFile, session_id: str, role: str, ref: str) -> bool:
     return True
 
 
+def set_owner(find_file: FindFile, session_id: str, owner: str) -> bool:
+    """Set the owner label (``owner:`` in the preserved tail) of a session document.
+
+    Newlines are stripped and the label must match :data:`OWNER_RE`. Idempotent.
+    """
+    owner = owner.replace("\n", "").replace("\r", "").strip()
+    if not OWNER_RE.match(owner):
+        print(f"Error: {invalid_owner_message(owner)}", file=sys.stderr)
+        return False
+
+    def mutate(fm: dict) -> None:
+        fm["owner"] = owner
+
+    return _mutate_file(find_file, session_id, mutate)
+
+
 __all__ = [
     "LINK_ROLES",
+    "OWNER_RE",
     "VALID_STATUSES",
     "add_comment",
     "add_link",
+    "invalid_owner_message",
     "invalid_status_message",
     "is_valid_status",
+    "set_owner",
     "set_session_rating",
     "set_session_status",
     "set_session_tags",

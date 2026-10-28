@@ -11,7 +11,10 @@ stdout tee), ``stderr-NN.log``, ``answer-NN.md`` and ``result-NN.json``.
 Round lifecycle:
 
 1. Resolve settings (CLI > recorded thread settings on resume > config policy),
-   the caller session, the depth guard and the model self-check.
+   the caller session, the depth guard and the model self-check. A profile is a
+   built-in (``review``, ``edit``, ``full``) or a config profile
+   (``invoke.<peer>.profiles``: a base plus native ``extra_args``); a resume without
+   ``--profile`` reuses the recorded base and args verbatim, never today's config.
 2. Take the per-thread lock (D19) without blocking; a second caller gets
    ``busy`` (exit 75) and nothing is spawned. The lock is held until the round,
    including the post-run pipeline, is finalised. A thread whose id is not known
@@ -63,11 +66,14 @@ from .config import (
     BILLING_ROUTES,
     INVOKE_PEERS,
     PROFILES,
+    TEMPLATE_TOKEN_RE,
     BillingPolicy,
     CairnConfig,
     ConfigError,
     PeerPolicy,
+    check_profile_args,
     get_config,
+    resolve_profile,
 )
 from .exchange import ThreadState, now_iso, write_exchange
 from .harnesses import Event, Harness, InvokeRequest, detect_harness, get_harness, is_client_error
@@ -88,7 +94,9 @@ from .harnesses.antigravity import (
     resolved_project,
 )
 from .harnesses.claude import KEYCHAIN_GUIDANCE, keychain_failure
+from .harnesses.codex import resume_warnings
 from .health import Health, classify, heartbeat, identity_alive, parse_iso, process_identity
+from .mutations import OWNER_RE, invalid_owner_message
 from .registry import BY_NAME
 from .storage import atomic_write, lock_path, locked
 
@@ -520,6 +528,23 @@ def _step_exported(config: CairnConfig, state: ThreadState, round_: dict) -> Non
     )
     state.peer_session_doc = str(document)
     round_["peer_session_doc"] = str(document)
+    if state.owner:
+        _set_owner(state)
+
+
+def _set_owner(state: ThreadState) -> None:
+    """Write the thread's owner label into the peer session document's preserved tail."""
+    from .mutations import set_owner
+
+    assert state.thread_id is not None and state.owner is not None
+    source = _load_source(state.peer)
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            written = set_owner(source.find_file, state.thread_id, state.owner)
+    finally:
+        source.flush_catalog()
+    if not written:
+        raise RuntimeError("owner not written on the peer document")
 
 
 def _step_caller_exported(config: CairnConfig, state: ThreadState, round_: dict) -> None:
@@ -1196,6 +1221,7 @@ def round_result(
         "native_policy": round_.get("native_policy"),
         "cwd": state.cwd if state else None,
         "caller": round_.get("caller_session"),
+        "owner": round_.get("owner"),
         "duration_s": round_.get("duration_s"),
         "exit_code": round_.get("exit_code"),
         "events_path": str(files["events_path"]) if files else None,
@@ -1227,6 +1253,10 @@ def round_result(
 
 @dataclass
 class Settings:
+    """A round's resolved settings. ``profile`` is the name as given (for records);
+    ``profile_base`` is the built-in it maps to, and ``profile_args`` the config
+    profile's native args, ``None`` for a built-in profile."""
+
     model: str | None
     effort: str | None
     profile: str
@@ -1237,6 +1267,8 @@ class Settings:
     fast: bool
     output_schema: Path | None
     extra: tuple[str, ...]
+    profile_base: str = "review"
+    profile_args: tuple[str, ...] | None = None
 
 
 def _read_prompt(args: argparse.Namespace) -> str:
@@ -1254,9 +1286,12 @@ def _read_prompt(args: argparse.Namespace) -> str:
     return text
 
 
-def preamble(peer: str, caller: str | None, number: int, timeout_s: int) -> str:
-    """The identity and budget preamble prepended to every prompt (D16)."""
-    who = f"{_split_ref(caller)[0]} session {caller}" if caller else "an operator"
+def preamble(
+    peer: str, caller: str | None, number: int, timeout_s: int, owner: str | None = None
+) -> str:
+    """The identity and budget preamble prepended to every prompt (D16). With no
+    caller, an owner label (``routine:daily``) names who invoked the peer."""
+    who = f"{_split_ref(caller)[0]} session {caller}" if caller else owner or "an operator"
     return (
         f"[cairn invoke] You are {peer} being invoked by {who} via cairn (round {number}). "
         f"Reply budget: {timeout_s // 60} minutes of wall-clock time; the run is killed after "
@@ -1340,16 +1375,80 @@ class Runner:
         route = getattr(self.args, "billing", None)
         return replace(self.policy.billing, route=route) if route else self.policy.billing
 
+    def _resolve_profile(self, name: str) -> tuple[str, tuple[str, ...] | None]:
+        """``(base, args)`` for profile ``name`` from today's config; ``args`` is
+        ``None`` for a built-in. Applies ``--profile-args-file`` and refuses a config
+        profile whose args still hold template tokens."""
+        args_file = getattr(self.args, "profile_args_file", None)
+        try:
+            base, extra = resolve_profile(self.policy, name, peer=self.peer)
+        except ConfigError as exc:
+            raise UsageError(str(exc)) from None
+        if name in PROFILES:
+            if args_file:
+                raise UsageError(
+                    f"--profile-args-file needs --profile naming a config profile of {self.peer}"
+                )
+            return base, None
+        if args_file:
+            if not self.args.profile:
+                raise UsageError(
+                    f"--profile-args-file needs --profile naming a config profile of {self.peer}"
+                )
+            return base, self._read_profile_args(args_file, base)
+        tokens = list(
+            dict.fromkeys(m.group(0) for a in extra for m in TEMPLATE_TOKEN_RE.finditer(a))
+        )
+        if tokens:
+            raise UsageError(
+                f"profile {name!r} has template variables ({', '.join(tokens)}); run it "
+                "through 'cairn routine run' or pass --profile-args-file"
+            )
+        return base, extra
+
+    def _read_profile_args(self, path: str, base: str) -> tuple[str, ...]:
+        """The rendered args of ``--profile-args-file``: a JSON array of strings."""
+        try:
+            data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise UsageError(f"cannot read --profile-args-file: {exc}") from None
+        if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
+            raise UsageError("--profile-args-file must hold a JSON array of strings")
+        for item in data:
+            token = TEMPLATE_TOKEN_RE.search(item)
+            if token:
+                raise UsageError(f"--profile-args-file holds an unrendered token {token.group(0)}")
+        try:
+            check_profile_args(self.peer, base, tuple(data))
+        except ValueError as exc:
+            raise UsageError(f"--profile-args-file: {exc}") from None
+        return tuple(data)
+
     def settings(self, recorded: ThreadState | None) -> Settings:
         args = self.args
         native = self._native()
+        profile_args: tuple[str, ...] | None
         if recorded is None:
             profile = args.profile or self.policy.profile
+            base, profile_args = self._resolve_profile(profile)
             model = args.model or self.policy.model
             effort = args.effort or self.policy.effort
             cwd = Path(args.cd).expanduser().resolve() if args.cd else Path.cwd().resolve()
         else:
-            profile = args.profile or recorded.profile
+            if args.profile:
+                profile = args.profile
+                base, profile_args = self._resolve_profile(profile)
+            else:
+                if getattr(args, "profile_args_file", None):
+                    raise UsageError(
+                        "--profile-args-file needs --profile naming a config profile of "
+                        f"{self.peer}"
+                    )
+                # The recorded resolution, verbatim: an edited or deleted config profile
+                # cannot change a resumed thread. An old thread.json has no base.
+                profile = recorded.profile
+                base = recorded.profile_base or recorded.profile
+                profile_args = None if profile in PROFILES else tuple(recorded.profile_args)
             if not native and not args.profile:
                 native = tuple(recorded.native_policy)
             model = args.model or recorded.model
@@ -1360,7 +1459,7 @@ class Runner:
                     f"--cd {args.cd} differs from the thread's recorded cwd {cwd}; a resumed "
                     "thread runs where it started (omit --cd)"
                 )
-        if profile not in PROFILES:
+        if base not in PROFILES:
             raise UsageError(f"unknown profile {profile!r}; choose {', '.join(PROFILES)}")
         if not cwd.is_dir():
             raise UsageError(f"working directory does not exist: {cwd}")
@@ -1380,6 +1479,8 @@ class Runner:
             fast=bool(args.fast),
             output_schema=schema,
             extra=tuple(args.extra or ()),
+            profile_base=base,
+            profile_args=profile_args,
         )
 
     # ---- result ---------------------------------------------------------
@@ -1416,6 +1517,9 @@ class Runner:
             raise UsageError(
                 "--fork is not supported by antigravity (agy cannot fork a conversation)"
             )
+        owner = getattr(args, "owner", None)
+        if owner is not None and not OWNER_RE.match(owner):
+            raise UsageError(invalid_owner_message(owner))
         caller, caller_warnings = resolve_caller(args.parent)
         prompt = _read_prompt(args)
 
@@ -1426,6 +1530,11 @@ class Runner:
             except LookupError as exc:
                 raise UsageError(str(exc)) from exc
             recorded = ThreadState.load(source_dir / "thread.json")
+            if owner is not None and recorded.owner and owner != recorded.owner:
+                raise UsageError(
+                    f"thread {recorded.thread_id} is owned by {recorded.owner}; "
+                    "--owner cannot change it"
+                )
             if caller is None:
                 # A follow-up from a context with no host hint continues for the
                 # session that started the thread; --parent still wins.
@@ -1460,7 +1569,7 @@ class Runner:
             # dead round. Refuse it up front, the way the billing check does, with the
             # one command that fixes it. Other modes still answer from what they read,
             # so they only carry the warning.
-            policy = self.harness.policy_argv(settings.profile, settings.native_policy)
+            policy = self.harness.policy_argv(settings.profile_base, settings.native_policy)
             refuse, problem = permission_problem(self.config, policy)
             if problem and refuse and not getattr(args, "skip_permission_check", False):
                 raise UsageError(
@@ -1513,6 +1622,7 @@ class Runner:
             effort=settings.effort,
             caller_session=caller,
             forked_from=recorded.thread_id if recorded is not None else None,
+            owner=self.args.owner or (recorded.owner if recorded is not None else None),
         )
         state.path = self.run_dir / "thread.json"
         return state, None
@@ -1537,7 +1647,11 @@ class Runner:
             ), EXIT_BUSY
         # Thread-level settings follow the latest round (the next resume reuses them).
         state.profile, state.native_policy = settings.profile, list(settings.native_policy)
+        state.profile_base = settings.profile_base
+        state.profile_args = list(settings.profile_args or ())
         state.model, state.effort = settings.model, settings.effort
+        if state.owner is None and getattr(self.args, "owner", None):
+            state.owner = self.args.owner
         if state.caller_session is None and caller:
             state.caller_session = caller
         number = len(state.rounds) + 1
@@ -1550,12 +1664,14 @@ class Runner:
                 previous.get("permissions"), permissions, list(previous.get("denied") or [])
             )
             permissions["note"] = note
-        head = preamble(self.peer, caller, number, settings.timeout_s)
+        head = preamble(self.peer, caller, number, settings.timeout_s, state.owner)
         if note:
             head = f"{head}\n\n{note}"
         full_prompt = f"{head}\n\n---\n\n{prompt}"
         via_stdin = len(full_prompt.encode("utf-8")) > STDIN_PROMPT_BYTES
         resume_id = recorded.thread_id if recorded is not None else None
+        if self.peer == "codex" and resume_id is not None:
+            self.warnings += resume_warnings(settings.profile_args)
         extra = settings.extra
         if self.args.fork and self.peer == "claude":
             extra = ("--fork-session", *extra)
@@ -1582,7 +1698,7 @@ class Runner:
             peer=self.peer,
             prompt=full_prompt,
             cwd=settings.cwd,
-            profile=settings.profile,
+            profile=settings.profile_base,
             native_policy=settings.native_policy,
             model=settings.model,
             effort=settings.effort,
@@ -1595,6 +1711,7 @@ class Runner:
             prompt_via_stdin=via_stdin,
             extra=extra,
             log_path=log_target,
+            profile_args=settings.profile_args,
         )
         argv = self.harness.exec_argv(request)
         if self.args.fork and self.peer == "codex":
@@ -1618,9 +1735,12 @@ class Runner:
             "effort": settings.effort,
             "profile": settings.profile,
             "native_policy": list(
-                self.harness.policy_argv(settings.profile, settings.native_policy)
+                self.harness.policy_argv(
+                    settings.profile_base, settings.native_policy, settings.profile_args
+                )
             ),
             "caller_session": caller,
+            "owner": state.owner,
             "timeout_s": settings.timeout_s,
             "idle_timeout_s": settings.idle_timeout_s,
             "prompt_via_stdin": via_stdin,
@@ -2513,7 +2633,21 @@ def build_parser() -> argparse.ArgumentParser:
     prompt.add_argument("--prompt-file", help="read the prompt from a file ('-' reads stdin)")
     run.add_argument("--model")
     run.add_argument("--effort")
-    run.add_argument("--profile", choices=PROFILES, help="shared permission profile")
+    run.add_argument(
+        "--profile",
+        help="permission profile: review, edit, full or a name in invoke.<peer>.profiles",
+    )
+    run.add_argument(
+        "--profile-args-file",
+        metavar="FILE",
+        help="plumbing for 'cairn routine run': a JSON array of rendered args that "
+        "replaces the config profile's extra_args for this round",
+    )
+    run.add_argument(
+        "--owner",
+        metavar="LABEL",
+        help="owner label recorded on the thread and the peer session (e.g. routine:daily)",
+    )
     run.add_argument("--fast", action="store_true", help="Codex fast tier")
     run.add_argument("--cd", help="working directory for a fresh thread")
     run.add_argument("--timeout-s", type=_positive, help="wall-clock budget in seconds")

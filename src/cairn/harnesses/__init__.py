@@ -60,6 +60,8 @@ class InvokeRequest:
     only). With ``prompt_via_stdin`` the prompt is not put on the command line.
     ``log_path`` is where the peer writes its own diagnostic log when its CLI can
     be told to (agy ``--log-file``); ``None`` leaves the peer's default.
+    ``profile`` is always a built-in base. ``profile_args`` is ``None`` for a
+    built-in profile, else the config profile's native ``extra_args`` (rendered).
     """
 
     peer: str
@@ -78,6 +80,7 @@ class InvokeRequest:
     prompt_via_stdin: bool
     extra: tuple[str, ...]
     log_path: Path | None = None
+    profile_args: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -109,7 +112,12 @@ class Harness(Protocol):
     def resume(self, session_id: str, fork: bool = False) -> list[str]: ...
     def exec_argv(self, request: InvokeRequest) -> list[str]: ...
     def stdin_payload(self, prompt: str) -> bytes: ...
-    def policy_argv(self, profile: str, native: tuple[str, ...] = ()) -> tuple[str, ...]: ...
+    def policy_argv(
+        self,
+        profile: str,
+        native: tuple[str, ...] = (),
+        profile_args: tuple[str, ...] | None = None,
+    ) -> tuple[str, ...]: ...
     def parse_event(self, line: str) -> list[Event]: ...
     def transcript_path(
         self, store: Path, thread_id: str, started: datetime | None

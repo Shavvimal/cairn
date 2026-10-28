@@ -70,7 +70,10 @@ class ThreadState:
     ``rounds`` holds one dict per round: the prompt (without the preamble), the
     exact native argv, process identities, timestamps, outcome, progress bullets,
     the answer and the publication ledger. ``path`` is where the file lives; it is
-    not serialised.
+    not serialised. ``profile`` is the name as given (built-in or config profile);
+    ``profile_base`` and ``profile_args`` are what it resolved to, reused verbatim on
+    a resume. ``owner`` is the owner label (``--owner``, for example
+    ``routine:daily``), not to be confused with :func:`document_owner`.
     """
 
     peer: str
@@ -88,6 +91,9 @@ class ThreadState:
     exchange_doc: str | None = None
     forked_from: str | None = None
     resume_command: str | None = None
+    owner: str | None = None
+    profile_base: str | None = None
+    profile_args: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=now_iso)
     rounds: list[dict] = field(default_factory=list)
     path: Path | None = field(default=None, compare=False)
@@ -333,7 +339,8 @@ def render_exchange(state: ThreadState, existing_fm: dict | None, my_notes: str 
     head.append(title_line(title))
     head += head_close(last.get("finished_at") or last.get("heartbeat_at") or created)
     validate_head(head)
-    lines = [*head, *preserved_tail(existing_fm, "active"), "---", "", f"# {title}", ""]
+    tail_fm = {**(existing_fm or {}), "owner": state.owner} if state.owner else existing_fm
+    lines = [*head, *preserved_tail(tail_fm, "active"), "---", "", f"# {title}", ""]
     lines += notes_block(my_notes, "exports")
     lines += [ROUNDS_HEADING, ""]
     for round_ in state.rounds:

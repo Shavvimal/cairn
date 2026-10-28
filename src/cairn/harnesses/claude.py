@@ -15,6 +15,42 @@ PERMISSIONS_BY_PROFILE: dict[str, tuple[str, ...]] = {
 }
 CLAUDE_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
+# Config-profile ``extra_args`` rules (docs/routine-spec.md section 4.3). Flags checked
+# against ``claude --help`` 2.1.312.
+# The --permission-mode values each base may switch to: never a looser mode.
+PROFILE_MODES: dict[str, tuple[str, ...] | None] = {
+    "review": ("plan",),
+    "edit": ("plan", "dontAsk", "acceptEdits"),
+    "full": None,  # any value the CLI accepts
+}
+# Flags cairn invoke sets itself; a profile must not repeat or contradict them.
+PROFILE_RESERVED_FLAGS = frozenset(
+    {
+        "-p",
+        "--print",
+        "--output-format",
+        "--input-format",
+        "--verbose",
+        "--resume",
+        "-r",
+        "--continue",
+        "-c",
+        "--session-id",
+        "--fork-session",
+        "--model",
+        "--effort",
+        "--json-schema",
+        "--",
+    }
+)
+# Flags that skip every permission prompt: only a ``full`` base may carry them.
+PROFILE_FULL_ONLY_FLAGS = frozenset(
+    {"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions"}
+)
+_TOOL_LIST_FLAGS = ("--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools")
+_DISALLOWED_FLAGS = ("--disallowedTools", "--disallowed-tools")
+_PAIRED_FLAGS = ("--permission-mode", *_TOOL_LIST_FLAGS)
+
 # Inside the Codex macOS sandbox ``claude -p`` cannot read its login keychain and
 # reports one of these. The runner matches them in stderr or the result text.
 KEYCHAIN_MARKERS: tuple[str, ...] = ("Not logged in", "not authenticated")
@@ -27,6 +63,138 @@ KEYCHAIN_GUIDANCE = (
 def _clip(text: str, limit: int) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def split_rules(value: str) -> list[str]:
+    """Split a comma-joined permission rule list, keeping commas inside ``(...)``."""
+    rules: list[str] = []
+    depth = 0
+    current = ""
+    for char in value:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        if char == "," and depth == 0:
+            rules.append(current.strip())
+            current = ""
+            continue
+        current += char
+    if current.strip():
+        rules.append(current.strip())
+    return [rule for rule in rules if rule]
+
+
+def _space_form_warning(rule: str) -> str | None:
+    """The warning for a ``Bash(x *)`` rule: Claude only matches ``Bash(x:*)``."""
+    if not (rule.startswith("Bash(") and rule.endswith(")")):
+        return None
+    inner = rule[len("Bash(") : -1]
+    if " " not in inner or ":*" in inner:
+        return None
+    prefix = inner[:-2] if inner.endswith(" *") else inner
+    return (
+        f"rule {rule!r} uses the space form; Claude matches only the prefix form "
+        f"'Bash({prefix.strip()}:*)'"
+    )
+
+
+def check_profile_args(base: str, args: tuple[str, ...]) -> list[str]:
+    """Validate a config profile's ``extra_args`` for base ``base``.
+
+    Raises ``ValueError`` with the reason; returns warnings that do not fail the load.
+    """
+    if base not in PROFILE_MODES:
+        raise ValueError(f"unknown base {base!r}; choose {', '.join(PROFILE_MODES)}")
+    warnings: list[str] = []
+    seen_mode = False
+    index = 0
+    while index < len(args):
+        token = args[index]
+        name = token.split("=", 1)[0] if token.startswith("--") else token
+        if name in PROFILE_RESERVED_FLAGS:
+            raise ValueError(f"{name} is set by cairn invoke; remove it")
+        if name == "--max-budget-usd":
+            raise ValueError(
+                "--max-budget-usd is set from the routine's budget_usd_per_day; remove it"
+            )
+        if name in PROFILE_FULL_ONLY_FLAGS and base != "full":
+            raise ValueError(f"{name} needs base 'full'")
+        if name in _PAIRED_FLAGS and name != token:
+            raise ValueError(f"write {name} and its value as two argv elements")
+        if token in _PAIRED_FLAGS:
+            if index + 1 >= len(args) or args[index + 1].startswith("-"):
+                raise ValueError(f"{token} needs a value")
+            value = args[index + 1]
+            if token == "--permission-mode":
+                if seen_mode:
+                    raise ValueError("--permission-mode appears twice; keep one")
+                seen_mode = True
+                allowed = PROFILE_MODES[base]
+                if allowed is not None and value not in allowed:
+                    raise ValueError(
+                        f"--permission-mode {value!r} would loosen base {base!r}; "
+                        f"allowed: {', '.join(allowed)}"
+                    )
+                index += 2
+                continue
+            following = []
+            cursor = index + 2
+            while cursor < len(args) and not args[cursor].startswith("-"):
+                following.append(args[cursor])
+                cursor += 1
+            if following:
+                parts = ", ".join(repr(part) for part in (value, *following))
+                raise ValueError(f"{token} takes one comma-joined string; join {parts} with ','")
+            for rule in split_rules(value):
+                warning = _space_form_warning(rule)
+                if warning:
+                    warnings.append(warning)
+            index += 2
+            continue
+        index += 1
+    return warnings
+
+
+def merge_profile_args(base_argv: tuple[str, ...], args: tuple[str, ...]) -> tuple[str, ...]:
+    """The base's native flags merged with a profile's ``extra_args``.
+
+    Rule A: a ``--permission-mode X`` in ``args`` replaces the base's mode value in
+    place. Rule B: a ``--disallowedTools V`` is appended to the base's own
+    ``--disallowedTools`` list when it has one. Everything else follows in order.
+    """
+    merged = list(base_argv)
+    index = 0
+    while index < len(args):
+        token = args[index]
+        value = args[index + 1] if index + 1 < len(args) else None
+        if token == "--permission-mode" and value is not None and token in merged:
+            merged[merged.index(token) + 1] = value
+            index += 2
+            continue
+        if token in _DISALLOWED_FLAGS and value is not None:
+            present = next((flag for flag in _DISALLOWED_FLAGS if flag in merged), None)
+            if present is not None:
+                at = merged.index(present) + 1
+                merged[at] = f"{merged[at]},{value}"
+                index += 2
+                continue
+        merged.append(token)
+        index += 1
+    return tuple(merged)
+
+
+def _with_mode(argv: tuple[str, ...], native: tuple[str, ...]) -> tuple[str, ...]:
+    """``argv`` with its ``--permission-mode`` value replaced by ``native``'s."""
+    if "--permission-mode" not in native:
+        return argv
+    mode = native[native.index("--permission-mode") + 1]
+    merged = list(argv)
+    if "--permission-mode" in merged:
+        merged[merged.index("--permission-mode") + 1] = mode
+    else:
+        merged[:0] = ["--permission-mode", mode]
+    return tuple(merged)
 
 
 def _assistant_events(message: object) -> list[Event]:
@@ -75,15 +243,30 @@ class Claude:
     def resume(self, session_id: str, fork: bool = False) -> list[str]:
         return ["claude", "--resume", session_id, *(["--fork-session"] if fork else [])]
 
-    def policy_argv(self, profile: str, native: tuple[str, ...] = ()) -> tuple[str, ...]:
-        """The exact native permission flags: ``native`` when given, else the profile's."""
-        if native:
+    def policy_argv(
+        self,
+        profile: str,
+        native: tuple[str, ...] = (),
+        profile_args: tuple[str, ...] | None = None,
+    ) -> tuple[str, ...]:
+        """The exact native permission flags.
+
+        ``profile`` is a built-in base. ``profile_args`` is ``None`` for a built-in
+        profile, else a config profile's ``extra_args``. For a built-in, ``native``
+        replaces the whole tuple. For a config profile, the base is merged with the
+        args and ``native`` replaces only the ``--permission-mode`` value, so the
+        profile's allow and deny rules survive an explicit mode.
+        """
+        if native and profile_args is None:
             return native
         try:
-            return PERMISSIONS_BY_PROFILE[profile]
+            base = PERMISSIONS_BY_PROFILE[profile]
         except KeyError:
             known = ", ".join(PERMISSIONS_BY_PROFILE)
             raise ValueError(f"unknown profile {profile!r}; choose {known}") from None
+        if profile_args is None:
+            return base
+        return _with_mode(merge_profile_args(base, profile_args), native)
 
     def exec_argv(self, request: InvokeRequest) -> list[str]:
         """The ``claude -p`` argv: ``--session-id`` for a fresh run, ``--resume`` otherwise.
@@ -104,7 +287,7 @@ class Claude:
             "stream-json",
             "--verbose",
             *identity,
-            *self.policy_argv(request.profile, request.native_policy),
+            *self.policy_argv(request.profile, request.native_policy, request.profile_args),
         ]
         if request.model:
             argv += ["--model", request.model]

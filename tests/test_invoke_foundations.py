@@ -17,6 +17,7 @@ from typing import ClassVar
 from unittest.mock import patch
 
 from cairn import config, hooks, qmd
+from cairn.exchange import validate_head
 from cairn.frontmatter import parse_frontmatter, preserved_tail, rewrite_preserved_tail
 from cairn.harnesses import Event, InvokeRequest, get_harness, is_client_error
 from cairn.harnesses.antigravity import (
@@ -49,12 +50,15 @@ from cairn.harnesses.antigravity import (
     transcript_conversation_id,
 )
 from cairn.harnesses.claude import KEYCHAIN_GUIDANCE, KEYCHAIN_MARKERS, keychain_failure
+from cairn.harnesses.claude import check_profile_args as claude_profile_args
+from cairn.harnesses.codex import check_profile_args as codex_profile_args
+from cairn.harnesses.codex import resume_warnings as codex_resume_warnings
 from cairn.harnesses.codex_models import (
     check_codex_invocation,
     format_models,
     load_codex_model_catalog,
 )
-from cairn.mutations import LINK_ROLES, add_link
+from cairn.mutations import LINK_ROLES, add_link, set_owner
 from tests.test_shared_store import StoreFixture
 
 DOC = """---
@@ -1549,3 +1553,309 @@ class TestAntigravityAdcToken(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Config profiles: emission and the extra_args rules (routine spec section 4.3)
+# ---------------------------------------------------------------------------
+
+SCHEDULED_CLAUDE = (
+    "--permission-mode",
+    "dontAsk",
+    "--allowedTools",
+    "Read,Glob,Grep,Bash(pnpm:*)",
+    "--disallowedTools",
+    "WebFetch,Bash(git push:*)",
+    "--add-dir",
+    "/tmp/journal",
+)
+
+
+class TestClaudeProfileArgv(unittest.TestCase):
+    claude = get_harness("claude")
+
+    def test_config_profile_base_then_extra_args(self):
+        argv = self.claude.exec_argv(
+            _request(
+                "claude",
+                session_id="s",
+                profile="edit",
+                profile_args=("--add-dir", "/tmp/journal"),
+                model="opus",
+                extra=("--max-budget-usd", "4.00"),
+            )
+        )
+        self.assertEqual(
+            argv,
+            [
+                "claude",
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--session-id",
+                "s",
+                "--permission-mode",
+                "acceptEdits",
+                "--add-dir",
+                "/tmp/journal",
+                "--model",
+                "opus",
+                "--max-budget-usd",
+                "4.00",
+                "--",
+                "Review this",
+            ],
+        )
+
+    def test_permission_mode_extra_replaces_base_value(self):
+        policy = self.claude.policy_argv("edit", (), SCHEDULED_CLAUDE)
+        self.assertEqual(policy.count("--permission-mode"), 1)
+        self.assertEqual(
+            policy,
+            ("--permission-mode", "dontAsk", *SCHEDULED_CLAUDE[2:]),
+        )
+
+    def test_disallowed_tools_extra_merges_into_review_base(self):
+        policy = self.claude.policy_argv(
+            "review", (), ("--disallowedTools", "WebFetch,Bash(git push:*)")
+        )
+        self.assertEqual(
+            policy,
+            (
+                "--permission-mode",
+                "plan",
+                "--disallowedTools",
+                "Edit,Write,NotebookEdit,WebFetch,Bash(git push:*)",
+            ),
+        )
+        # An edit base has no deny list: the pair passes through.
+        self.assertEqual(
+            self.claude.policy_argv("edit", (), ("--disallowedTools", "WebFetch")),
+            ("--permission-mode", "acceptEdits", "--disallowedTools", "WebFetch"),
+        )
+
+    def test_native_mode_over_config_profile_keeps_extra_args(self):
+        policy = self.claude.policy_argv("edit", ("--permission-mode", "plan"), SCHEDULED_CLAUDE)
+        self.assertEqual(policy, ("--permission-mode", "plan", *SCHEDULED_CLAUDE[2:]))
+        # A built-in profile keeps today's whole-tuple replacement.
+        self.assertEqual(
+            self.claude.policy_argv("review", ("--permission-mode", "acceptEdits")),
+            ("--permission-mode", "acceptEdits"),
+        )
+
+    def test_looser_permission_mode_rejected(self):
+        check = claude_profile_args
+        with self.assertRaises(ValueError) as caught:
+            check("edit", ("--permission-mode", "auto"))
+        self.assertEqual(
+            str(caught.exception),
+            "--permission-mode 'auto' would loosen base 'edit'; allowed: plan, dontAsk, "
+            "acceptEdits",
+        )
+        with self.assertRaises(ValueError):
+            check("review", ("--permission-mode", "dontAsk"))
+        self.assertEqual(check("full", ("--permission-mode", "bypassPermissions")), [])
+        self.assertEqual(check("review", ("--permission-mode", "plan")), [])
+
+    def test_allowed_tools_takes_one_joined_element(self):
+        with self.assertRaises(ValueError) as caught:
+            claude_profile_args("edit", ("--allowedTools", "Read", "Grep"))
+        self.assertEqual(
+            str(caught.exception),
+            "--allowedTools takes one comma-joined string; join 'Read', 'Grep' with ','",
+        )
+        self.assertEqual(claude_profile_args("edit", ("--allowedTools", "Read,Grep")), [])
+
+    def test_space_form_bash_rule_warns(self):
+        warnings = claude_profile_args("edit", ("--allowedTools", "Read,Bash(cairn *)"))
+        self.assertEqual(
+            warnings,
+            [
+                "rule 'Bash(cairn *)' uses the space form; Claude matches only the prefix "
+                "form 'Bash(cairn:*)'"
+            ],
+        )
+        self.assertEqual(
+            claude_profile_args("edit", ("--disallowedTools", "Bash(git push *)")),
+            [
+                "rule 'Bash(git push *)' uses the space form; Claude matches only the prefix "
+                "form 'Bash(git push:*)'"
+            ],
+        )
+        self.assertEqual(claude_profile_args("edit", ("--allowedTools", "Bash(cairn:*)")), [])
+        self.assertEqual(
+            claude_profile_args("edit", ("--disallowedTools", "Bash(pnpm publish:*)")), []
+        )
+
+    def test_forbidden_flags_rejected(self):
+        for args, reason in (
+            (("--model", "opus"), "--model is set by cairn invoke; remove it"),
+            (("-p",), "-p is set by cairn invoke; remove it"),
+            (("--output-format=json",), "--output-format is set by cairn invoke; remove it"),
+            (
+                ("--dangerously-skip-permissions",),
+                "--dangerously-skip-permissions needs base 'full'",
+            ),
+            (
+                ("--max-budget-usd", "3"),
+                "--max-budget-usd is set from the routine's budget_usd_per_day; remove it",
+            ),
+        ):
+            with self.subTest(args=args), self.assertRaises(ValueError) as caught:
+                claude_profile_args("edit", args)
+            self.assertEqual(str(caught.exception), reason)
+        self.assertEqual(claude_profile_args("full", ("--dangerously-skip-permissions",)), [])
+
+
+class TestCodexProfileArgv(unittest.TestCase):
+    codex = get_harness("codex")
+    ARGS = ("--add-dir", "/tmp/journal", "-c", "sandbox_workspace_write.network_access=false")
+
+    def test_config_profile_extra_args_after_sandbox(self):
+        argv = self.codex.exec_argv(
+            _request("codex", profile="edit", profile_args=self.ARGS, model="gpt-6-astra")
+        )
+        self.assertEqual(
+            argv,
+            [
+                "codex",
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                *self.ARGS,
+                "-c",
+                'approval_policy="never"',
+                "-m",
+                "gpt-6-astra",
+                "-C",
+                "/work/repo",
+                "Review this",
+            ],
+        )
+        # An explicit -s replaces only the mode; the profile's pairs stay.
+        self.assertEqual(
+            self.codex.policy_argv("edit", ("--sandbox", "read-only"), self.ARGS),
+            ("-s", "read-only", *self.ARGS),
+        )
+
+    def test_resume_drops_add_dir_and_keeps_config_pairs(self):
+        argv = self.codex.exec_argv(
+            _request("codex", resume="t", profile="edit", profile_args=self.ARGS)
+        )
+        self.assertEqual(
+            argv,
+            [
+                "codex",
+                "exec",
+                "resume",
+                "--json",
+                "--skip-git-repo-check",
+                "-c",
+                'sandbox_mode="workspace-write"',
+                "-c",
+                'approval_policy="never"',
+                "-c",
+                "sandbox_workspace_write.network_access=false",
+                "t",
+                "Review this",
+            ],
+        )
+        self.assertEqual(
+            codex_resume_warnings(self.ARGS),
+            ["codex resume cannot take --add-dir; /tmp/journal is not writable this round"],
+        )
+        self.assertEqual(codex_resume_warnings(None), [])
+
+    def test_forbidden_config_keys_rejected(self):
+        for args, reason in (
+            (
+                ("-c", 'sandbox_mode="danger-full-access"'),
+                "-c sandbox_mode=... is set by cairn invoke or would loosen the sandbox; remove it",
+            ),
+            (
+                ("--config", "approval_policy=on-request"),
+                "-c approval_policy=... is set by cairn invoke or would loosen the sandbox; "
+                "remove it",
+            ),
+            (
+                ("-s", "danger-full-access"),
+                "codex extra_args allow only --add-dir DIR and -c KEY=VALUE; got '-s'",
+            ),
+            (("--add-dir",), "--add-dir needs a value"),
+        ):
+            with self.subTest(args=args), self.assertRaises(ValueError) as caught:
+                codex_profile_args("edit", args)
+            self.assertEqual(str(caught.exception), reason)
+        self.assertEqual(codex_profile_args("review", self.ARGS), [])
+
+
+# ---------------------------------------------------------------------------
+# owner: preserved tail key (routine spec section 5.3)
+# ---------------------------------------------------------------------------
+
+
+class TestOwnerTail(unittest.TestCase):
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "doc.md"
+        self.path.write_text(DOC)
+        home = patch.dict(os.environ, {"HOME": str(Path(tmp.name) / "home")})
+        home.start()
+        self.addCleanup(home.stop)
+
+    def test_owner_emitted_after_links_only_when_set(self):
+        self.assertEqual(preserved_tail({"owner": ""}), preserved_tail(None))
+        self.assertNotIn("owner:", "\n".join(preserved_tail({"links": ["parent claude:x"]})))
+        tail = preserved_tail({"links": ["parent claude:x"], "owner": "routine:daily"})
+        self.assertEqual(tail[-3:], ["links:", "  - parent claude:x", "owner: routine:daily"])
+        # A document without an owner re-renders byte-identically.
+        self.assertEqual(rewrite_preserved_tail(DOC, lambda fm: None), DOC)
+
+    def test_set_owner_writes_and_is_idempotent(self):
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(set_owner(lambda _sid: self.path, "abc", "routine:daily"))
+            once = self.path.read_text()
+            self.assertTrue(set_owner(lambda _sid: self.path, "abc", "routine:daily"))
+        self.assertEqual(self.path.read_text(), once)
+        self.assertIn("projects: []\nowner: routine:daily\n---\n", once)
+        self.assertEqual(parse_frontmatter(once)["owner"], "routine:daily")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertFalse(set_owner(lambda _sid: self.path, "abc", "bad owner"))
+        self.assertIn("--owner must be 1 to 128 characters", err.getvalue())
+        self.assertEqual(self.path.read_text(), once)
+
+    def test_exchange_head_rejects_owner_key(self):
+        with self.assertRaises(ValueError):
+            validate_head(["---", "type: agent-exchange", "owner: x", "---"])
+
+
+class TestOwnerSurvivesReexport(StoreFixture):
+    def test_set_owner_survives_reexport(self):
+        cfg = config.get_config()
+        sid = "019a0000-0000-7000-8000-0000000owner"
+        native = self.native("codex", sid)
+        doc = hooks.export_and_index(cfg, "codex", sid, str(native), update_index=False)
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(set_owner(lambda _sid: doc, sid, "routine:daily"))
+        with native.open("a") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-03-30T01:00:00Z",
+                        "payload": {"type": "user_message", "message": "follow-up"},
+                    }
+                )
+                + "\n"
+            )
+        later = time.time() + 5
+        os.utime(native, (later, later))
+        doc2 = hooks.export_and_index(cfg, "codex", sid, str(native), update_index=False)
+        content = doc2.read_text()
+        self.assertIn("follow-up", content)
+        self.assertEqual(parse_frontmatter(content)["owner"], "routine:daily")

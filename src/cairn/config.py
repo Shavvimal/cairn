@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field, fields
 from functools import lru_cache
 from importlib import resources
@@ -52,6 +53,18 @@ DEFAULT_CRON_SCHEDULE = "7 * * * *"
 # The shared permission profiles for ``cairn invoke``. Each harness adapter maps a
 # profile to its own exact native flags; the names here are the only valid values.
 PROFILES = ("review", "edit", "full")
+
+# Peers that accept config-defined profiles (``invoke.<peer>.profiles``), and the peers
+# a routine may run. Antigravity has neither in v1.
+PROFILE_PEERS = ("claude", "codex")
+ROUTINE_PEERS = ("claude", "codex")
+
+# A profile or routine name: lower-case, digits and '-', 1 to 64 characters.
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+NAME_RULE = "use 1 to 64 characters from a-z, 0-9 and '-', starting with a letter or digit"
+
+# A ``{{NAME}}`` template token (routine prompt files, argv lists and profile args).
+TEMPLATE_TOKEN_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
 
 
 class ConfigError(RuntimeError):
@@ -172,6 +185,20 @@ class BillingPolicy:
 
 
 @dataclass(frozen=True)
+class ProfileSpec:
+    """A config-defined invoke profile: a built-in ``base`` plus native ``extra_args``.
+
+    ``extra_args`` is an argv list emitted after the base's native flags (the per-peer
+    merge and validation rules live in each harness module). It may hold ``{{NAME}}``
+    tokens that only ``cairn routine run`` renders.
+    """
+
+    name: str
+    base: str
+    extra_args: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class PeerPolicy:
     """Defaults for ``cairn invoke <peer>``: one peer agent's model, profile and clocks.
 
@@ -180,7 +207,8 @@ class PeerPolicy:
     ``idle_timeout_s`` kills a run with no activity, and ``quiet_after_s`` /
     ``stall_after_s`` are the activity thresholds ``cairn invoke status`` reports.
     ``billing`` is set for antigravity only (:class:`BillingPolicy`); ``None`` means the
-    peer has no billing route to choose.
+    peer has no billing route to choose. ``profiles`` holds the config-defined profiles
+    (claude and codex only); ``profile`` may name a built-in or one of them.
     """
 
     model: str | None = None
@@ -191,6 +219,7 @@ class PeerPolicy:
     quiet_after_s: int = 120
     stall_after_s: int = 600
     billing: BillingPolicy | None = None
+    profiles: dict[str, ProfileSpec] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -213,6 +242,34 @@ class InvokePolicy:
 
 
 @dataclass(frozen=True)
+class RoutineSpec:
+    """One ``routines.<name>`` entry: a scheduled peer run (see docs/routine-spec.md).
+
+    ``profile`` is the resolved profile name (the routine's own, else the peer's
+    default). ``prompt_file``, ``cd`` and ``outputs`` hold expanded absolute paths.
+    ``prepare`` and ``validate`` hold the raw template strings, rendered per day.
+    ``raw`` keeps the fields as written in the config file, for ``config show``.
+    """
+
+    name: str
+    peer: str
+    prompt_file: Path
+    cd: Path
+    profile: str
+    model: str | None
+    at: str
+    day: str
+    sources: tuple[str, ...]
+    catch_up_days: int
+    timeout_s: int | None
+    budget_usd_per_day: float | None
+    outputs: dict[str, Path]
+    prepare: tuple[str, ...] | None
+    validate: tuple[str, ...]
+    raw: dict = field(default_factory=dict, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
 class CairnConfig:
     """Read-only, validated view of ``cairn.config.json``."""
 
@@ -230,6 +287,7 @@ class CairnConfig:
     project_descriptions: dict[str, str]
     collections: dict[str, Collection]
     invoke: InvokePolicy = InvokePolicy()
+    routines: dict[str, RoutineSpec] = field(default_factory=dict)
 
     def output_dir(self, collection: str) -> Path:
         """Where a collection's exported markdown lives: ``data_root / <collection>``."""
@@ -400,12 +458,122 @@ def _parse_peer(peer: str, spec: object) -> PeerPolicy:
         # bool is an int subclass; a ``true`` timeout is a typo, not one second.
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ConfigError(f"invoke.{peer}.{key} must be a positive integer, got {value!r}")
-    profile = values.get("profile", "review")
-    if profile not in PROFILES:
+    if "profiles" in values:
+        values["profiles"] = _parse_profiles(peer, values["profiles"])
+    policy = PeerPolicy(**values)
+    try:
+        resolve_profile(policy, policy.profile, peer=peer)
+    except ConfigError:
         raise ConfigError(
-            f"invoke.{peer}.profile must be one of {', '.join(PROFILES)}, got {profile!r}"
+            f"invoke.{peer}.profile must be one of {', '.join(profile_names(policy))}, "
+            f"got {policy.profile!r}"
+        ) from None
+    return policy
+
+
+# ---------------------------------------------------------------------------
+# Config-defined invoke profiles
+# ---------------------------------------------------------------------------
+
+_PROFILE_KEYS = ("base", "extra_args")
+
+
+def check_profile_args(peer: str, base: str, args: tuple[str, ...]) -> list[str]:
+    """Validate a profile's ``extra_args`` against ``peer``'s rules for ``base``.
+
+    Returns the warnings (for example a Claude ``Bash(x *)`` rule in the space form).
+    Raises ``ValueError`` with the reason text when a rule is broken.
+    """
+    if peer == "claude":
+        from .harnesses.claude import check_profile_args as check
+    elif peer == "codex":
+        from .harnesses.codex import check_profile_args as check
+    else:
+        raise ValueError(f"{peer} takes no config profiles")
+    return check(base, args)
+
+
+def _parse_profile(peer: str, name: str, spec: object) -> ProfileSpec:
+    where = f"invoke.{peer}.profiles.{name}"
+    if not isinstance(spec, dict):
+        raise ConfigError(f"{where} must be an object, got {type(spec).__name__}")
+    values = {k: v for k, v in spec.items() if not k.startswith("//")}
+    unknown = set(values) - set(_PROFILE_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"{where} has unknown keys: {', '.join(sorted(unknown))}. "
+            f"Allowed keys: {', '.join(_PROFILE_KEYS)}."
         )
-    return PeerPolicy(**values)
+    base = values.get("base")
+    if base not in PROFILES:
+        raise ConfigError(f"{where}.base must be one of {', '.join(PROFILES)}, got {base!r}")
+    extra = values.get("extra_args", [])
+    if not isinstance(extra, list) or not all(isinstance(arg, str) for arg in extra):
+        raise ConfigError(
+            f"{where}.extra_args must be an array of strings (an argv list, never a string), "
+            f"got {_describe(extra)}"
+        )
+    try:
+        check_profile_args(peer, str(base), tuple(extra))
+    except ValueError as exc:
+        raise ConfigError(f"{where}.extra_args: {exc}") from None
+    return ProfileSpec(name=name, base=str(base), extra_args=tuple(extra))
+
+
+def _parse_profiles(peer: str, spec: object) -> dict[str, ProfileSpec]:
+    if peer not in PROFILE_PEERS:
+        raise ConfigError(
+            f"invoke.{peer}.profiles is not supported; only "
+            f"{', '.join(PROFILE_PEERS)} take config profiles"
+        )
+    if not isinstance(spec, dict):
+        raise ConfigError(
+            f"invoke.{peer}.profiles must be an object of named profiles, got {type(spec).__name__}"
+        )
+    profiles: dict[str, ProfileSpec] = {}
+    for name, value in spec.items():
+        if name.startswith("//"):
+            continue
+        if not NAME_RE.match(name):
+            raise ConfigError(f"invoke.{peer}.profiles name {name!r} is invalid: {NAME_RULE}")
+        if name in PROFILES:
+            raise ConfigError(
+                f"invoke.{peer}.profiles.{name} shadows the built-in profile {name!r}; "
+                "pick another name"
+            )
+        profiles[name] = _parse_profile(peer, name, value)
+    return profiles
+
+
+def profile_names(policy: PeerPolicy) -> tuple[str, ...]:
+    """Every profile name ``policy`` accepts: the built-ins, then its config profiles."""
+    return (*PROFILES, *sorted(policy.profiles))
+
+
+def resolve_profile(policy: PeerPolicy, name: str, *, peer: str) -> tuple[str, tuple[str, ...]]:
+    """``(base, extra_args)`` for profile ``name``: a built-in has no extra args.
+
+    Raises :class:`ConfigError` naming the choices when ``name`` is neither a built-in
+    nor a key of ``policy.profiles``.
+    """
+    if name in PROFILES:
+        return name, ()
+    spec = policy.profiles.get(name) if isinstance(name, str) else None
+    if spec is None:
+        raise ConfigError(
+            f"unknown profile {name!r} for {peer}; choose {', '.join(profile_names(policy))}"
+        )
+    return spec.base, spec.extra_args
+
+
+def _describe(value: object) -> str:
+    """A short type description for an error message (``list of int``, ``str``)."""
+    if isinstance(value, list):
+        if not value:
+            return "an empty array"
+        kinds = sorted({type(item).__name__ for item in value if not isinstance(item, str)})
+        return f"an array holding {', '.join(kinds)}" if kinds else "list"
+    return type(value).__name__
 
 
 def _parse_invoke(spec: object) -> InvokePolicy:
@@ -420,6 +588,274 @@ def _parse_invoke(spec: object) -> InvokePolicy:
             f"Allowed peers: {', '.join(INVOKE_PEERS)}."
         )
     return InvokePolicy(**{peer: _parse_peer(peer, value) for peer, value in peers.items()})
+
+
+# ---------------------------------------------------------------------------
+# Routines
+# ---------------------------------------------------------------------------
+
+_ROUTINE_FIELDS = (
+    "at",
+    "budget_usd_per_day",
+    "catch_up_days",
+    "cd",
+    "day",
+    "model",
+    "outputs",
+    "peer",
+    "prepare",
+    "profile",
+    "prompt_file",
+    "sources",
+    "timeout_s",
+    "validate",
+)
+ROUTINE_REQUIRED = ("peer", "prompt_file", "cd", "at", "validate")
+ROUTINE_DAYS = ("yesterday-utc",)
+ROUTINE_BUILTIN_VARIABLES = ("DAY", "DATA_ROOT", "ATTEMPT_DIR", "DIGEST_DIR")
+DEFAULT_ROUTINE_OUTPUTS = {"journal_dir": "{{DATA_ROOT}}/journal"}
+_AT_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+_OUTPUT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+ROUTINE_LABEL_PREFIX = "dev.cairn.routine."
+
+
+def _windowed_sources() -> tuple[str, ...]:
+    from .registry import SOURCES
+
+    return tuple(sorted(s.source for s in SOURCES if s.session_type and s.windowed))
+
+
+def expand_home(value: str) -> str:
+    """Expand a bare ``~`` or a leading ``~/`` to the home directory, as a shell would."""
+    if value == "~" or value.startswith("~/"):
+        return str(Path.home()) + value[1:]
+    return value
+
+
+def expand_routine_path(value: str, data_root: Path) -> str:
+    """Expand a routine path field: a leading ``~`` and every ``{{DATA_ROOT}}``.
+
+    Nothing else: no ``$VARS`` (a launchd run has another environment than the shell
+    that wrote the config), so a ``$`` stays literal.
+    """
+    return expand_home(value).replace("{{DATA_ROOT}}", str(data_root))
+
+
+def _routine_path(where: str, value: object, data_root: Path) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{where} must be a non-empty string, got {value!r}")
+    for token in TEMPLATE_TOKEN_RE.findall(value):
+        if token != "DATA_ROOT":
+            raise ConfigError(f"{where} may only use {{{{DATA_ROOT}}}}, found {{{{{token}}}}}")
+    expanded = expand_routine_path(value, data_root)
+    if not Path(expanded).is_absolute():
+        raise ConfigError(
+            f"{where} must be absolute after expanding ~ and {{{{DATA_ROOT}}}}, got {expanded!r}"
+        )
+    return Path(expanded)
+
+
+def _routine_argv(where: str, value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value or not all(isinstance(arg, str) for arg in value):
+        raise ConfigError(
+            f"{where} must be a non-empty array of strings (an argv list, never a shell "
+            f"string), got {_describe(value)}"
+        )
+    return tuple(value)
+
+
+def _routine_sources(
+    where: str, value: object, collections: dict[str, Collection]
+) -> tuple[str, ...]:
+    from .registry import BY_NAME
+
+    if not isinstance(value, list):
+        raise ConfigError(f"{where} must be an array of source names, got {type(value).__name__}")
+    windowed = _windowed_sources()
+    for source in value:
+        if source not in windowed:
+            raise ConfigError(
+                f"{where} names {source!r}, which is not a windowed session source; "
+                f"choose {', '.join(windowed)}"
+            )
+        collection = BY_NAME[source].collection
+        if collection not in collections:
+            raise ConfigError(f"{where} names {source!r}, but collections has no {collection!r}")
+        if not collections[collection].sync.enabled:
+            raise ConfigError(
+                f"{where} names {source!r}, whose collection {collection!r} is disabled "
+                "(sync.enabled=false)"
+            )
+    return tuple(value)
+
+
+def _routine_outputs(where: str, value: object, data_root: Path) -> dict[str, Path]:
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"{where} must be an object of name -> directory, got {type(value).__name__}"
+        )
+    items = {k: v for k, v in value.items() if not k.startswith("//")}
+    for key, default in DEFAULT_ROUTINE_OUTPUTS.items():
+        items.setdefault(key, default)
+    outputs: dict[str, Path] = {}
+    for key, path in items.items():
+        if not _OUTPUT_KEY_RE.match(key):
+            raise ConfigError(
+                f"{where} key {key!r} is invalid: use a-z, 0-9 and '_', starting with a letter"
+            )
+        if key.upper() in ROUTINE_BUILTIN_VARIABLES:
+            raise ConfigError(
+                f"{where} key {key!r} renders as {{{{{key.upper()}}}}}, which is a built-in "
+                "variable"
+            )
+        outputs[key] = _routine_path(f"{where}.{key}", path, data_root)
+    return outputs
+
+
+def _positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _parse_routine(
+    name: str, spec: object, data_root: Path, invoke: InvokePolicy, collections: dict
+) -> RoutineSpec:
+    where = f"routines.{name}"
+    if not isinstance(spec, dict):
+        raise ConfigError(f"{where} must be an object, got {type(spec).__name__}")
+    values = {k: v for k, v in spec.items() if not k.startswith("//")}
+    unknown = set(values) - set(_ROUTINE_FIELDS)
+    if unknown:
+        raise ConfigError(
+            f"{where} has unknown keys: {', '.join(sorted(unknown))}. "
+            f"Allowed keys: {', '.join(_ROUTINE_FIELDS)}."
+        )
+    missing = [key for key in ROUTINE_REQUIRED if key not in values]
+    if missing:
+        raise ConfigError(f"{where} is missing required keys: {', '.join(missing)}")
+    peer = values["peer"]
+    if peer not in ROUTINE_PEERS:
+        raise ConfigError(f"{where}.peer must be one of {', '.join(ROUTINE_PEERS)}, got {peer!r}")
+    policy = invoke.for_peer(peer)
+    prompt_file = _routine_path(f"{where}.prompt_file", values["prompt_file"], data_root)
+    cd = _routine_path(f"{where}.cd", values["cd"], data_root)
+
+    profile = values.get("profile")
+    if profile is None:
+        profile = policy.profile
+    try:
+        resolve_profile(policy, profile, peer=peer)
+    except ConfigError:
+        raise ConfigError(
+            f"{where}.profile {profile!r} is not a profile of {peer}; "
+            f"choose {', '.join(profile_names(policy))}"
+        ) from None
+
+    model = values.get("model")
+    if model is not None and not (isinstance(model, str) and model.strip()):
+        raise ConfigError(f"{where}.model must be a non-empty string, got {model!r}")
+    at = values["at"]
+    if not isinstance(at, str) or not _AT_RE.match(at):
+        raise ConfigError(f"{where}.at must be HH:MM in 24-hour local time, got {at!r}")
+    day = values.get("day", ROUTINE_DAYS[0])
+    if day not in ROUTINE_DAYS:
+        raise ConfigError(f'{where}.day must be "yesterday-utc", got {day!r}')
+    sources = _routine_sources(f"{where}.sources", values.get("sources", []), collections)
+    catch_up = values.get("catch_up_days", 3)
+    if not _positive_int(catch_up) or catch_up > 30:
+        raise ConfigError(
+            f"{where}.catch_up_days must be an integer from 1 to 30, got {catch_up!r}"
+        )
+    timeout = values.get("timeout_s")
+    if timeout is not None and not _positive_int(timeout):
+        raise ConfigError(f"{where}.timeout_s must be a positive integer or null, got {timeout!r}")
+    budget = values.get("budget_usd_per_day")
+    if budget is not None:
+        if isinstance(budget, bool) or not isinstance(budget, int | float) or budget <= 0:
+            raise ConfigError(
+                f"{where}.budget_usd_per_day must be a positive number or null, got {budget!r}"
+            )
+        if peer != "claude":
+            raise ConfigError(
+                f"{where}.budget_usd_per_day is Claude-only (codex reports no cost); "
+                "remove it or set it to null"
+            )
+    outputs = _routine_outputs(
+        f"{where}.outputs", values.get("outputs", dict(DEFAULT_ROUTINE_OUTPUTS)), data_root
+    )
+    prepare = values.get("prepare")
+    return RoutineSpec(
+        name=name,
+        peer=peer,
+        prompt_file=prompt_file,
+        cd=cd,
+        profile=profile,
+        model=model,
+        at=at,
+        day=day,
+        sources=sources,
+        catch_up_days=catch_up,
+        timeout_s=timeout,
+        budget_usd_per_day=float(budget) if budget is not None else None,
+        outputs=outputs,
+        prepare=None if prepare is None else _routine_argv(f"{where}.prepare", prepare),
+        validate=_routine_argv(f"{where}.validate", values["validate"]),
+        raw=values,
+    )
+
+
+def _parse_routines(
+    spec: object, data_root: Path, invoke: InvokePolicy, collections: dict
+) -> dict[str, RoutineSpec]:
+    """Parse the optional ``routines`` block (after ``invoke`` and ``collections``)."""
+    if spec is None:
+        return {}
+    if not isinstance(spec, dict):
+        raise ConfigError(
+            f"'routines' must be an object of named routines, got {type(spec).__name__}"
+        )
+    routines: dict[str, RoutineSpec] = {}
+    for name, value in spec.items():
+        if name.startswith("//"):
+            continue
+        if not NAME_RE.match(name):
+            raise ConfigError(f"routine name {name!r} is invalid: {NAME_RULE}")
+        routines[name] = _parse_routine(name, value, data_root, invoke, collections)
+    return routines
+
+
+def state_home() -> Path:
+    """``$XDG_STATE_HOME`` if set and non-empty, else ``~/.local/state``."""
+    raw = os.environ.get("XDG_STATE_HOME")
+    return Path(raw) if raw else Path.home() / ".local" / "state"
+
+
+def profile_warnings(cfg: CairnConfig, only: tuple[str, str] | None = None) -> list[str]:
+    """Warnings from the config profiles' args (a Claude ``Bash(x *)`` space-form rule).
+
+    Every profile of every peer, or only the ``(peer, name)`` profile given in ``only``.
+    """
+    warnings: list[str] = []
+    for peer in PROFILE_PEERS:
+        for name, spec in sorted(cfg.invoke.for_peer(peer).profiles.items()):
+            if only is not None and (peer, name) != only:
+                continue
+            try:
+                found = check_profile_args(peer, spec.base, spec.extra_args)
+            except ValueError:
+                continue
+            warnings += [f"invoke.{peer}.profiles.{name}: {warning}" for warning in found]
+    return warnings
+
+
+def routine_paths(config: CairnConfig, name: str) -> dict[str, Path | str]:
+    """The fixed locations of routine ``name``: state dir, log, launchd plist and label."""
+    label = f"{ROUTINE_LABEL_PREFIX}{name}"
+    return {
+        "state_dir": state_home() / "cairn" / "routines" / name,
+        "log": config.data_root / "logs" / f"routine-{name}.log",
+        "plist": Path.home() / "Library" / "LaunchAgents" / f"{label}.plist",
+        "label": label,
+    }
 
 
 def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig:
@@ -451,11 +887,13 @@ def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig
             f"got {type(raw_invoke).__name__}"
         )
     invoke = _parse_invoke(raw_invoke)
+    data_root = expand(data["data_root"])
+    routines = _parse_routines(data.get("routines"), data_root, invoke, collections)
 
     return CairnConfig(
         repo_root=repo_root,
         config_path=config_path,
-        data_root=expand(data["data_root"]),
+        data_root=data_root,
         qmd_binary=data.get("qmd_binary", "qmd"),
         cron_schedule=cron_schedule,
         home=home,
@@ -467,6 +905,7 @@ def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig
         project_descriptions=dict(data["project_descriptions"]),
         collections=collections,
         invoke=invoke,
+        routines=routines,
     )
 
 
@@ -497,20 +936,34 @@ __all__ = [
     "ENV_OVERRIDE",
     "EXAMPLE_FILENAME",
     "INVOKE_PEERS",
+    "NAME_RE",
     "PROFILES",
+    "PROFILE_PEERS",
+    "ROUTINE_PEERS",
+    "TEMPLATE_TOKEN_RE",
     "BillingPolicy",
     "CairnConfig",
     "Collection",
     "ConfigError",
     "InvokePolicy",
     "PeerPolicy",
+    "ProfileSpec",
+    "RoutineSpec",
     "ServiceSource",
     "SyncPolicy",
+    "check_profile_args",
     "claude_slug",
     "example_template_text",
     "expand",
+    "expand_home",
+    "expand_routine_path",
     "find_repo_root",
     "get_config",
     "load_config_from",
+    "profile_names",
+    "profile_warnings",
+    "resolve_profile",
+    "routine_paths",
+    "state_home",
     "user_config_path",
 ]

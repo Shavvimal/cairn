@@ -18,6 +18,22 @@ SANDBOX_BY_PROFILE: dict[str, str] = {
     "full": "danger-full-access",
 }
 _APPROVAL_NEVER = ("-c", 'approval_policy="never"')
+
+# Config-profile ``extra_args`` rules (docs/routine-spec.md section 4.3), checked against
+# ``codex exec --help`` and ``codex exec resume --help`` 0.164.0. Only extra writable
+# directories and config overrides; never a key cairn sets or one that loosens the sandbox.
+PROFILE_CONFIG_FLAGS = ("-c", "--config")
+PROFILE_FORBIDDEN_KEYS = frozenset(
+    {
+        "sandbox_mode",
+        "approval_policy",
+        "model",
+        "model_provider",
+        "model_reasoning_effort",
+        "service_tier",
+        "profile",
+    }
+)
 _PROGRESS_ITEMS = ("mcp_tool_call", "web_search", "collab_tool_call")
 
 
@@ -38,6 +54,59 @@ def _sandbox_mode(profile: str, native: tuple[str, ...]) -> str:
     except KeyError:
         known = ", ".join(SANDBOX_BY_PROFILE)
         raise ValueError(f"unknown profile {profile!r}; choose {known}") from None
+
+
+def check_profile_args(base: str, args: tuple[str, ...]) -> list[str]:
+    """Validate a config profile's ``extra_args``: ``--add-dir DIR`` and ``-c KEY=VALUE``
+    pairs only. Raises ``ValueError`` with the reason; Codex rules carry no warnings."""
+    if base not in SANDBOX_BY_PROFILE:
+        raise ValueError(f"unknown base {base!r}; choose {', '.join(SANDBOX_BY_PROFILE)}")
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token not in ("--add-dir", *PROFILE_CONFIG_FLAGS):
+            raise ValueError(
+                f"codex extra_args allow only --add-dir DIR and -c KEY=VALUE; got {token!r}"
+            )
+        if index + 1 >= len(args):
+            raise ValueError(f"{token} needs a value")
+        value = args[index + 1]
+        if token in PROFILE_CONFIG_FLAGS:
+            key = value.split("=", 1)[0].strip()
+            if "=" not in value or not key:
+                raise ValueError(f"{token} takes KEY=VALUE; got {value!r}")
+            if key.split(".", 1)[0] in PROFILE_FORBIDDEN_KEYS:
+                raise ValueError(
+                    f"-c {key}=... is set by cairn invoke or would loosen the sandbox; remove it"
+                )
+        index += 2
+    return []
+
+
+def split_profile_args(args: tuple[str, ...]) -> tuple[tuple[str, ...], list[str]]:
+    """``(config pairs, add-dir directories)`` of a profile's args, for a resume."""
+    config: list[str] = []
+    dirs: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        value = args[index + 1] if index + 1 < len(args) else ""
+        if token == "--add-dir":
+            dirs.append(value)
+        else:
+            config += [token, value]
+        index += 2
+    return tuple(config), dirs
+
+
+def resume_warnings(profile_args: tuple[str, ...] | None) -> list[str]:
+    """One warning per ``--add-dir`` a ``codex exec resume`` round cannot take."""
+    if not profile_args:
+        return []
+    return [
+        f"codex resume cannot take --add-dir; {folder} is not writable this round"
+        for folder in split_profile_args(profile_args)[1]
+    ]
 
 
 def _codex_item_events(event_type: str, item: dict) -> list[Event]:
@@ -126,11 +195,22 @@ class Codex:
     def resume(self, session_id: str, fork: bool = False) -> list[str]:
         return ["codex", "fork" if fork else "resume", session_id]
 
-    def policy_argv(self, profile: str, native: tuple[str, ...] = ()) -> tuple[str, ...]:
-        """The exact native sandbox flags: ``native`` when given, else the profile's."""
-        if native:
-            return native
-        return ("-s", _sandbox_mode(profile, ()))
+    def policy_argv(
+        self,
+        profile: str,
+        native: tuple[str, ...] = (),
+        profile_args: tuple[str, ...] | None = None,
+    ) -> tuple[str, ...]:
+        """The exact native sandbox flags: ``native`` when given, else the profile's.
+
+        With a config profile (``profile_args`` not ``None``) an explicit ``-s`` only
+        replaces the sandbox mode; the profile's ``--add-dir`` and ``-c`` pairs follow.
+        """
+        if profile_args is None:
+            if native:
+                return native
+            return ("-s", _sandbox_mode(profile, ()))
+        return ("-s", _sandbox_mode(profile, native), *profile_args)
 
     def exec_argv(self, request: InvokeRequest) -> list[str]:
         """The ``codex exec`` argv for a fresh run, or ``codex exec resume`` for a resume.
@@ -163,6 +243,7 @@ class Codex:
                 "-c",
                 f'sandbox_mode="{mode}"',
                 *_APPROVAL_NEVER,
+                *split_profile_args(request.profile_args or ())[0],
                 *options,
                 *outputs,
                 *request.extra,
@@ -174,7 +255,7 @@ class Codex:
             "exec",
             "--json",
             "--skip-git-repo-check",
-            *self.policy_argv(request.profile, request.native_policy),
+            *self.policy_argv(request.profile, request.native_policy, request.profile_args),
             *_APPROVAL_NEVER,
             *options,
             "-C",

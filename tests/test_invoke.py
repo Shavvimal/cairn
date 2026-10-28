@@ -83,6 +83,7 @@ RESULT_KEYS = {
     "native_policy",
     "cwd",
     "caller",
+    "owner",
     "duration_s",
     "exit_code",
     "events_path",
@@ -2263,3 +2264,262 @@ class TestHealth(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Config profiles and --owner (routine spec sections 4 and 5)
+# ---------------------------------------------------------------------------
+
+CLAUDE_SCHEDULED = {
+    "base": "edit",
+    "extra_args": [
+        "--permission-mode",
+        "dontAsk",
+        "--allowedTools",
+        "Read,Glob,Grep,Bash(pnpm:*)",
+        "--disallowedTools",
+        "WebFetch,Bash(git push:*)",
+    ],
+}
+
+
+class TestInvokeProfiles(InvokeFixture):
+    def setUp(self):
+        super().setUp()
+        self.write_config(
+            claude={
+                "profiles": {
+                    "scheduled": CLAUDE_SCHEDULED,
+                    "journal": {
+                        "base": "edit",
+                        "extra_args": ["--add-dir", "{{JOURNAL_DIR}}"],
+                    },
+                }
+            },
+            codex={
+                "profiles": {
+                    "scheduled": {
+                        "base": "edit",
+                        "extra_args": ["--add-dir", "/tmp/journal", "-c", "x.y=1"],
+                    }
+                }
+            },
+        )
+
+    def run_claude(self, *args, env=None):
+        return self.invoke(
+            "claude", "--json", "--cd", self.cwd, "--prompt", "Say PONG", *args, env=env
+        )
+
+    def last_argv(self):
+        return self.stub_calls()[-1]["argv"]
+
+    def test_profile_name_resolution_unknown_profile_usage_error(self):
+        result, _ = self.run_claude("--profile", "nightly")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "unknown profile 'nightly' for claude; choose review, edit, full, journal, scheduled",
+            result.stderr,
+        )
+        self.assertEqual(self.stub_calls(), [])
+
+    def test_config_profile_emits_base_then_extra_args(self):
+        result, data = self.run_claude("--profile", "scheduled")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["profile"], "scheduled")
+        argv = self.last_argv()
+        self.assertEqual(argv.count("--permission-mode"), 1)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        expected = ["--permission-mode", "dontAsk", *CLAUDE_SCHEDULED["extra_args"][2:]]
+        self.assertEqual(data["native_policy"], expected)
+        thread = self.thread(data["thread_id"], "claude")
+        self.assertEqual(thread["profile"], "scheduled")
+        self.assertEqual(thread["profile_base"], "edit")
+        self.assertEqual(thread["profile_args"], CLAUDE_SCHEDULED["extra_args"])
+
+    def test_permission_mode_flag_wins_over_config_profile_mode(self):
+        result, _data = self.run_claude("--profile", "scheduled", "--permission-mode", "plan")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = self.last_argv()
+        self.assertEqual(argv.count("--permission-mode"), 1)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertEqual(argv[argv.index("--allowedTools") + 1], "Read,Glob,Grep,Bash(pnpm:*)")
+        self.assertEqual(argv[argv.index("--disallowedTools") + 1], "WebFetch,Bash(git push:*)")
+
+    def test_permission_mode_flag_with_builtin_profile_unchanged(self):
+        result, data = self.run_claude("--profile", "review", "--permission-mode", "acceptEdits")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["native_policy"], ["--permission-mode", "acceptEdits"])
+        self.assertNotIn("--disallowedTools", self.last_argv())
+
+    def test_template_profile_without_args_file_refused(self):
+        result, _ = self.run_claude("--profile", "journal")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "profile 'journal' has template variables ({{JOURNAL_DIR}}); run it through "
+            "'cairn routine run' or pass --profile-args-file",
+            result.stderr,
+        )
+
+    def test_profile_args_file_rules(self):
+        path = self.root / "profile-args.json"
+        path.write_text(json.dumps(["--add-dir", "{{JOURNAL_DIR}}"]))
+        result, _ = self.run_claude("--profile", "journal", "--profile-args-file", str(path))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "--profile-args-file holds an unrendered token {{JOURNAL_DIR}}", result.stderr
+        )
+        path.write_text(json.dumps(["--add-dir", "/tmp/j"]))
+        result, _ = self.run_claude("--profile-args-file", str(path))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "--profile-args-file needs --profile naming a config profile of claude", result.stderr
+        )
+        result, _ = self.run_claude("--profile", "edit", "--profile-args-file", str(path))
+        self.assertEqual(result.returncode, 2)
+        path.write_text(json.dumps(["--permission-mode", "bypassPermissions"]))
+        result, _ = self.run_claude("--profile", "journal", "--profile-args-file", str(path))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("would loosen base 'edit'", result.stderr)
+
+    def test_profile_args_file_replaces_extra_args(self):
+        path = self.root / "profile-args.json"
+        journal = str(self.root / "journal")
+        path.write_text(json.dumps(["--add-dir", journal]))
+        result, data = self.run_claude("--profile", "journal", "--profile-args-file", str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(
+            data["native_policy"], ["--permission-mode", "acceptEdits", "--add-dir", journal]
+        )
+        thread = self.thread(data["thread_id"], "claude")
+        self.assertEqual(thread["profile_args"], ["--add-dir", journal])
+        self.assertEqual(thread["rounds"][0]["native_policy"], data["native_policy"])
+
+    def test_resume_reuses_recorded_profile_args_not_config(self):
+        _, data = self.run_claude("--profile", "scheduled")
+        assert data is not None
+        first = self.last_argv()
+        self.write_config(claude={"profiles": {"scheduled": {"base": "review", "extra_args": []}}})
+        result, _again = self.invoke(
+            "claude", "--json", "--resume", data["thread_id"], "--prompt", "Again"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        second = self.last_argv()
+        policy = first[first.index("--permission-mode") : first.index("--")]
+        self.assertEqual(second[second.index("--permission-mode") : second.index("--")], policy)
+        # Deleting the profile cannot break a resume either.
+        self.write_config(claude={})
+        result, _ = self.invoke(
+            "claude", "--json", "--resume", data["thread_id"], "--prompt", "Third"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_resume_explicit_profile_wins(self):
+        _, data = self.run_claude("--profile", "scheduled")
+        assert data is not None
+        result, again = self.invoke(
+            "claude",
+            "--json",
+            "--resume",
+            data["thread_id"],
+            "--profile",
+            "review",
+            "--prompt",
+            "x",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert again is not None
+        self.assertEqual(
+            again["native_policy"],
+            ["--permission-mode", "plan", "--disallowedTools", "Edit,Write,NotebookEdit"],
+        )
+        thread = self.thread(data["thread_id"], "claude")
+        self.assertEqual((thread["profile"], thread["profile_args"]), ("review", []))
+
+    def test_owner_in_state_result_and_peer_front_matter(self):
+        result, data = self.run_claude("--owner", "routine:daily")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertEqual(data["owner"], "routine:daily")
+        thread = self.thread(data["thread_id"], "claude")
+        self.assertEqual(thread["owner"], "routine:daily")
+        self.assertEqual(thread["rounds"][0]["owner"], "routine:daily")
+        self.assertIn("exported", data["publication"])
+        peer = parse_frontmatter(Path(data["peer_session_doc"]).read_text())
+        self.assertEqual(peer["owner"], "routine:daily")
+        exchange = parse_frontmatter(Path(data["exchange_doc"]).read_text())
+        self.assertEqual(exchange["owner"], "routine:daily")
+
+    def test_owner_change_on_resume_refused(self):
+        _, data = self.run_claude("--owner", "routine:daily")
+        assert data is not None
+        result, _ = self.invoke(
+            "claude",
+            "--json",
+            "--resume",
+            data["thread_id"],
+            "--owner",
+            "routine:other",
+            "--prompt",
+            "x",
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            f"thread {data['thread_id']} is owned by routine:daily; --owner cannot change it",
+            result.stderr,
+        )
+        # Omitted means the recorded owner.
+        result, again = self.invoke(
+            "claude", "--json", "--resume", data["thread_id"], "--prompt", "y"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert again is not None
+        self.assertEqual(again["owner"], "routine:daily")
+        result, _ = self.run_claude("--owner", "bad owner")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--owner must be 1 to 128 characters", result.stderr)
+
+    def test_owner_without_caller_is_warning_not_refusal(self):
+        result, data = self.run_claude("--owner", "routine:daily")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        self.assertIsNone(data["caller"])
+        self.assertIn(
+            "caller unknown: no single host session detected; pass --parent SOURCE:ID",
+            data["warnings"],
+        )
+        prompt = self.last_argv()[-1]
+        self.assertIn("being invoked by routine:daily via cairn", prompt)
+
+    def test_codex_config_profile_end_to_end(self):
+        result, data = self.run_codex("--profile", "scheduled")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert data is not None
+        argv = self.last_argv()
+        start = argv.index("-s")
+        self.assertEqual(
+            argv[start : start + 6],
+            ["-s", "workspace-write", "--add-dir", "/tmp/journal", "-c", "x.y=1"],
+        )
+        result, again = self.run_codex("--resume", data["thread_id"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        assert again is not None
+        self.assertNotIn("--add-dir", self.last_argv())
+        self.assertIn("x.y=1", self.last_argv())
+        self.assertIn(
+            "codex resume cannot take --add-dir; /tmp/journal is not writable this round",
+            again["warnings"],
+        )
+
+    def test_sandbox_flag_with_config_profile_keeps_extra_args(self):
+        result, _data = self.run_codex("--profile", "scheduled", "--sandbox", "read-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = self.last_argv()
+        start = argv.index("-s")
+        self.assertEqual(
+            argv[start : start + 6],
+            ["-s", "read-only", "--add-dir", "/tmp/journal", "-c", "x.y=1"],
+        )
