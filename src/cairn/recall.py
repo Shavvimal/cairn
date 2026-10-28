@@ -9,6 +9,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 
+from . import digest
 from .config import ConfigError, get_config
 from .registry import SOURCES
 from .store import SessionStore, bounded_content
@@ -69,30 +70,67 @@ def main(argv: list[str] | None = None) -> int:
     expand.add_argument("session_id", help="source:full-id or unique prefix")
     expand.add_argument("--max-msgs", type=int, default=DEFAULT_MAX_MSGS)
     expand.add_argument("--max-chars", type=int, default=30000)
-    for command in (listing, expand):
+    digest_cmd = sub.add_parser(
+        "digest",
+        help="condense one UTC day of sessions, with a frames.jsonl sidecar per session",
+        description=(
+            "Condense one UTC day of exported sessions into per-session digests. "
+            "DATE: today, yesterday, YYYY-MM-DD, 'N days ago' or 'last <weekday>'."
+        ),
+    )
+    digest_cmd.add_argument("date_expr", nargs="+", metavar="DATE")
+    digest_cmd.add_argument("--min-msgs", type=int, default=1)
+    digest_cmd.add_argument("--include-subagents", action="store_true")
+    digest_cmd.add_argument(
+        "--out", help="output directory (default: $XDG_CACHE_HOME/cairn/digests/DATE)"
+    )
+    digest_cmd.add_argument("--json", action="store_true")
+    digest_cmd.add_argument("--max-chars", type=int, default=digest.DEFAULT_MAX_CHARS)
+    digest_cmd.add_argument(
+        "--refresh", action="store_true", help="refresh exports first, without embedding"
+    )
+    frame = sub.add_parser("frame", help="print one exported frame and check its digest hash")
+    frame.add_argument("session_id", help="source:full-id or unique prefix")
+    frame.add_argument("ordinal", type=int, help="0-based frame index in the whole session")
+    frame.add_argument("--frames", help="the .frames.jsonl sidecar the citation came from")
+    session_sources = [s.source for s in SOURCES if s.session_type]
+    for command in (listing, expand, digest_cmd, frame):
         projects = command.add_mutually_exclusive_group()
         projects.add_argument("--project", help="exact project/repo label or working directory")
         projects.add_argument("--all-projects", action="store_true")
         command.add_argument(
-            "--source", action="append", choices=[s.source for s in SOURCES if s.session_type]
+            "--source",
+            action="append",
+            choices=list(digest.DIGEST_SOURCES) if command is digest_cmd else session_sources,
         )
     args = parser.parse_args(argv)
     try:
         store = SessionStore(get_config())
-        if args.command == "list":
-            start, end = parse_date_range(" ".join(args.date_expr))
+        sources = args.source
+        if args.command in ("list", "digest"):
+            if args.command == "digest":
+                start, end = digest.one_day(" ".join(args.date_expr))
+                if args.max_chars < 1:
+                    raise ValueError("--max-chars must be positive")
+                sources = args.source or list(digest.DIGEST_SOURCES)
+            else:
+                start, end = parse_date_range(" ".join(args.date_expr))
             if args.min_msgs < 0:
                 raise ValueError("--min-msgs must be nonnegative")
-            if args.refresh and not refresh(args.source):
+            if args.refresh and not refresh(sources):
                 return 1
-        records = store.records(args.source)
-        # An explicit ID is global unless a project filter is requested. Listing
-        # defaults strictly to cwd; absence of project metadata never broadens it.
+        records = store.records(sources)
+        # An explicit ID is global unless a project filter is requested. Listing and
+        # digest default strictly to cwd; absence of project metadata never broadens it.
         project = args.project or (
-            os.getcwd() if args.command == "list" and not args.all_projects else None
+            os.getcwd() if args.command in ("list", "digest") and not args.all_projects else None
         )
         if project:
             records = [r for r in records if r.matches_project(project)]
+        if args.command == "digest":
+            return digest.run_digest(args, records, (start, end))
+        if args.command == "frame":
+            return digest.run_frame(args, store.resolve(args.session_id, records))
         if args.command == "expand":
             if args.max_msgs < 1 or args.max_chars < 1:
                 raise ValueError("expansion limits must be positive")

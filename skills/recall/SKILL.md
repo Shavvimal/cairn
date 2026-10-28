@@ -1,6 +1,6 @@
 ---
 name: recall
-description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the shared exported store via the cairn CLI; topic queries search across QMD collections (BM25) plus an exact-match ripgrep pass. Every recall ends with "One Thing" - the single highest-leverage next action synthesized from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context from past sessions", "what was I doing", or "session history". Requires the cairn CLI and qmd (install via /cairn:setup); rg is optional.
+description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the shared exported store via the cairn CLI; topic queries search across QMD collections (BM25) plus an exact-match ripgrep pass. Every recall ends with "One Thing" - the single highest-leverage next action synthesized from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context from past sessions", "what was I doing", "session history", "digest yesterday", "daily digest", or "cite the frame". Requires the cairn CLI and qmd (install via /cairn:setup); rg is optional.
 argument-hint: [yesterday|today|last week|this week|YYYY-MM-DD|TOPIC]
 allowed-tools: Bash(cairn:*), Bash(qmd:*), Bash(rg:*), Bash(head:*)
 ---
@@ -22,7 +22,8 @@ flags, run `cairn recall --help`.
 Parse the user's input after `/recall`:
 
 - **Temporal** - a time reference ("yesterday", "today", "last week", "this week", a date,
-  "what was I doing") → Step 2.
+  "what was I doing") → Step 2. A digest of a day, or recall that must cite its
+  sources → the `digest` block in Step 2.
 - **Topic** - a subject ("auth flow", "the QMD migration", "onboarding") → Step 3.
 - **Both** - temporal + topic ("what did I do with auth yesterday") → Step 2, then filter
   the listed sessions for the topic (or run Step 3 scoped to that window).
@@ -55,6 +56,24 @@ Present the session table. To expand one the user picks:
 ```bash
 cairn recall expand SOURCE:SESSION_ID         # condensed transcript (user msgs, assistant lines, tools)
 ```
+
+For a whole day, or when each claim must cite its source, use `digest` instead of
+expanding sessions one by one. `expand` reads the head of one session; `digest` keeps
+only the day's frames of every session, tail included:
+
+```bash
+cairn recall digest DATE --all-projects --out DIR --json   # one day only: today, yesterday, YYYY-MM-DD
+cairn recall frame SOURCE:SESSION_ID ORDINAL --frames DIR/SOURCE-SHORTID.frames.jsonl
+```
+
+Other flags: `--project P`, repeatable `--source claude|codex|antigravity|cursor`,
+`--include-subagents`, `--min-msgs N` (default 1, not 3 as in `list`), `--max-chars N`
+(per session, default 40000) and `--refresh`. Each session gives `SOURCE-SHORTID.md`,
+the condensed body, and `SOURCE-SHORTID.frames.jsonl`, one row per frame. A
+`<!-- f12 TS ROLE -->` marker cites frame ordinal 12; the `cairn:turn` numbers are
+lengths, never ids. To dig into a cited line, run `recall frame` with that ordinal: it
+prints the frame as exported and warns on stderr if the export changed since the digest.
+Exit 3 means an empty day: no session was written. A legacy or corrupt export is skipped with a warning and listed under `skipped` in the JSON; the rest still exit 0.
 
 → Go to Step 4 (One Thing).
 

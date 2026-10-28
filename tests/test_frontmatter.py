@@ -239,3 +239,22 @@ class TestQuotedLinkDedupe(unittest.TestCase):
             text = doc.read_text()
             self.assertEqual(text.count("peer claude:x"), 1)
             self.assertNotIn('"peer claude:x"', text)
+
+
+class TestQuotedListItems(unittest.TestCase):
+    def test_quoted_list_item_round_trips(self):
+        from cairn.frontmatter import parse_frontmatter
+
+        text = '---\nartifacts:\n  - "dir/a \\"b\\": c.md"\n  - plain.md\n---\nbody\n'
+        parsed = parse_frontmatter(text)
+        self.assertEqual(parsed["artifacts"], ['dir/a "b": c.md', "plain.md"])
+        from cairn.frontmatter import preserved_tail
+
+        quoted = (
+            '---\nstatus: active\ntags:\n  - "\\"q\\""\n  - a b\nprojects:\n  - "\\"p\\""\n---\nx\n'
+        )
+        fm = parse_frontmatter(quoted)
+        self.assertEqual(fm["tags"], ['"q"', "a b"])
+        again = parse_frontmatter("---\n" + "\n".join(preserved_tail(fm)) + "\n---\nx\n")
+        self.assertEqual(again["tags"], ['"q"', "a b"])
+        self.assertEqual(again["projects"], ['"p"'])

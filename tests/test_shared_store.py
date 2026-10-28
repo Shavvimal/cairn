@@ -70,6 +70,7 @@ class StoreFixture(unittest.TestCase):
             CAIRN_CONFIG=str(self.config),
             XDG_CACHE_HOME=str(self.root / "cache"),
             XDG_CONFIG_HOME=str(self.root / "xdg"),
+            XDG_STATE_HOME=str(self.root / "state"),
             CODEX_HOME=str(self.root / "codex-home"),
             CLAUDE_CONFIG_DIR=str(self.root / "claude-home"),
             QMD_CONFIG_DIR=str(self.root / "xdg/qmd"),

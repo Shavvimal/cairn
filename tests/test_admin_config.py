@@ -6,7 +6,7 @@ import io
 import json
 import os
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -60,7 +60,15 @@ class TestConfigShow(_ConfigFixture):
         self.assertEqual(data["data_root"], "/tmp/ctx")
         self.assertEqual(
             set(data),
-            {"config_path", "data_root", "qmd_binary", "cron_schedule", "collections", "invoke"},
+            {
+                "config_path",
+                "data_root",
+                "qmd_binary",
+                "cron_schedule",
+                "collections",
+                "invoke",
+                "routines",
+            },
         )
         self.assertEqual(data["invoke"]["codex"]["model"], "gpt-6-astra")
         self.assertIsNone(data["invoke"]["claude"]["effort"])
@@ -300,3 +308,211 @@ class TestServiceDocs(_ConfigFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+ROUTINE = {
+    "peer": "claude",
+    "prompt_file": "/tmp/site/prompts/daily.md",
+    "cd": "/tmp/site",
+    "profile": "scheduled",
+    "at": "05:20",
+    "validate": ["true"],
+}
+PROFILE = {"base": "edit", "extra_args": ["--permission-mode", "dontAsk"]}
+
+
+def _quiet(fn, *args) -> tuple[int, str, str]:
+    """Run an admin command, returning (exit_code, stdout, stderr)."""
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = fn(*args)
+    return rc, out.getvalue(), err.getvalue()
+
+
+class TestConfigSetRoutines(_ConfigFixture):
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(
+            _quiet(admin._config_set, "invoke.claude.profiles.scheduled", json.dumps(PROFILE))[0],
+            0,
+        )
+
+    def test_set_whole_routine_then_show_round_trip(self):
+        rc, _, err = _quiet(admin._config_set, "routines.daily", json.dumps(ROUTINE))
+        self.assertEqual(rc, 0, err)
+        shown = self._show_json()["routines"]["daily"]
+        resolved = shown.pop("resolved")
+        self.assertEqual(shown, ROUTINE)
+        self.assertEqual(resolved["prompt_file"], "/tmp/site/prompts/daily.md")
+        self.assertEqual(resolved["outputs"], {"journal_dir": "/tmp/ctx/journal"})
+        self.assertEqual(resolved["log"], "/tmp/ctx/logs/routine-daily.log")
+        self.assertEqual(resolved["label"], "dev.cairn.routine.daily")
+        self.assertTrue(resolved["plist"].endswith("dev.cairn.routine.daily.plist"))
+        self.assertTrue(resolved["state_dir"].endswith("cairn/routines/daily"))
+        # The template's example routine is listed too.
+        self.assertIn("example-daily", self._show_json()["routines"])
+        rc, text = _capture(admin._config_show, False)
+        self.assertIn("claude profile scheduled = base edit + --permission-mode dontAsk", text)
+        self.assertIn("daily                  claude/scheduled at 05:20 local, catch-up 3d", text)
+        self.assertIn("outputs.journal_dir = /tmp/ctx/journal", text)
+
+    def test_set_routine_scalars_coerce(self):
+        _quiet(admin._config_set, "routines.daily", json.dumps(ROUTINE))
+        for key, value in (
+            ("catch_up_days", "5"),
+            ("timeout_s", "null"),
+            ("budget_usd_per_day", "2.5"),
+            ("model", "opus"),
+            ("prepare", '["cairn", "recall", "digest", "--day", "{{DAY}}"]'),
+        ):
+            rc, _, err = _quiet(admin._config_set, f"routines.daily.{key}", value)
+            self.assertEqual(rc, 0, err)
+        spec = config.get_config().routines["daily"]
+        self.assertEqual(spec.catch_up_days, 5)
+        self.assertIsNone(spec.timeout_s)
+        self.assertEqual(spec.budget_usd_per_day, 2.5)
+        self.assertEqual(spec.model, "opus")
+        self.assertEqual(spec.prepare, ("cairn", "recall", "digest", "--day", "{{DAY}}"))
+        rc, _, err = _quiet(admin._config_set, "routines.daily.catch_up_days", "99")
+        self.assertEqual(rc, 1)
+        self.assertIn("catch_up_days must be an integer from 1 to 30", err)
+
+    def test_field_on_missing_routine_refused(self):
+        rc, _, err = _quiet(admin._config_set, "routines.nightly.at", "06:00")
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "routine 'nightly' does not exist; create it with: cairn config set "
+            "routines.nightly '{\"peer\": ..., ...}'",
+            err,
+        )
+
+    def test_sources_comma_list_and_json(self):
+        _quiet(admin._config_set, "routines.daily", json.dumps(ROUTINE))
+        self.assertEqual(_quiet(admin._config_set, "routines.daily.sources", "claude,codex")[0], 0)
+        self.assertEqual(config.get_config().routines["daily"].sources, ("claude", "codex"))
+        self.assertEqual(_quiet(admin._config_set, "routines.daily.sources", '["claude"]')[0], 0)
+        self.assertEqual(config.get_config().routines["daily"].sources, ("claude",))
+        rc, _, err = _quiet(admin._config_set, "routines.daily.sources", "cursor")
+        self.assertEqual(rc, 1)
+        self.assertIn("disabled (sync.enabled=false)", err)
+
+    def test_validate_requires_json_array(self):
+        _quiet(admin._config_set, "routines.daily", json.dumps(ROUTINE))
+        rc, _, err = _quiet(admin._config_set, "routines.daily.validate", "pnpm,validate")
+        self.assertEqual(rc, 1)
+        self.assertIn("takes a JSON array of strings (an argv list)", err)
+        rc, _, err = _quiet(
+            admin._config_set, "routines.daily.validate", '["pnpm", "validate", "{{DAY}}"]'
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            config.get_config().routines["daily"].validate, ("pnpm", "validate", "{{DAY}}")
+        )
+
+    def test_outputs_key_set_and_null_removes(self):
+        _quiet(admin._config_set, "routines.daily", json.dumps(ROUTINE))
+        rc, _, err = _quiet(admin._config_set, "routines.daily.outputs.inbox_dir", "/tmp/inbox")
+        self.assertEqual(rc, 0, err)
+        outputs = config.get_config().routines["daily"].outputs
+        self.assertEqual(outputs["inbox_dir"], Path("/tmp/inbox"))
+        self.assertEqual(
+            _quiet(admin._config_set, "routines.daily.outputs.inbox_dir", "null")[0], 0
+        )
+        self.assertNotIn("inbox_dir", config.get_config().routines["daily"].outputs)
+        rc, _, err = _quiet(admin._config_set, "routines.daily.outputs.day", "/tmp/x")
+        self.assertEqual(rc, 1)
+        self.assertIn("which is a built-in variable", err)
+
+    def test_unset_profile_in_use_restored(self):
+        _quiet(admin._config_set, "routines.daily", json.dumps(ROUTINE))
+        before = self.cfg_path.read_text()
+        rc, _, err = _quiet(admin._config_unset, "invoke.claude.profiles.scheduled")
+        self.assertEqual(rc, 1)
+        self.assertIn(".profile 'scheduled' is not a profile of claude", err)
+        self.assertEqual(self.cfg_path.read_text(), before)
+
+    def test_unset_routine_field_output_and_routine(self):
+        _quiet(admin._config_set, "routines.daily", json.dumps({**ROUTINE, "model": "opus"}))
+        self.assertEqual(_quiet(admin._config_unset, "routines.daily.model")[0], 0)
+        self.assertIsNone(config.get_config().routines["daily"].model)
+        rc, _, err = _quiet(admin._config_unset, "routines.daily.at")
+        self.assertEqual(rc, 1)
+        self.assertIn("routines.daily.at is required; set it instead", err)
+        rc, out, _ = _quiet(admin._config_unset, "routines.daily")
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "Removed routines.daily; its launchd job stays until 'cairn routine uninstall daily'",
+            out,
+        )
+        self.assertNotIn("daily", config.get_config().routines)
+
+
+class TestConfigSetProfiles(_ConfigFixture):
+    def test_set_profile_object_round_trip(self):
+        rc, _, err = _quiet(admin._config_set, "invoke.codex.profiles.nightly", '{"base": "edit"}')
+        self.assertEqual(rc, 0, err)
+        rc, _, err = _quiet(
+            admin._config_set,
+            "invoke.codex.profiles.nightly.extra_args",
+            '["--add-dir", "/tmp/journal"]',
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            _quiet(admin._config_set, "invoke.codex.profiles.nightly.base", "review")[0], 0
+        )
+        shown = self._show_json()["invoke"]["codex"]["profiles"]["nightly"]
+        self.assertEqual(
+            shown,
+            {"name": "nightly", "base": "review", "extra_args": ["--add-dir", "/tmp/journal"]},
+        )
+        rc, _, err = _quiet(admin._config_set, "invoke.codex.profile", "nightly")
+        self.assertEqual(rc, 0, err)
+        rc, _, err = _quiet(admin._config_set, "invoke.antigravity.profiles.x", '{"base": "edit"}')
+        self.assertEqual(rc, 1)
+        rc, _, err = _quiet(admin._config_set, "invoke.codex.profiles.other.base", "edit")
+        self.assertEqual(rc, 1)
+        self.assertIn("profile 'other' does not exist", err)
+
+    def test_profiles_scalar_key_refused(self):
+        rc, _, err = _quiet(admin._config_set, "invoke.claude.profiles", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("profiles is an object of named profiles", err)
+        rc, _, err = _quiet(admin._config_set, "invoke.claude.profiles.x", "edit")
+        self.assertEqual(rc, 1)
+        self.assertIn("takes a JSON object", err)
+
+
+class TestConfigShowNotes(_ConfigFixture):
+    def test_notes_type_for_storeless_collection(self):
+        types = {c["name"]: c["type"] for c in self._show_json()["collections"]}
+        self.assertEqual(types["journal"], "notes")
+        self.assertEqual(types["service-docs"], "service-docs")
+        self.assertEqual(types["claude-code-sessions"], "sessions")
+
+
+class TestDisableSourceInRoutine(_ConfigFixture):
+    """The shipped example names claude and codex in ``example-daily``: disabling one of
+    them must drop it from the routine, not reject the edit."""
+
+    def setUp(self):
+        super().setUp()
+        self.example = Path(self._tmp.name) / "example.json"
+        self.example.write_text(config.example_template_text(), encoding="utf-8")
+        os.environ["CAIRN_CONFIG"] = str(self.example)
+        config.get_config.cache_clear()
+
+    def test_disable_codex_on_example_config(self):
+        self.assertEqual(config.get_config().routines["example-daily"].sources, ("claude", "codex"))
+        rc, out, err = _quiet(admin._config_set, "codex.enabled", "false")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Set codex.enabled = false", out)
+        self.assertIn("note: removed codex from routines.example-daily.sources", out)
+        loaded = config.load_config_from(self.example)
+        self.assertFalse(loaded.collections["codex-sessions"].sync.enabled)
+        self.assertEqual(loaded.routines["example-daily"].sources, ("claude",))
+
+    def test_disable_unused_source_prints_no_note(self):
+        rc, out, err = _quiet(admin._config_set, "cursor.enabled", "false")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("note:", out)
+        self.assertEqual(config.get_config().routines["example-daily"].sources, ("claude", "codex"))

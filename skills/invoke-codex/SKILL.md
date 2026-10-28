@@ -40,6 +40,13 @@ Default `--profile review` (Codex sandbox `read-only`). Ask before `edit` (`work
 or `full` (`danger-full-access`). `--sandbox` passes a native Codex sandbox mode directly and
 overrides the profile. The record stores the exact flags that ran.
 
+`--profile` also accepts a name from `invoke.codex.profiles` in the config: a built-in
+`base` plus `extra_args`, limited to `--add-dir DIR` and `-c KEY=VALUE` pairs (keys that
+change the sandbox, approval or model are refused). `codex exec resume` takes no
+`--add-dir`, so a resumed round drops it with a warning. A profile holding `{{NAME}}` tokens
+runs through `cairn routine run`, which renders them. `--owner LABEL` records who started the round (a
+routine passes `routine:<name>`); a resume keeps it.
+
 ## 4. Run in the background
 
 A high effort run takes 10 to 20 minutes, past any foreground tool budget. Start it the way

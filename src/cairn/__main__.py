@@ -31,6 +31,7 @@ _ADMIN: dict[str, str] = {
     "cron": "cairn.admin:cron_main",
     "invoke": "cairn.invoke:main",
     "agents": "cairn.agents:main",
+    "routine": "cairn.routine:main",
 }
 
 _HELP = """\
@@ -57,6 +58,8 @@ recall (temporal view over shared exported sessions; topic search is qmd's job):
   cairn recall list yesterday                sessions from a date window
   cairn recall list "last week" --json       machine-readable session list
   cairn recall expand <source:session-id>           condensed transcript for one session
+  cairn recall digest yesterday --all-projects --json   one UTC day condensed, cited by f<N>
+  cairn recall frame <source:session-id> N [--frames FILE]   print frame N, check its hash
 
 peer agents (one foreground round per call; run it in the background):
   cairn invoke codex --prompt TEXT [--effort E] [--profile review|edit|full] [--json]
@@ -83,8 +86,13 @@ orchestration / admin:
   cairn config init | path                   create / locate the per-user config
   cairn config show [--json]                 print the resolved config + integrations
   cairn config set KEY VALUE                 set one config value (e.g. claude.store …)
+  cairn config unset KEY                     remove a routine, routine field or invoke profile
   cairn config add-service-doc NAME PATH     mirror a docs folder into service-docs
   cairn cron install | uninstall             manage the hourly sync crontab entry
+  cairn routine install | uninstall NAME     add / remove the launchd job (macOS)
+  cairn routine run NAME [--day D] [--force] [--dry-run]   run due days now
+  cairn routine list | status NAME [--json]  routines, stamps, last run, cost, log tail
+  cairn routine kickstart NAME [--force-restart]   ask launchd to start the job now
 
 other:
   cairn help                                 show this overview

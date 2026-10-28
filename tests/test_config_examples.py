@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from cairn import config
 
@@ -32,6 +33,19 @@ class TestConfigExamplesInSync(unittest.TestCase):
         data = json.loads(config.example_template_text())
         for key in ("data_root", "collections"):
             self.assertIn(key, data)
+
+    def test_packaged_example_loads(self):
+        """The example routine and profile pass load-time validation."""
+        with TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "config.json"
+            copy.write_text(config.example_template_text(), encoding="utf-8")
+            loaded = config.load_config_from(copy)
+        routine = loaded.routines["example-daily"]
+        self.assertEqual((routine.peer, routine.profile), ("claude", "scheduled"))
+        self.assertEqual(routine.outputs["journal_dir"], loaded.data_root / "journal")
+        self.assertIn("scheduled", loaded.invoke.claude.profiles)
+        self.assertIn("journal", loaded.collections)
+        self.assertIsNone(loaded.collections["journal"].store)
 
 
 if __name__ == "__main__":
