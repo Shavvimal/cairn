@@ -3,7 +3,7 @@
 Two halves of every exported session file are source-agnostic:
 
 1. The **preserved tail** of the frontmatter - ``status``, ``tags``, ``rating``,
-   ``comments``, ``projects`` and (only when non-empty) ``links`` - which is
+   ``comments``, ``projects`` and (only when non-empty) ``links`` and ``owner`` - which is
    round-tripped identically across syncs so user edits survive. Every adapter
    emits these the same way.
 2. The **My Notes** block and the trailing ``## Conversation`` body.
@@ -25,11 +25,20 @@ from typing import Any
 # Fields preserved across re-syncs so manual edits survive: the tail fields are
 # re-emitted by preserved_tail(); ``title`` is preserved separately via
 # resolve_title() in each adapter's head. (Informational - not used as control flow.)
-PRESERVED_FIELDS = {"comments", "projects", "status", "tags", "rating", "title", "links"}
+PRESERVED_FIELDS = {
+    "comments",
+    "projects",
+    "status",
+    "tags",
+    "rating",
+    "title",
+    "links",
+    "owner",
+}
 PRESERVED_SECTION = "## My Notes"
 
 _DOCUMENT_RE = re.compile(r"\A(---\n)(.*?)(\n---\n)(.*)\Z", re.DOTALL)
-_TAIL_KEYS = ("status:", "tags:", "rating:", "comments:", "projects:", "links:")
+_TAIL_KEYS = ("status:", "tags:", "rating:", "comments:", "projects:", "links:", "owner:")
 
 
 class FrontmatterParseError(ValueError):
@@ -99,7 +108,10 @@ def parse_frontmatter(content: str) -> dict:
                 )
             if not isinstance(frontmatter.get(current_array), list):
                 frontmatter[current_array] = []
-            frontmatter[current_array].append(line[4:].strip())
+            item = line[4:].strip()
+            if len(item) >= 2 and item[0] == '"' and item[-1] == '"':
+                item = _unescape_scalar(item[1:-1])
+            frontmatter[current_array].append(item)
             continue
 
         if not line.strip():
@@ -273,8 +285,10 @@ def preserved_tail(existing_fm: dict | None, default_status: str = "active") -> 
 
     Order: status, tags, rating, comments, projects, then ``links`` (a block list
     of ``"<role> <source>:<id>"`` entries) only when non-empty, so a document
-    without links stays byte-identical to a pre-links export. Values come from the
-    existing file's frontmatter (round-tripped) so manual edits survive a sync.
+    without links stays byte-identical to a pre-links export, then ``owner`` (the
+    owner label a ``cairn invoke --owner`` round set) only when non-empty, with the
+    same guarantee. Values come from the existing file's frontmatter (round-tripped)
+    so manual edits survive a sync.
     """
     lines = []
 
@@ -316,6 +330,10 @@ def preserved_tail(existing_fm: dict | None, default_status: str = "active") -> 
         lines.append("links:")
         for link in links:
             lines.append(f"  - {link}")
+
+    owner = existing_fm.get("owner") if existing_fm else None
+    if isinstance(owner, str) and owner.strip() and owner != "null":
+        lines.append(f"owner: {owner.strip()}")
 
     return lines
 
