@@ -94,9 +94,9 @@ from .harnesses.antigravity import (
     resolved_project,
 )
 from .harnesses.claude import KEYCHAIN_GUIDANCE, keychain_failure
-from .harnesses.codex import resume_warnings
+from .harnesses.codex import resume_warnings, split_profile_args
 from .health import Health, classify, heartbeat, identity_alive, parse_iso, process_identity
-from .mutations import OWNER_RE, invalid_owner_message
+from .mutations import invalid_owner_message, valid_owner
 from .registry import BY_NAME
 from .storage import atomic_write, lock_path, locked
 
@@ -1518,7 +1518,7 @@ class Runner:
                 "--fork is not supported by antigravity (agy cannot fork a conversation)"
             )
         owner = getattr(args, "owner", None)
-        if owner is not None and not OWNER_RE.match(owner):
+        if owner is not None and not valid_owner(owner):
             raise UsageError(invalid_owner_message(owner))
         caller, caller_warnings = resolve_caller(args.parent)
         prompt = _read_prompt(args)
@@ -1670,8 +1670,12 @@ class Runner:
         full_prompt = f"{head}\n\n---\n\n{prompt}"
         via_stdin = len(full_prompt.encode("utf-8")) > STDIN_PROMPT_BYTES
         resume_id = recorded.thread_id if recorded is not None else None
+        recorded_args = settings.profile_args
         if self.peer == "codex" and resume_id is not None:
             self.warnings += resume_warnings(settings.profile_args)
+            if recorded_args:
+                # codex exec resume takes no --add-dir: record the policy as emitted.
+                recorded_args = split_profile_args(recorded_args)[0]
         extra = settings.extra
         if self.args.fork and self.peer == "claude":
             extra = ("--fork-session", *extra)
@@ -1736,7 +1740,7 @@ class Runner:
             "profile": settings.profile,
             "native_policy": list(
                 self.harness.policy_argv(
-                    settings.profile_base, settings.native_policy, settings.profile_args
+                    settings.profile_base, settings.native_policy, recorded_args
                 )
             ),
             "caller_session": caller,
@@ -2635,13 +2639,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--effort")
     run.add_argument(
         "--profile",
-        help="permission profile: review, edit, full or a name in invoke.<peer>.profiles",
+        help="permission profile: review, edit, full or (claude, codex) a name in "
+        "invoke.<peer>.profiles",
     )
     run.add_argument(
         "--profile-args-file",
         metavar="FILE",
-        help="plumbing for 'cairn routine run': a JSON array of rendered args that "
-        "replaces the config profile's extra_args for this round",
+        help="plumbing for 'cairn routine run' (claude, codex): a JSON array of rendered "
+        "args that replaces the config profile's extra_args for this round",
     )
     run.add_argument(
         "--owner",

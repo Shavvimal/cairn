@@ -481,21 +481,6 @@ class TestConfigSetProfiles(_ConfigFixture):
         self.assertEqual(rc, 1)
         self.assertIn("takes a JSON object", err)
 
-    def test_space_form_rule_warns_at_show(self):
-        rc, _, err = _quiet(
-            admin._config_set,
-            "invoke.claude.profiles.loose",
-            '{"base": "edit", "extra_args": ["--allowedTools", "Bash(cairn *)"]}',
-        )
-        self.assertEqual(rc, 0, err)
-        rc, _, err = _quiet(admin._config_show, False)
-        self.assertEqual(rc, 0)
-        self.assertIn(
-            "warning: invoke.claude.profiles.loose: rule 'Bash(cairn *)' uses the space form; "
-            "Claude matches only the prefix form 'Bash(cairn:*)'",
-            err,
-        )
-
 
 class TestConfigShowNotes(_ConfigFixture):
     def test_notes_type_for_storeless_collection(self):

@@ -1655,8 +1655,8 @@ class TestClaudeProfileArgv(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             check("review", ("--permission-mode", "dontAsk"))
-        self.assertEqual(check("full", ("--permission-mode", "bypassPermissions")), [])
-        self.assertEqual(check("review", ("--permission-mode", "plan")), [])
+        check("full", ("--permission-mode", "bypassPermissions"))  # no error
+        check("review", ("--permission-mode", "plan"))  # no error
 
     def test_allowed_tools_takes_one_joined_element(self):
         with self.assertRaises(ValueError) as caught:
@@ -1665,28 +1665,7 @@ class TestClaudeProfileArgv(unittest.TestCase):
             str(caught.exception),
             "--allowedTools takes one comma-joined string; join 'Read', 'Grep' with ','",
         )
-        self.assertEqual(claude_profile_args("edit", ("--allowedTools", "Read,Grep")), [])
-
-    def test_space_form_bash_rule_warns(self):
-        warnings = claude_profile_args("edit", ("--allowedTools", "Read,Bash(cairn *)"))
-        self.assertEqual(
-            warnings,
-            [
-                "rule 'Bash(cairn *)' uses the space form; Claude matches only the prefix "
-                "form 'Bash(cairn:*)'"
-            ],
-        )
-        self.assertEqual(
-            claude_profile_args("edit", ("--disallowedTools", "Bash(git push *)")),
-            [
-                "rule 'Bash(git push *)' uses the space form; Claude matches only the prefix "
-                "form 'Bash(git push:*)'"
-            ],
-        )
-        self.assertEqual(claude_profile_args("edit", ("--allowedTools", "Bash(cairn:*)")), [])
-        self.assertEqual(
-            claude_profile_args("edit", ("--disallowedTools", "Bash(pnpm publish:*)")), []
-        )
+        claude_profile_args("edit", ("--allowedTools", "Read,Grep"))  # no error
 
     def test_forbidden_flags_rejected(self):
         for args, reason in (
@@ -1701,11 +1680,19 @@ class TestClaudeProfileArgv(unittest.TestCase):
                 ("--max-budget-usd", "3"),
                 "--max-budget-usd is set from the routine's budget_usd_per_day; remove it",
             ),
+            (("--settings", "/tmp/s.json"), "--settings needs base 'full'"),
+            (("--settings=/tmp/s.json",), "--settings needs base 'full'"),
+            (("--mcp-config", "/tmp/m.json"), "--mcp-config needs base 'full'"),
+            (
+                ("--permission-prompt-tool", "mcp__x__y"),
+                "--permission-prompt-tool needs base 'full'",
+            ),
         ):
             with self.subTest(args=args), self.assertRaises(ValueError) as caught:
                 claude_profile_args("edit", args)
             self.assertEqual(str(caught.exception), reason)
-        self.assertEqual(claude_profile_args("full", ("--dangerously-skip-permissions",)), [])
+        claude_profile_args("full", ("--dangerously-skip-permissions",))  # no error
+        claude_profile_args("full", ("--settings", "/tmp/s.json"))  # no error
 
 
 class TestCodexProfileArgv(unittest.TestCase):
@@ -1789,7 +1776,7 @@ class TestCodexProfileArgv(unittest.TestCase):
             with self.subTest(args=args), self.assertRaises(ValueError) as caught:
                 codex_profile_args("edit", args)
             self.assertEqual(str(caught.exception), reason)
-        self.assertEqual(codex_profile_args("review", self.ARGS), [])
+        codex_profile_args("review", self.ARGS)  # no error
 
 
 # ---------------------------------------------------------------------------
@@ -1826,6 +1813,8 @@ class TestOwnerTail(unittest.TestCase):
         err = io.StringIO()
         with redirect_stderr(err):
             self.assertFalse(set_owner(lambda _sid: self.path, "abc", "bad owner"))
+            # "null" passes the regex but preserved_tail would drop it: refused.
+            self.assertFalse(set_owner(lambda _sid: self.path, "abc", "null"))
         self.assertIn("--owner must be 1 to 128 characters", err.getvalue())
         self.assertEqual(self.path.read_text(), once)
 

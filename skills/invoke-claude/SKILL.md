@@ -48,8 +48,8 @@ stores the exact flags that ran.
 `--profile` also accepts a name from `invoke.claude.profiles` in the config: a built-in
 `base` plus `extra_args` such as `--allowedTools` and `--disallowedTools`, each one
 comma-joined string. Such a profile cannot drop its base's deny rules or switch to a looser
-permission mode, and deny beats allow. Bash rules use the prefix form `Bash(cmd:*)`. A
-profile holding `{{NAME}}` tokens runs only through `cairn routine run`. `--owner LABEL`
+permission mode, and deny beats allow. `Bash(cmd *)` and `Bash(cmd:*)` are the same rule. A
+profile holding `{{NAME}}` tokens runs through `cairn routine run`, which renders them. `--owner LABEL`
 records who started the round (a routine passes `routine:<name>`); a resume keeps it.
 
 ## 4. Run in the background

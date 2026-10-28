@@ -1,6 +1,6 @@
 ---
 name: recall
-description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the shared exported store via the cairn CLI; topic queries search across QMD collections (BM25) plus an exact-match ripgrep pass. Every recall ends with "One Thing" - the single highest-leverage next action synthesized from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context from past sessions", "what was I doing", or "session history". Requires the cairn CLI and qmd (install via /cairn:setup); rg is optional.
+description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the shared exported store via the cairn CLI; topic queries search across QMD collections (BM25) plus an exact-match ripgrep pass. Every recall ends with "One Thing" - the single highest-leverage next action synthesized from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context from past sessions", "what was I doing", "session history", "digest yesterday", "daily digest", or "cite the frame". Requires the cairn CLI and qmd (install via /cairn:setup); rg is optional.
 argument-hint: [yesterday|today|last week|this week|YYYY-MM-DD|TOPIC]
 allowed-tools: Bash(cairn:*), Bash(qmd:*), Bash(rg:*), Bash(head:*)
 ---

@@ -212,13 +212,20 @@ class Condenser:
     def __init__(self, cursor: bool = False):
         self.cursor = cursor
         self._last_output: tuple[str, int] | None = None
+        # Per ordinal: (referenced ordinal, placeholder line, the full condensed output),
+        # so a digest can restore an output whose referent the cap dropped.
+        self.refs: dict[int, list[tuple[int, str, str]]] = {}
 
     def _output(self, text: str, ordinal: int) -> str:
         digest = hashlib.sha1(text.encode("utf-8"), usedforsecurity=False).hexdigest()
+        full = head_tail(text, OUTPUT_KEEP, OUTPUT_HEAD, OUTPUT_TAIL)
         if self._last_output and self._last_output[0] == digest:
-            return f"[same output as f{self._last_output[1]}]"
+            target = self._last_output[1]
+            placeholder = f"[same output as f{target}]"
+            self.refs.setdefault(ordinal, []).append((target, placeholder, escape(full)))
+            return placeholder
         self._last_output = (digest, ordinal)
-        return head_tail(text, OUTPUT_KEEP, OUTPUT_HEAD, OUTPUT_TAIL)
+        return full
 
     def _tool(self, tool: Tool, ordinal: int) -> list[str]:
         call = f"[tool {tool.name}]"

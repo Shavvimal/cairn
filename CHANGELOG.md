@@ -49,8 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   base's flags. A profile cannot drop its base's deny rules or switch to a looser
   permission mode; flags cairn sets itself are refused. Claude: one `--permission-mode`
   (the profile's replaces the base's), `--disallowedTools` appends to `review`'s list,
-  `--allowedTools` and `--disallowedTools` take one comma-joined string, and a Bash rule in
-  the space form `Bash(cmd *)` warns, because Claude matches only `Bash(cmd:*)`. Codex:
+  `--allowedTools` and `--disallowedTools` take one comma-joined string, and `--settings`,
+  `--mcp-config`, `--strict-mcp-config` and `--permission-prompt-tool` need base `full`. Codex:
   only `--add-dir DIR` and `-c KEY=VALUE` pairs; a resume drops `--add-dir` with a warning.
   A resumed thread reuses the recorded profile args, not today's config. An explicit
   `--permission-mode` or `--sandbox` replaces only the mode of a config profile.

@@ -84,6 +84,7 @@ def run_command(
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 env=env,
                 cwd=cwd,
             )
@@ -193,14 +194,19 @@ class Run:
         self.counts = {"done": 0, "empty": 0, "failed": 0, "deferred": 0}
         self.failures: list[dict] = []
         self.costs: list[float] = []
+        # History of a done day that a forced re-run superseded (its stamp is gone).
+        self._carried: dict[date, list[dict]] = {}
 
     # ---- stamps ---------------------------------------------------------
 
     def _prior_history(self, day: date) -> list[dict]:
+        if day in self._carried:
+            return list(self._carried[day])
         return prior_history(self.sdir, day)
 
     def spent(self, day: date) -> float:
-        return spent_on(self.sdir, day)
+        """The cost of ``day``'s earlier attempts; a ``null`` cost counts as 0."""
+        return sum(float(h.get("cost_usd") or 0) for h in self._prior_history(day))
 
     def _cost(self, cost: float | None) -> None:
         if cost is not None:
@@ -230,7 +236,8 @@ class Run:
         attempts = sum(
             1
             for h in history
-            if h.get("counted", True) and h.get("reason") not in UNCOUNTED_REASONS
+            if h.get("counted", True)
+            and h.get("reason") not in (*UNCOUNTED_REASONS, "done", "empty")
         )
         previous = read_json(stamp_path(self.sdir, "failed", day)) or {}
         total = sum(float(h.get("cost_usd") or 0) for h in history)
@@ -325,6 +332,13 @@ class Run:
         where = attempt_dir(self.config, spec.name, day, number)
         started_at = now_iso()
         self.log.event("day-start", day=iso, attempt=number)
+        done = stamp_path(self.sdir, "done", day)
+        if done.is_file():
+            # A forced re-run of a done day: the old completion no longer describes the
+            # current output, so it moves into history until this attempt validates.
+            self._carried[day] = prior_history(self.sdir, day)
+            done.unlink()
+            self.log.event("day-superseded", day=iso, attempt=number)
         rendered = render_day(self.config, spec, day, where)  # RoutineError: exit 2
         try:
             for path in (*spec.outputs.values(), where, where / "digest"):

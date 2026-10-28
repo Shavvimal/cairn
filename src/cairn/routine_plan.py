@@ -236,7 +236,13 @@ def compute_days(
                 if day is not None:
                     skipped.append((candidate, "done"))
                 continue
-            if attempts_used(read_json(stamp_path(sdir, "failed", candidate))) >= ATTEMPT_CAP:
+            failed = stamp_path(sdir, "failed", candidate)
+            if failed.is_file() and read_json(failed) is None:
+                # Fail closed: a stamp that cannot be read must not reset the cap or
+                # the day's spend. --force runs the day anyway (a new history starts).
+                skipped.append((candidate, "corrupt-stamp"))
+                continue
+            if attempts_used(read_json(failed)) >= ATTEMPT_CAP:
                 skipped.append((candidate, "attempts-exhausted"))
                 continue
         days.append(candidate)

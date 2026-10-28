@@ -43,9 +43,17 @@ PROFILE_RESERVED_FLAGS = frozenset(
         "--",
     }
 )
-# Flags that skip every permission prompt: only a ``full`` base may carry them.
+# Flags that skip every permission prompt, or that can add allow rules, hooks or an
+# approval tool behind the base's back: only a ``full`` base may carry them.
 PROFILE_FULL_ONLY_FLAGS = frozenset(
-    {"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions"}
+    {
+        "--dangerously-skip-permissions",
+        "--allow-dangerously-skip-permissions",
+        "--settings",
+        "--mcp-config",
+        "--strict-mcp-config",
+        "--permission-prompt-tool",
+    }
 )
 _TOOL_LIST_FLAGS = ("--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools")
 _DISALLOWED_FLAGS = ("--disallowedTools", "--disallowed-tools")
@@ -65,48 +73,13 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def split_rules(value: str) -> list[str]:
-    """Split a comma-joined permission rule list, keeping commas inside ``(...)``."""
-    rules: list[str] = []
-    depth = 0
-    current = ""
-    for char in value:
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth = max(0, depth - 1)
-        if char == "," and depth == 0:
-            rules.append(current.strip())
-            current = ""
-            continue
-        current += char
-    if current.strip():
-        rules.append(current.strip())
-    return [rule for rule in rules if rule]
-
-
-def _space_form_warning(rule: str) -> str | None:
-    """The warning for a ``Bash(x *)`` rule: Claude only matches ``Bash(x:*)``."""
-    if not (rule.startswith("Bash(") and rule.endswith(")")):
-        return None
-    inner = rule[len("Bash(") : -1]
-    if " " not in inner or ":*" in inner:
-        return None
-    prefix = inner[:-2] if inner.endswith(" *") else inner
-    return (
-        f"rule {rule!r} uses the space form; Claude matches only the prefix form "
-        f"'Bash({prefix.strip()}:*)'"
-    )
-
-
-def check_profile_args(base: str, args: tuple[str, ...]) -> list[str]:
+def check_profile_args(base: str, args: tuple[str, ...]) -> None:
     """Validate a config profile's ``extra_args`` for base ``base``.
 
-    Raises ``ValueError`` with the reason; returns warnings that do not fail the load.
+    Raises ``ValueError`` with the reason.
     """
     if base not in PROFILE_MODES:
         raise ValueError(f"unknown base {base!r}; choose {', '.join(PROFILE_MODES)}")
-    warnings: list[str] = []
     seen_mode = False
     index = 0
     while index < len(args):
@@ -146,14 +119,9 @@ def check_profile_args(base: str, args: tuple[str, ...]) -> list[str]:
             if following:
                 parts = ", ".join(repr(part) for part in (value, *following))
                 raise ValueError(f"{token} takes one comma-joined string; join {parts} with ','")
-            for rule in split_rules(value):
-                warning = _space_form_warning(rule)
-                if warning:
-                    warnings.append(warning)
             index += 2
             continue
         index += 1
-    return warnings
 
 
 def merge_profile_args(base_argv: tuple[str, ...], args: tuple[str, ...]) -> tuple[str, ...]:

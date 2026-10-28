@@ -167,8 +167,9 @@ def _context(frames: list[Frame], first: int, times: list, start: datetime) -> F
 
 def primary_blocks(
     record: SessionRecord, frames: list[Frame], window: list[bool], times: list, start: datetime
-) -> list[tuple[int, bool, bool, str]]:
-    """``(ordinal, is_user, in_window, block)`` for a primary or subagent session."""
+) -> tuple[list[tuple[int, bool, bool, str]], Condenser]:
+    """``(ordinal, is_user, in_window, block)`` for a primary or subagent session, and
+    the condenser that made them (its ``refs`` resolve dedup lines after the cap)."""
     condenser = Condenser(cursor=record.source == "cursor")
     in_window = [f for f in frames if window[f.ordinal]]
     blocks = []
@@ -180,7 +181,7 @@ def primary_blocks(
         body = condenser.frame(frame.role, frame.body, frame.ordinal)
         is_user = frame.role in ("user", "message")
         blocks.append((frame.ordinal, is_user, True, _block(frame, body, True)))
-    return blocks
+    return blocks, condenser
 
 
 def peer_blocks(frames: list[Frame], window: list[bool]) -> list[tuple[int, bool, bool, str]]:
@@ -210,6 +211,22 @@ def peer_blocks(frames: list[Frame], window: list[bool]) -> list[tuple[int, bool
         if verdicts := verdict_lines(frame.body):
             blocks[frame.ordinal] = (frame.ordinal, False, True, _block(frame, verdicts, True))
     return [blocks[o] for o in sorted(blocks)]
+
+
+def _restore_outputs(blocks: list[tuple[int, bool, bool, str]], kept: set[int], refs: dict) -> bool:
+    """Replace, in place, each ``[same output as fN]`` of a kept block whose frame ``N``
+    the cap dropped with the full output. Returns whether anything changed; the caller
+    then selects again, because a block only ever grows."""
+    changed = False
+    for index, (ordinal, is_user, in_window, block) in enumerate(blocks):
+        if ordinal not in kept:
+            continue
+        for target, placeholder, full in refs.get(ordinal, ()):
+            if target not in kept and placeholder in block:
+                block = block.replace(placeholder, full, 1)
+                changed = True
+        blocks[index] = (ordinal, is_user, in_window, block)
+    return changed
 
 
 def _scalar(value: object) -> str:
@@ -249,11 +266,14 @@ def build(
     if not any(window):
         return None
     family = lineage(record, frames)
+    condenser = None
     if family.role == "peer":
         blocks = peer_blocks(frames, window)
     else:
-        blocks = primary_blocks(record, frames, window, times, start)
+        blocks, condenser = primary_blocks(record, frames, window, times, start)
     kept = select([(o, is_user, b) for o, is_user, _, b in blocks], max_chars)
+    while condenser is not None and _restore_outputs(blocks, kept, condenser.refs):
+        kept = select([(o, is_user, b) for o, is_user, _, b in blocks], max_chars)
     body = "\n".join(b for o, _, _, b in blocks if o in kept)
     dropped = [b for o, _, in_win, b in blocks if in_win and o not in kept]
     today = [f for f in frames if window[f.ordinal]]

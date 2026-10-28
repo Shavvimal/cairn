@@ -259,15 +259,15 @@ config. The config template ships one example, which runs nothing until you inst
 `peer` is `claude` or `codex`. `at` is `HH:MM` local time; the day a run works on is always
 `yesterday-utc`. Optional fields: `model`, `catch_up_days` (1 to 30, default 3),
 `timeout_s`, `budget_usd_per_day` (Claude only; the remainder for the day goes to
-`--max-budget-usd`), `outputs` (named directories, created before each attempt) and
+`--max-budget-usd`, a client-side estimate that spend can pass, so leave headroom), `outputs` (named directories, created before each attempt) and
 `prepare`. `prepare` and `validate` are argv lists, never shell strings; both run in `cd`.
 Path fields expand a leading `~` and `{{DATA_ROOT}}`, nothing else, and must end up absolute.
 
 ```bash
 cairn routine run example-daily --dry-run   # print each due day's argv and rendered prompt; run nothing
 cairn routine install example-daily         # add the launchd job dev.cairn.routine.example-daily
-cairn routine kickstart example-daily       # ask launchd to start it now
-cairn routine status example-daily          # config, paths, per-day stamps, last run, cost, log tail
+cairn routine kickstart example-daily       # ask launchd to start it now (--force-restart kills a running instance first)
+cairn routine status example-daily          # config, paths, per-day stamps, last run, cost, log tail (--json, --lines N)
 cairn routine list [--json]                 # every routine with install state and last exit
 cairn routine run example-daily --day 2026-10-27 --force   # re-run one day as a new attempt
 cairn routine uninstall example-daily       # remove the job; stamps, attempts and the log stay
@@ -376,9 +376,13 @@ A profile cannot drop its base's deny rules or switch to a looser permission mod
 cairn sets itself (`--model`, `--resume`, `--output-format` and the like) are refused. It can
 widen what its base approves without a prompt, which is the point: in Claude, deny beats
 allow, so `--allowedTools "Bash(pnpm:*)"` plus `--disallowedTools "Bash(pnpm publish:*)"`
-runs every pnpm script except publishing. Write Bash rules in the prefix form
-`Bash(cmd:*)`; Claude does not match the space form `Bash(cmd *)`, and config validation
-warns about it. Codex `extra_args` take only `--add-dir DIR` and `-c KEY=VALUE` pairs.
+runs every pnpm script except publishing. Write a Bash rule as `Bash(cmd *)`, the form the
+permission dialog writes; `Bash(cmd:*)` is an equivalent spelling of the trailing wildcard.
+A path-scoped rule needs the `//` absolute form: `Edit(/{{JOURNAL_DIR}}/**)` renders to
+`Edit(//...)`. `--settings`, `--mcp-config`, `--strict-mcp-config` and
+`--permission-prompt-tool` need base `full`, because they can add allow rules, hooks or an
+approval tool behind the base's back. Codex `extra_args` take only `--add-dir DIR` and
+`-c KEY=VALUE` pairs.
 `{{NAME}}` tokens are rendered only by `cairn routine run`; plain `cairn invoke` refuses a
 profile that holds one. Set and remove profiles from the CLI:
 

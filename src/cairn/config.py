@@ -478,10 +478,9 @@ def _parse_peer(peer: str, spec: object) -> PeerPolicy:
 _PROFILE_KEYS = ("base", "extra_args")
 
 
-def check_profile_args(peer: str, base: str, args: tuple[str, ...]) -> list[str]:
+def check_profile_args(peer: str, base: str, args: tuple[str, ...]) -> None:
     """Validate a profile's ``extra_args`` against ``peer``'s rules for ``base``.
 
-    Returns the warnings (for example a Claude ``Bash(x *)`` rule in the space form).
     Raises ``ValueError`` with the reason text when a rule is broken.
     """
     if peer == "claude":
@@ -490,7 +489,7 @@ def check_profile_args(peer: str, base: str, args: tuple[str, ...]) -> list[str]
         from .harnesses.codex import check_profile_args as check
     else:
         raise ValueError(f"{peer} takes no config profiles")
-    return check(base, args)
+    check(base, args)
 
 
 def _parse_profile(peer: str, name: str, spec: object) -> ProfileSpec:
@@ -829,24 +828,6 @@ def state_home() -> Path:
     return Path(raw) if raw else Path.home() / ".local" / "state"
 
 
-def profile_warnings(cfg: CairnConfig, only: tuple[str, str] | None = None) -> list[str]:
-    """Warnings from the config profiles' args (a Claude ``Bash(x *)`` space-form rule).
-
-    Every profile of every peer, or only the ``(peer, name)`` profile given in ``only``.
-    """
-    warnings: list[str] = []
-    for peer in PROFILE_PEERS:
-        for name, spec in sorted(cfg.invoke.for_peer(peer).profiles.items()):
-            if only is not None and (peer, name) != only:
-                continue
-            try:
-                found = check_profile_args(peer, spec.base, spec.extra_args)
-            except ValueError:
-                continue
-            warnings += [f"invoke.{peer}.profiles.{name}: {warning}" for warning in found]
-    return warnings
-
-
 def routine_paths(config: CairnConfig, name: str) -> dict[str, Path | str]:
     """The fixed locations of routine ``name``: state dir, log, launchd plist and label."""
     label = f"{ROUTINE_LABEL_PREFIX}{name}"
@@ -961,7 +942,6 @@ __all__ = [
     "get_config",
     "load_config_from",
     "profile_names",
-    "profile_warnings",
     "resolve_profile",
     "routine_paths",
     "state_home",

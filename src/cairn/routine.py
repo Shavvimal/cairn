@@ -28,7 +28,6 @@ from .config import (
     ConfigError,
     RoutineSpec,
     get_config,
-    profile_warnings,
     routine_paths,
 )
 from .routine_plan import (
@@ -161,8 +160,6 @@ def install(config: CairnConfig, name: str) -> int:
     head = spec.validate[0]
     if not Path(head).expanduser().is_absolute() and shutil.which(head, path=search) is None:
         print(f"warning: validate command {head!r} is not on the recorded PATH", file=sys.stderr)
-    for warning in profile_warnings(config, (spec.peer, spec.profile)):
-        print(f"warning: {warning}", file=sys.stderr)
 
     _state, log, plist, label = _paths(config, name)
     text = render_plist(config, spec, environment, cairn_invocation()).decode("utf-8")

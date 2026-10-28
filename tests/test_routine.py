@@ -243,6 +243,41 @@ class TestDays(RoutineFixture):
         self.assertEqual(code, 2)
         self.assertIn("day 2026-11-12 has not ended in UTC", err)
 
+    def test_force_rerun_that_fails_supersedes_the_done_stamp(self):
+        self.state.mkdir(parents=True)
+        (self.state / "done-2026-11-11.json").write_text(
+            json.dumps({"status": "done", "attempt": 1, "cost_usd": 0.5, "history": []})
+        )
+        code, _out, _err = self.cli(
+            "run", "daily", "--day", "2026-11-11", "--force", children=Children(validate=1)
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(len(self.events("day-superseded")), 1)
+        self.assertIsNone(self.stamp("done", "2026-11-11"))
+        failed = self.stamp("failed", "2026-11-11")
+        assert failed is not None
+        self.assertEqual((failed["reason"], failed["attempts"]), ("validate-exit-1", 1))
+        self.assertEqual([h["reason"] for h in failed["history"]], ["done", "validate-exit-1"])
+        self.assertAlmostEqual(failed["cost_usd_total"], 0.5 + 0.84)
+        # The next scheduled run sees the day as pending again.
+        code, out, _err = self.cli("run", "daily", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("day 2026-11-11 attempt 2", out)
+
+    def test_corrupt_failed_stamp_fails_closed(self):
+        self.state.mkdir(parents=True)
+        stamp = self.state / "failed-2026-11-11.json"
+        stamp.write_text('{"attempts": 3, "history": [')
+        children = Children()
+        code, _out, _err = self.cli("run", "daily", children=children)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [e.split("day=")[1] for e in self.events("day-skipped")],
+            ["2026-11-11 reason=corrupt-stamp"],
+        )
+        self.assertNotIn("2026-11-11", [a[-2] for a in children.argvs("validate")])
+        self.assertEqual(stamp.read_text(), '{"attempts": 3, "history": [')
+
     def test_force_new_attempt_numbering(self):
         for number in (1, 2):
             self.attempt("2026-11-11", number).mkdir(parents=True)
@@ -482,6 +517,21 @@ class TestRun(RoutineFixture):
         self.assertEqual(code, 2)
         self.assertIn("refusing to run inside a peer (CAIRN_INVOKE_DEPTH=1)", err)
         self.assertEqual(children.calls, [])
+
+    def test_run_command_keeps_non_utf8_child_output(self):
+        argv = [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'ok\\xff\\n'); sys.stderr.buffer.write(b'\\xfe')",
+        ]
+        for timeout in (None, 30):
+            with self.subTest(timeout=timeout):
+                result = routine_run.run_command(
+                    argv, timeout=timeout, env=dict(os.environ), cwd=None
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "ok\ufffd\n")
+                self.assertEqual(result.stderr, "\ufffd")
 
     def test_dry_run_writes_nothing(self):
         children = Children()
@@ -748,16 +798,9 @@ class TestDoctor(RoutineFixture):
         lines = {label: (level, detail) for level, label, detail in self.checks(Launchctl())}
         self.assertIn("is outside", lines["routine [daily] journal"][1])
 
-    def test_doctor_prints_routine_and_space_form_lines(self):
+    def test_doctor_prints_routine_lines(self):
         from cairn import admin
 
-        data = json.loads(self.config.read_text())
-        data["invoke"]["claude"]["profiles"]["scheduled"]["extra_args"] += [
-            "--allowedTools",
-            "Read,Bash(cairn *)",
-        ]
-        self.config.write_text(json.dumps(data))
-        config.get_config.cache_clear()
         out = io.StringIO()
         with (
             patch("cairn.routine.launchctl", Launchctl()),
@@ -766,9 +809,6 @@ class TestDoctor(RoutineFixture):
         ):
             admin._check_routines(self.cfg)
         text = out.getvalue()
-        self.assertIn(
-            "  warn invoke profile - invoke.claude.profiles.scheduled: rule 'Bash(cairn *)'", text
-        )
         self.assertIn("  warn routine [daily] launchd - not installed", text)
         self.assertIn("  ok   routine [daily] journal - ", text)
 

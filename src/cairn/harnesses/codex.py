@@ -56,9 +56,9 @@ def _sandbox_mode(profile: str, native: tuple[str, ...]) -> str:
         raise ValueError(f"unknown profile {profile!r}; choose {known}") from None
 
 
-def check_profile_args(base: str, args: tuple[str, ...]) -> list[str]:
+def check_profile_args(base: str, args: tuple[str, ...]) -> None:
     """Validate a config profile's ``extra_args``: ``--add-dir DIR`` and ``-c KEY=VALUE``
-    pairs only. Raises ``ValueError`` with the reason; Codex rules carry no warnings."""
+    pairs only. Raises ``ValueError`` with the reason."""
     if base not in SANDBOX_BY_PROFILE:
         raise ValueError(f"unknown base {base!r}; choose {', '.join(SANDBOX_BY_PROFILE)}")
     index = 0
@@ -80,7 +80,6 @@ def check_profile_args(base: str, args: tuple[str, ...]) -> list[str]:
                     f"-c {key}=... is set by cairn invoke or would loosen the sandbox; remove it"
                 )
         index += 2
-    return []
 
 
 def split_profile_args(args: tuple[str, ...]) -> tuple[tuple[str, ...], list[str]]:

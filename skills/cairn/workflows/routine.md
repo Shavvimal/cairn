@@ -47,13 +47,17 @@ cairn config set invoke.claude.profiles.scheduled '{"base": "edit", "extra_args"
 ```
 
 `--allowedTools` and `--disallowedTools` each take one comma-joined string. Deny beats
-allow, so the profile above runs pnpm scripts but never publishes or pushes. Write Bash
-rules in the prefix form `Bash(cmd:*)`; Claude does not match `Bash(cmd *)`. A profile
-cannot drop its base's deny rules or switch to a looser permission mode. Codex profiles take
-only `--add-dir DIR` and `-c KEY=VALUE` pairs.
+allow, so the profile above runs pnpm scripts but never publishes or pushes. `Bash(cmd *)`
+and `Bash(cmd:*)` are the same trailing wildcard; the permission dialog writes the first.
+A path-scoped rule needs the `//` absolute form: `Edit(/{{JOURNAL_DIR}}/**)` renders to
+`Edit(//...)`. A profile cannot drop its base's deny rules or switch to a looser permission
+mode, and `--settings`, `--mcp-config` and `--permission-prompt-tool` need base `full`.
+Codex profiles take only `--add-dir DIR` and `-c KEY=VALUE` pairs.
 
-Run `cairn config show` to see the routine with its resolved paths and any profile warning.
-`cairn config unset routines.daily.prepare` removes an optional field.
+Run `cairn config show` to see the routine with its resolved paths.
+`cairn config unset routines.daily.prepare` removes an optional field. Disabling a
+collection (`cairn config set codex.enabled false`) removes that source from every
+routine's `sources`; re-enabling it does not add the source back.
 
 ## 2. Write the prompt and the commands
 

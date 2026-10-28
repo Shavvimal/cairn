@@ -44,7 +44,7 @@ overrides the profile. The record stores the exact flags that ran.
 `base` plus `extra_args`, limited to `--add-dir DIR` and `-c KEY=VALUE` pairs (keys that
 change the sandbox, approval or model are refused). `codex exec resume` takes no
 `--add-dir`, so a resumed round drops it with a warning. A profile holding `{{NAME}}` tokens
-runs only through `cairn routine run`. `--owner LABEL` records who started the round (a
+runs through `cairn routine run`, which renders them. `--owner LABEL` records who started the round (a
 routine passes `routine:<name>`); a resume keeps it.
 
 ## 4. Run in the background

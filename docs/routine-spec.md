@@ -1,6 +1,8 @@
 # `cairn routine`: implementation spec
 
-Status: draft for implementation on branch `feat/routine`. Version target: 2.9.0.
+Status: implemented on branch `feat/routine-and-digest` (PR 37), version 2.9.0. Section 14
+holds the maintainer answers; where an answer differs from an earlier section (6.2.2 strips
+the depth variable, 6.6 names `--kill`), the answer wins.
 
 This document specifies a generic feature: run a prompt file through a peer agent on a
 schedule, gate the result with a consumer-supplied validation command, and record
@@ -502,6 +504,9 @@ Claude (`claude` 2.1.312, flags checked against `claude --help` on this machine)
   does not fail, on a `Bash(` rule that contains a space and no `:*`:
   `rule 'Bash(cairn *)' uses the space form; Claude matches only the prefix form 'Bash(cairn:*)'`.
   The warning goes to stderr at `config show`, `doctor` and `routine install`.
+  [Superseded in review: the Claude Code permissions reference states that `Bash(cmd *)`
+  and `Bash(cmd:*)` are the same trailing wildcard and that the permission dialog writes
+  the space form, so the warning was removed.]
 - Allowed `--permission-mode` values per base: `review` allows `plan`. `edit` allows
   `plan`, `dontAsk`, `acceptEdits`. `full` allows any value the CLI accepts.
   Reason text: `--permission-mode 'auto' would loosen base 'edit'; allowed: plan, dontAsk, acceptEdits`.
@@ -1027,7 +1032,8 @@ is written as a JSON string. Events and keys:
 | `validate` | `day=` `exit=` `result=valid|empty|invalid` `seconds=` |
 | `day-done` | `day=` `status=done|empty` `attempt=` `cost_usd=` |
 | `day-failed` | `day=` `reason=` `attempts=` `cost_usd=` |
-| `day-skipped` | `day=` `reason=done|attempts-exhausted` |
+| `day-skipped` | `day=` `reason=done|attempts-exhausted|corrupt-stamp` |
+| `day-superseded` | `day=` `attempt=` (a forced re-run of a done day: the done stamp moves into history until this attempt validates) |
 | `day-deferred` | `day=` |
 | `error` | `message=` |
 | `end` | `exit=` `done=` `empty=` `failed=` `deferred=` `cost_usd=` |

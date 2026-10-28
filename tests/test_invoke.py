@@ -2513,6 +2513,8 @@ class TestInvokeProfiles(InvokeFixture):
             "codex resume cannot take --add-dir; /tmp/journal is not writable this round",
             again["warnings"],
         )
+        self.assertNotIn("--add-dir", again["native_policy"])
+        self.assertIn("x.y=1", again["native_policy"])
 
     def test_sandbox_flag_with_config_profile_keeps_extra_args(self):
         result, _data = self.run_codex("--profile", "scheduled", "--sandbox", "read-only")

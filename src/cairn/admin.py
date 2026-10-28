@@ -36,7 +36,6 @@ from .config import (
     expand,
     get_config,
     load_config_from,
-    profile_warnings,
     routine_paths,
     user_config_path,
 )
@@ -227,8 +226,6 @@ def _config_show(as_json: bool) -> int:
                 indent=2,
             )
         )
-        for warning in profile_warnings(cfg):
-            print(f"warning: {warning}", file=sys.stderr)
         return 0
 
     print(f"config_path : {cfg.config_path}")
@@ -262,8 +259,6 @@ def _config_show(as_json: bool) -> int:
         print(f"      cd          = {spec.cd}")
         for key, path in spec.outputs.items():
             print(f"      outputs.{key} = {path}")
-    for warning in profile_warnings(cfg):
-        print(f"warning: {warning}", file=sys.stderr)
     return 0
 
 
@@ -1030,12 +1025,10 @@ def _check_invoke(config: CairnConfig) -> None:
 
 
 def _check_routines(config: CairnConfig) -> None:
-    """Warn-only routines section: the config profiles' space-form ``Bash(x *)`` rules,
-    then per routine its launchd job, last run, window stamps and journal location."""
+    """Warn-only routines section: per routine its launchd job, last run, window stamps
+    and journal location."""
     from .routine import doctor_checks
 
-    for warning in profile_warnings(config):
-        _warn("invoke profile", warning)
     for level, label, detail in doctor_checks(config):
         (_ok if level == "ok" else _warn)(label, detail)
 

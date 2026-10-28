@@ -88,6 +88,7 @@ def run_capped(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        errors="replace",
         env=dict(env) if env is not None else None,
         cwd=cwd,
         start_new_session=True,

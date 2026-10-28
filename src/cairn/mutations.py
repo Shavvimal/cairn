@@ -40,6 +40,12 @@ _LINK_REF: Final[re.Pattern[str]] = re.compile(rf"^({'|'.join(_LINK_SOURCES)}):\
 OWNER_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
+def valid_owner(owner: str) -> bool:
+    """Whether ``owner`` is an owner label: :data:`OWNER_RE`, and never the YAML null
+    spellings that ``preserved_tail`` would drop."""
+    return bool(OWNER_RE.match(owner)) and owner.lower() not in ("null", "none")
+
+
 def invalid_owner_message(owner: str) -> str:
     """Canonical error text for an owner label outside :data:`OWNER_RE`."""
     return (
@@ -206,7 +212,7 @@ def set_owner(find_file: FindFile, session_id: str, owner: str) -> bool:
     Newlines are stripped and the label must match :data:`OWNER_RE`. Idempotent.
     """
     owner = owner.replace("\n", "").replace("\r", "").strip()
-    if not OWNER_RE.match(owner):
+    if not valid_owner(owner):
         print(f"Error: {invalid_owner_message(owner)}", file=sys.stderr)
         return False
 
@@ -229,4 +235,5 @@ __all__ = [
     "set_session_rating",
     "set_session_status",
     "set_session_tags",
+    "valid_owner",
 ]

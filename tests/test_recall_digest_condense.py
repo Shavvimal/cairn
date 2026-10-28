@@ -184,6 +184,12 @@ class TestSelection(DigestFixture):
         head = flags.index(False)
         tail = len(flags) - flags[::-1].index(False)
         self.assertFalse(any(flags[head:tail]), "kept non-user frames are a head plus a tail")
+        # A "[same output as fN]" line is only kept while frame N is; otherwise the
+        # output itself is restored, so the digest never loses both copies.
+        references = [
+            int(m[1]) for m in re.finditer(r"^\[same output as f(\d+)\]$", body, re.MULTILINE)
+        ]
+        self.assertTrue(all(target in kept for target in references), (references, kept))
         rows = [
             json.loads(x)
             for x in (out / "claude-fixture0001.frames.jsonl").read_text().splitlines()

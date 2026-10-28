@@ -280,6 +280,13 @@ def head_close(last_activity: str | None, message_count: int | None = None) -> l
     return lines
 
 
+def _list_item(value: object) -> str:
+    """A block-list item as written: bare, unless it starts with a quote, in which case
+    it is quoted and escaped so that :func:`parse_frontmatter` reads it back unchanged."""
+    text = str(value)
+    return f'"{_escape_scalar(text)}"' if text.startswith('"') else text
+
+
 def preserved_tail(existing_fm: dict | None, default_status: str = "active") -> list[str]:
     """The identical frontmatter tail every source emits.
 
@@ -299,7 +306,7 @@ def preserved_tail(existing_fm: dict | None, default_status: str = "active") -> 
     if isinstance(tags, list) and tags:
         lines.append("tags:")
         for tag in tags:
-            lines.append(f"  - {tag}")
+            lines.append(f"  - {_list_item(tag)}")
     else:
         lines.append("tags: []")
 
@@ -321,7 +328,7 @@ def preserved_tail(existing_fm: dict | None, default_status: str = "active") -> 
     if isinstance(projects, list) and projects:
         lines.append("projects:")
         for proj in projects:
-            lines.append(f"  - {proj}")
+            lines.append(f"  - {_list_item(proj)}")
     else:
         lines.append("projects: []")
 

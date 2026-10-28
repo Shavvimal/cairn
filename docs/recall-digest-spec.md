@@ -1,6 +1,7 @@
 # `cairn recall digest` and `cairn recall frame`: implementation spec
 
-Status: proposal for the maintainer. Branch `feat/recall-digest`. No code exists yet.
+Status: implemented on branch `feat/routine-and-digest` (PR 37). Section 13 holds the
+maintainer answers; where an answer differs from an earlier section, the answer wins.
 
 Every claim about current behaviour cites `path:line` on `main` at the time of writing.
 A claim that could not be checked against the code is marked UNVERIFIED.
