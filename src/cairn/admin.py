@@ -16,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import asdict, fields
 from pathlib import Path
 
@@ -23,15 +24,20 @@ from . import __version__
 from .config import (
     BILLING_PEERS,
     INVOKE_PEERS,
+    PROFILE_PEERS,
+    ROUTINE_REQUIRED,
     BillingPolicy,
     CairnConfig,
     Collection,
     ConfigError,
     PeerPolicy,
+    RoutineSpec,
     example_template_text,
     expand,
     get_config,
     load_config_from,
+    profile_warnings,
+    routine_paths,
     user_config_path,
 )
 from .qmd import (
@@ -86,7 +92,32 @@ def _apply_choices(template: str, data_root: str | None, enable: list[str] | Non
             spec = data.get("collections", {}).get(collection)
             if isinstance(spec, dict):
                 spec.setdefault("sync", {})["enabled"] = source in wanted
+        # A routine may only refresh enabled sources: drop the ones just disabled so
+        # the template's example routine still loads.
+        _drop_routine_sources(data, lambda source: source not in wanted)
     return json.dumps(data, indent=2) + "\n"
+
+
+def _drop_routine_sources(data: dict, drop: Callable[[str], bool]) -> list[str]:
+    """Remove every source ``drop`` selects from each routine's ``sources``, in place.
+
+    A routine may only name an enabled collection, so disabling one (``config init``
+    choices, ``config set <collection>.enabled false``) drops it here first. Returns one
+    note per routine changed.
+    """
+    notes: list[str] = []
+    routines = data.get("routines")
+    for name, routine in routines.items() if isinstance(routines, dict) else ():
+        if not isinstance(routine, dict) or not isinstance(routine.get("sources"), list):
+            continue
+        dropped = [s for s in routine["sources"] if drop(s)]
+        if dropped:
+            routine["sources"] = [s for s in routine["sources"] if not drop(s)]
+            notes.append(
+                f"note: removed {', '.join(dropped)} from routines.{name}.sources "
+                "(a routine may only refresh an enabled collection)"
+            )
+    return notes
 
 
 def _config_init(data_root: str | None = None, enable: list[str] | None = None) -> int:
@@ -123,8 +154,15 @@ def _collection_view(name: str, coll: Collection) -> dict:
         "since": coll.sync.since,
         "on_hook": coll.sync.on_hook,
         "store": str(coll.store) if coll.store else None,
-        # service-docs is the store-less collection; sessions all have a store.
-        "type": "service-docs" if coll.store is None else "sessions",
+        # Sessions all have a store; a store-less collection is service-docs or plain
+        # notes (for example the journal a routine writes).
+        "type": (
+            "service-docs"
+            if coll.service_sources or name == "service-docs"
+            else "notes"
+            if coll.store is None
+            else "sessions"
+        ),
     }
     if coll.service_sources:
         view["service_sources"] = {s.name: str(s.path) for s in coll.service_sources}
@@ -134,6 +172,18 @@ def _collection_view(name: str, coll: Collection) -> dict:
 def _invoke_view(cfg: CairnConfig) -> dict:
     """Machine-readable ``invoke`` block: one policy dict per peer."""
     return {peer: asdict(cfg.invoke.for_peer(peer)) for peer in INVOKE_PEERS}
+
+
+def _routine_view(cfg: CairnConfig, spec: RoutineSpec) -> dict:
+    """One routine for ``config show --json``: the fields as written plus ``resolved``."""
+    resolved: dict = {
+        "profile": spec.profile,
+        "prompt_file": str(spec.prompt_file),
+        "cd": str(spec.cd),
+        "outputs": {key: str(path) for key, path in spec.outputs.items()},
+    }
+    resolved.update({key: str(value) for key, value in routine_paths(cfg, spec.name).items()})
+    return {**spec.raw, "resolved": resolved}
 
 
 def _peer_summary(policy: PeerPolicy) -> str:
@@ -170,10 +220,15 @@ def _config_show(as_json: bool) -> int:
                     "cron_schedule": cfg.cron_schedule,
                     "collections": collections,
                     "invoke": _invoke_view(cfg),
+                    "routines": {
+                        name: _routine_view(cfg, spec) for name, spec in cfg.routines.items()
+                    },
                 },
                 indent=2,
             )
         )
+        for warning in profile_warnings(cfg):
+            print(f"warning: {warning}", file=sys.stderr)
         return 0
 
     print(f"config_path : {cfg.config_path}")
@@ -190,7 +245,25 @@ def _config_show(as_json: bool) -> int:
             print(f"      docs[{src_name}] = {src_path}")
     print("invoke      :")
     for peer in INVOKE_PEERS:
-        print(f"  {peer:22} {_peer_summary(cfg.invoke.for_peer(peer))}")
+        policy = cfg.invoke.for_peer(peer)
+        print(f"  {peer:22} {_peer_summary(policy)}")
+        for name, profile in sorted(policy.profiles.items()):
+            extra = f" + {' '.join(profile.extra_args)}" if profile.extra_args else ""
+            print(f"  {peer} profile {name} = base {profile.base}{extra}")
+    if cfg.routines:
+        print("routines    :")
+    for name, spec in cfg.routines.items():
+        sources = ",".join(spec.sources) or "(none)"
+        print(
+            f"  {name:22} {spec.peer}/{spec.profile} at {spec.at} local, "
+            f"catch-up {spec.catch_up_days}d, sources {sources}"
+        )
+        print(f"      prompt_file = {spec.prompt_file}")
+        print(f"      cd          = {spec.cd}")
+        for key, path in spec.outputs.items():
+            print(f"      outputs.{key} = {path}")
+    for warning in profile_warnings(cfg):
+        print(f"warning: {warning}", file=sys.stderr)
     return 0
 
 
@@ -199,7 +272,7 @@ def _config_show(as_json: bool) -> int:
 _TOP_LEVEL_KEYS = {"data_root", "qmd_binary"}
 _COLLECTION_SYNC_FIELDS = {"enabled", "since", "on_hook"}
 _BOOL_FIELDS = {"enabled", "on_hook"}
-_INVOKE_FIELDS = {f.name for f in fields(PeerPolicy)} - {"billing"}
+_INVOKE_FIELDS = {f.name for f in fields(PeerPolicy)} - {"billing", "profiles"}
 _INVOKE_INT_FIELDS = {"timeout_s", "idle_timeout_s", "quiet_after_s", "stall_after_s"}
 _INVOKE_NULLABLE = {"model", "effort"}
 _BILLING_FIELDS = {f.name for f in fields(BillingPolicy)}
@@ -231,16 +304,172 @@ def _coerce(field: str, value: str) -> object:
     return value
 
 
-def _set_dotted(data: dict, key: str, value: str) -> None:
-    """Apply ``key=value`` to the config dict in place. Raises ValueError on a bad key."""
+_ROUTINE_SCALARS = (
+    "peer",
+    "prompt_file",
+    "cd",
+    "profile",
+    "model",
+    "at",
+    "day",
+    "catch_up_days",
+    "timeout_s",
+    "budget_usd_per_day",
+)
+_ROUTINE_ARGV_FIELDS = ("prepare", "validate")
+_ROUTINE_SET_FIELDS = (*_ROUTINE_SCALARS, "sources", *_ROUTINE_ARGV_FIELDS)
+_PROFILE_SET_FIELDS = ("base", "extra_args")
+_ROUTINE_KEY_HINT = (
+    "routines.<name> '{...}', routines.<name>.<field>, routines.<name>.outputs.<key>"
+)
+_PROFILE_KEY_HINT = "invoke.<claude|codex>.profiles.<name> '{...}' or .base|extra_args"
+
+
+def _is_null(value: str) -> bool:
+    return value.strip().lower() in ("null", "none")
+
+
+def _json_object(key: str, value: str) -> dict:
+    if not value.lstrip().startswith("{"):
+        raise ValueError(f'{key} takes a JSON object, for example \'{{"base": "edit"}}\'')
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{key} is not valid JSON: {exc}") from None
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{key} takes a JSON object")
+    return parsed
+
+
+def _json_strings(key: str, value: str) -> list[str]:
+    """A JSON array of strings (an argv field accepts nothing else: an element may
+    contain a comma)."""
+    if not value.lstrip().startswith("["):
+        raise ValueError(
+            f"{key} takes a JSON array of strings (an argv list), for example '[\"true\"]'"
+        )
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{key} is not valid JSON: {exc}") from None
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise ValueError(f"{key} takes a JSON array of strings")
+    return parsed
+
+
+def _coerce_routine(key: str, field: str, value: str) -> object:
+    """Coerce a CLI string for ``routines.<name>.<field>``."""
+    if field in ("catch_up_days", "timeout_s"):
+        if field == "timeout_s" and _is_null(value):
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            raise ValueError(f"{field} expects an integer, got {value!r}") from None
+    if field == "budget_usd_per_day":
+        if _is_null(value):
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            raise ValueError(f"{field} expects a number or null, got {value!r}") from None
+    if field in ("profile", "model") and _is_null(value):
+        return None
+    if field == "sources":
+        if value.lstrip().startswith("["):
+            return _json_strings(key, value)
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if field == "prepare" and _is_null(value):
+        return None
+    if field in _ROUTINE_ARGV_FIELDS:
+        return _json_strings(key, value)
+    return value
+
+
+def _missing_routine(name: str) -> ValueError:
+    return ValueError(
+        f"routine {name!r} does not exist; create it with: cairn config set routines.{name} "
+        "'{\"peer\": ..., ...}'"
+    )
+
+
+def _set_routine(data: dict, key: str, parts: list[str], value: str) -> None:
+    """``routines.<name>``, ``routines.<name>.<field>``, ``routines.<name>.outputs.<key>``."""
+    routines = data.get("routines")
+    if routines is None:
+        routines = data["routines"] = {}
+    if not isinstance(routines, dict):
+        raise ValueError("'routines' in the config is not an object")
+    name = parts[1]
+    if len(parts) == 2:
+        routines[name] = _json_object(key, value)
+        return
+    routine = routines.get(name)
+    if not isinstance(routine, dict):
+        raise _missing_routine(name)
+    field = parts[2]
+    if len(parts) == 4 and field == "outputs":
+        outputs = routine.get("outputs")
+        if not isinstance(outputs, dict):
+            outputs = routine["outputs"] = {}
+        if _is_null(value):
+            outputs.pop(parts[3], None)
+        else:
+            outputs[parts[3]] = value
+        return
+    if len(parts) == 3 and field in _ROUTINE_SET_FIELDS:
+        routine[field] = _coerce_routine(key, field, value)
+        return
+    known = ", ".join((*_ROUTINE_SET_FIELDS, "outputs.<key>"))
+    raise ValueError(f"unknown routine field {'.'.join(parts[2:])!r}; known: {known}")
+
+
+def _set_profile(data: dict, key: str, parts: list[str], value: str) -> None:
+    """``invoke.<peer>.profiles.<name>`` and ``invoke.<peer>.profiles.<name>.<field>``."""
+    peer, name = parts[1], parts[3]
+    if peer not in PROFILE_PEERS:
+        raise ValueError(f"profiles are {', '.join(PROFILE_PEERS)}-only; use {_PROFILE_KEY_HINT}")
+    profiles = data.setdefault("invoke", {}).setdefault(peer, {}).setdefault("profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError(f"invoke.{peer}.profiles in the config is not an object")
+    if len(parts) == 4:
+        profiles[name] = _json_object(key, value)
+        return
+    profile = profiles.get(name)
+    if not isinstance(profile, dict):
+        raise ValueError(
+            f"profile {name!r} does not exist; create it with: cairn config set "
+            f'invoke.{peer}.profiles.{name} \'{{"base": "edit", "extra_args": []}}\''
+        )
+    field = parts[4]
+    if field == "base":
+        profile["base"] = value
+    elif field == "extra_args":
+        profile["extra_args"] = _json_strings(key, value)
+    else:
+        raise ValueError(f"unknown profile field {field!r}; known: base, extra_args")
+
+
+def _set_dotted(data: dict, key: str, value: str) -> list[str]:
+    """Apply ``key=value`` to the config dict in place. Raises ValueError on a bad key.
+
+    Returns the notes to print about knock-on edits (a disabled collection dropped from
+    the routines' ``sources``).
+    """
     if key == "cron.schedule":
         data.setdefault("cron", {})["schedule"] = value
-        return
+        return []
     if key in _TOP_LEVEL_KEYS:
         data[key] = value
-        return
+        return []
 
     parts = key.split(".")
+    if parts[0] == "routines" and 2 <= len(parts) <= 4:
+        _set_routine(data, key, parts, value)
+        return []
+    if parts[0] == "invoke" and len(parts) in (4, 5) and parts[2] == "profiles":
+        _set_profile(data, key, parts, value)
+        return []
     if len(parts) == 4 and parts[0] == "invoke" and parts[2] == "billing":
         _, peer, _, field = parts
         if peer not in BILLING_PEERS:
@@ -252,19 +481,21 @@ def _set_dotted(data: dict, key: str, value: str) -> None:
         billing = data.setdefault("invoke", {}).setdefault(peer, {}).setdefault("billing", {})
         null = field in _BILLING_NULLABLE and value.strip().lower() in ("null", "none")
         billing[field] = None if null else value
-        return
+        return []
     if len(parts) == 3 and parts[0] == "invoke":
         _, peer, field = parts
         if peer not in INVOKE_PEERS:
             raise ValueError(f"unknown invoke peer {peer!r}; known: {', '.join(INVOKE_PEERS)}")
         if field == "billing":
             raise ValueError(f"billing is an object; set {_BILLING_KEY_HINT}")
+        if field == "profiles":
+            raise ValueError(f"profiles is an object of named profiles; set {_PROFILE_KEY_HINT}")
         if field not in _INVOKE_FIELDS:
             known = ", ".join(sorted(_INVOKE_FIELDS))
             raise ValueError(f"unknown invoke field {field!r}; known: {known}")
         invoke = data.setdefault("invoke", {})
         invoke.setdefault(peer, {})[field] = _coerce_invoke(field, value)
-        return
+        return []
     if len(parts) == 2:
         prefix, field = parts
         collection = SOURCE_COLLECTIONS.get(prefix, prefix)
@@ -275,16 +506,60 @@ def _set_dotted(data: dict, key: str, value: str) -> None:
         spec = colls[collection]
         if field == "store":
             spec["store"] = value
-            return
+            return []
         if field in _COLLECTION_SYNC_FIELDS:
-            spec.setdefault("sync", {})[field] = _coerce(field, value)
-            return
+            coerced = _coerce(field, value)
+            spec.setdefault("sync", {})[field] = coerced
+            if field == "enabled" and coerced is False:
+                return _drop_routine_sources(
+                    data, lambda source: SOURCE_COLLECTIONS.get(source) == collection
+                )
+            return []
 
     raise ValueError(
         f"unsupported key {key!r}. Use data_root, qmd_binary, cron.schedule, "
         "<collection>.store|enabled|since|on_hook, invoke.<codex|claude|antigravity>."
-        "model|effort|profile|timeout_s|idle_timeout_s|quiet_after_s|stall_after_s, or "
-        f"{_BILLING_KEY_HINT}"
+        "model|effort|profile|timeout_s|idle_timeout_s|quiet_after_s|stall_after_s, "
+        f"{_BILLING_KEY_HINT}, {_PROFILE_KEY_HINT}, or {_ROUTINE_KEY_HINT}"
+    )
+
+
+def _unset_dotted(data: dict, key: str) -> str:
+    """Remove ``key`` from the config dict; returns the success message."""
+    parts = key.split(".")
+    if parts[0] == "invoke" and len(parts) == 4 and parts[2] == "profiles":
+        profiles = ((data.get("invoke") or {}).get(parts[1]) or {}).get("profiles")
+        if not isinstance(profiles, dict) or parts[3] not in profiles:
+            raise ValueError(f"no profile {parts[3]!r} in invoke.{parts[1]}.profiles")
+        del profiles[parts[3]]
+        return f"Removed {key}"
+    if parts[0] == "routines" and 2 <= len(parts) <= 4:
+        routines = data.get("routines")
+        name = parts[1]
+        if not isinstance(routines, dict) or not isinstance(routines.get(name), dict):
+            raise _missing_routine(name)
+        if len(parts) == 2:
+            del routines[name]
+            return f"Removed {key}; its launchd job stays until 'cairn routine uninstall {name}'"
+        routine = routines[name]
+        field = parts[2]
+        if len(parts) == 4 and field == "outputs":
+            outputs = routine.get("outputs")
+            if not isinstance(outputs, dict) or parts[3] not in outputs:
+                raise ValueError(f"no output {parts[3]!r} in routines.{name}.outputs")
+            del outputs[parts[3]]
+            return f"Removed {key}"
+        if len(parts) == 3:
+            if field in ROUTINE_REQUIRED:
+                raise ValueError(f"{key} is required; set it instead")
+            if field not in routine:
+                raise ValueError(f"{key} is not set")
+            del routine[field]
+            return f"Removed {key}"
+    raise ValueError(
+        f"unsupported key {key!r} for unset. Use routines.<name>, "
+        "routines.<name>.<optional field>, routines.<name>.outputs.<key> or "
+        "invoke.<claude|codex>.profiles.<name>"
     )
 
 
@@ -334,10 +609,23 @@ def _config_set(key: str, value: str) -> int:
 
     def apply(data: dict) -> str:
         try:
-            _set_dotted(data, key, value)
+            notes = _set_dotted(data, key, value)
         except ValueError as e:
             raise ValueError(f"Cannot set {key!r}: {e}") from e
-        return f"Set {key} = {value}"
+        return "\n".join([f"Set {key} = {value}", *notes])
+
+    return _edit_config(apply)
+
+
+def _config_unset(key: str) -> int:
+    """Remove one routine, routine field, output or profile, failing loud if it
+    invalidates the config (a profile a routine still uses is restored)."""
+
+    def apply(data: dict) -> str:
+        try:
+            return _unset_dotted(data, key)
+        except ValueError as e:
+            raise ValueError(f"Cannot unset {key!r}: {e}") from e
 
     return _edit_config(apply)
 
@@ -426,9 +714,21 @@ def config_main(argv: list[str] | None = None) -> int:
         help=(
             "data_root | qmd_binary | cron.schedule | <collection>.store|enabled|since|on_hook"
             f" | invoke.<codex|claude|antigravity>.<field> | {_BILLING_KEY_HINT}"
+            f" | {_PROFILE_KEY_HINT} | {_ROUTINE_KEY_HINT} (objects and argv lists as JSON)"
         ),
     )
     p_set.add_argument("value", metavar="VALUE")
+    p_unset = sub.add_parser(
+        "unset", help="remove a routine, a routine field or output, or an invoke profile"
+    )
+    p_unset.add_argument(
+        "key",
+        metavar="KEY",
+        help=(
+            "routines.<name> | routines.<name>.<optional field> | "
+            "routines.<name>.outputs.<key> | invoke.<claude|codex>.profiles.<name>"
+        ),
+    )
     p_add = sub.add_parser(
         "add-service-doc", help="add a docs folder to the service-docs collection"
     )
@@ -450,6 +750,8 @@ def config_main(argv: list[str] | None = None) -> int:
         return _config_show(args.json)
     if args.action == "set":
         return _config_set(args.key, args.value)
+    if args.action == "unset":
+        return _config_unset(args.key)
     if args.action == "add-service-doc":
         return _config_add_service_doc(args.name, args.path, args.description)
     if args.action == "remove-service-doc":
@@ -727,6 +1029,17 @@ def _check_invoke(config: CairnConfig) -> None:
         )
 
 
+def _check_routines(config: CairnConfig) -> None:
+    """Warn-only routines section: the config profiles' space-form ``Bash(x *)`` rules,
+    then per routine its launchd job, last run, window stamps and journal location."""
+    from .routine import doctor_checks
+
+    for warning in profile_warnings(config):
+        _warn("invoke profile", warning)
+    for level, label, detail in doctor_checks(config):
+        (_ok if level == "ok" else _warn)(label, detail)
+
+
 def _check_antigravity_billing(config: CairnConfig) -> None:
     """Report the Antigravity billing route and, for ``gcp``, whether the ADC file and
     quota project it needs are in place (the same check ``cairn invoke`` runs before a
@@ -885,6 +1198,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
 
     if config is not None:
         _check_invoke(config)
+        _check_routines(config)
 
     # embeddings: index-wide counts from the single 'qmd status' probe above.
     # Zero vectors leaves keyword (BM25) search working; only semantic search waits.
