@@ -55,6 +55,7 @@ from .mutations import FindFile, locate
 from .storage import atomic_write, document_lock, locked
 
 if TYPE_CHECKING:
+    from .config import CairnConfig
     from .sources.base import ConversationSource
     from .store import SessionRecord, SessionStore
 
@@ -96,6 +97,18 @@ CITATION_RE: Final = re.compile(
     r"\[(?:claude|codex|antigravity|cursor|granola):[A-Za-z0-9][A-Za-z0-9._-]* f(?:0|[1-9][0-9]*)\]"
 )
 _CITATIONS_RE: Final = re.compile(rf"^{CITATION_RE.pattern}(?: {CITATION_RE.pattern})*$")
+# The source cell of a row that ``cairn claude memory import`` wrote:
+# ``memory:<label>/<stem>``. Only the importer writes it; ``decide --source`` keeps its
+# frame-citation rule, so a typed marker is refused there. It is not a citation.
+MEMORY_SOURCE_RE: Final = re.compile(
+    r"^memory:(?P<label>[A-Za-z0-9][A-Za-z0-9._-]*)/(?P<stem>[A-Za-z0-9][A-Za-z0-9._-]*)$"
+)
+# Project decisions documents: ``<data_root>/decisions/<label>.md``. Their records in
+# ``recall decisions`` carry this source name, and their native id is ``memory:<label>``.
+MEMORY_SOURCE: Final = "memory"
+MEMORY_COLLECTION: Final = "decisions"
+MEMORY_DOC_TYPE: Final = "claude-memory-decisions"
+MEMORY_LABEL_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _DATE_RE: Final = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _NUMBER_RE: Final = re.compile(r"^[1-9][0-9]{0,8}$")
 MAX_ROW_NUMBER: Final = 999_999_999
@@ -109,7 +122,7 @@ DEFAULT_KIND: Final = "decision"
 DEFAULT_CONFIDENCE: Final = "medium"
 MAX_CLAIM_CHARS: Final = 500
 # The conversation heading each source's reader stops at; meetings read to the end.
-_HEADINGS: Final[dict[str, str | None]] = {"granola": None}
+_HEADINGS: Final[dict[str, str | None]] = {"granola": None, MEMORY_SOURCE: None}
 _CONVERSATION: Final = "## Conversation"
 
 
@@ -193,6 +206,12 @@ class DecisionRow:
     @property
     def citations(self) -> list[str]:
         return CITATION_RE.findall(self.source)
+
+    @property
+    def memory(self) -> str | None:
+        """``<label>/<stem>`` when the source cell is an import marker, else ``None``."""
+        match = MEMORY_SOURCE_RE.match(self.source)
+        return f"{match['label']}/{match['stem']}" if match else None
 
     def overdue(self, as_of: date) -> bool:
         """An active row whose ``revisit_by`` is strictly before ``as_of``."""
@@ -611,6 +630,21 @@ def citations_error(value: str) -> str | None:
     )
 
 
+def shown_ref(source: str, native_id: str) -> str:
+    """The short reference a verb prints: ``<source>:<first 8>``, or the whole
+    ``memory:<label>`` of a project decisions document."""
+    if native_id.startswith(f"{MEMORY_SOURCE}:"):
+        return native_id
+    return f"{source}:{native_id[:8]}"
+
+
+def full_ref(source: str, native_id: str) -> str:
+    """The global document reference: ``<source>:<native_id>``, or ``memory:<label>``."""
+    if native_id.startswith(f"{MEMORY_SOURCE}:"):
+        return native_id
+    return f"{source}:{native_id}"
+
+
 class ClaimWithdrawn(Exception):
     """The withdrawal guard refused the claim; the refusal is already on stderr."""
 
@@ -730,7 +764,7 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
             )
             return 1
     row = written.rows[-1]
-    session = f"{source.source_name}:{written.native_id}"
+    session = full_ref(source.source_name, written.native_id)
     if getattr(args, "json", False):
         data = row_json(
             row,
@@ -742,7 +776,7 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
         )
         print(json.dumps({"ref": data["ref"], "path": str(written.path), "row": data}, indent=2))
     elif not getattr(args, "quiet", False):
-        short = f"{source.source_name}:{written.native_id[:8]}"
+        short = shown_ref(source.source_name, written.native_id)
         prefix = f"Struck #{struck_number[0]}; added" if struck_number else "Added"
         print(f"{prefix} #{row.number} to {short}: {row.claim}")
     return 0
@@ -775,7 +809,7 @@ def cmd_forget(source: ConversationSource, session_id: str, args: argparse.Names
     outcome: dict = {}
 
     def short() -> str:
-        return f"{source.source_name}:{native[0][:8]}"
+        return shown_ref(source.source_name, native[0])
 
     def edit(rows: list[DecisionRow]) -> list[DecisionRow]:
         if not rows:
@@ -833,8 +867,8 @@ def cmd_forget(source: ConversationSource, session_id: str, args: argparse.Names
         return 1
     if written is None:
         return 1
-    ref = f"{source.source_name}:{written.native_id}"
-    shown = f"{source.source_name}:{written.native_id[:8]}"
+    ref = full_ref(source.source_name, written.native_id)
+    shown = shown_ref(source.source_name, written.native_id)
     if outcome["reason"] == "private" and not outcome["already"]:
         print(
             f"Note: withdrawn, not erased: the claim text stays in {written.path} "
@@ -954,6 +988,7 @@ def row_json(
         "revisit_by": row.revisit_by or None,
         "source": row.source,
         "citations": row.citations,
+        "memory": row.memory,
         "supersedes": row.supersedes,
         "state": row.state,
         "marker": row.marker,
@@ -1031,6 +1066,62 @@ def _as_of(value: str | None) -> date:
     return date.fromisoformat(value)
 
 
+def memory_directory(config: CairnConfig) -> Path:
+    """``<data_root>/decisions``: the project decisions documents."""
+    return config.data_root / MEMORY_COLLECTION
+
+
+def memory_document(config: CairnConfig, label: str) -> Path:
+    """The project decisions document of ``label``."""
+    return memory_directory(config) / f"{label}.md"
+
+
+def memory_records(config: CairnConfig) -> list[SessionRecord]:
+    """One record per project decisions document, ``source`` :data:`MEMORY_SOURCE`.
+
+    A file whose ``type`` is not :data:`MEMORY_DOC_TYPE`, or whose ``native_id`` is not
+    ``memory:<label>``, is not a project document and is left out. A file that cannot
+    be read is warned on stderr and left out.
+    """
+    from .frontmatter import read_frontmatter_head
+    from .store import SessionRecord
+
+    directory = memory_directory(config)
+    if not directory.is_dir():
+        return []
+    records = []
+    for path in sorted(directory.glob("*.md")):
+        try:
+            fm = read_frontmatter_head(path)
+        except (OSError, UnicodeDecodeError, FrontmatterParseError) as exc:
+            print(f"Warning: skipping {path}: {exc}", file=sys.stderr)
+            continue
+        native_id = fm.get("native_id")
+        if fm.get("type") != MEMORY_DOC_TYPE or not isinstance(native_id, str):
+            continue
+        label = native_id.removeprefix(f"{MEMORY_SOURCE}:")
+        if label == native_id or not MEMORY_LABEL_RE.match(label):
+            continue
+        records.append(
+            SessionRecord(
+                MEMORY_SOURCE,
+                label,
+                path,
+                str(fm.get("title") or label),
+                fm.get("project") or None,
+                fm.get("cwd") or None,
+                None,
+                (),
+                "unknown",
+                None,
+                None,
+                fm,
+                MEMORY_DOC_TYPE,
+            )
+        )
+    return records
+
+
 def add_recall_parser(sub: argparse._SubParsersAction, session_sources: list[str]) -> None:
     """Register ``cairn recall decisions`` on the recall subparsers."""
     cmd = sub.add_parser(
@@ -1055,7 +1146,12 @@ def add_recall_parser(sub: argparse._SubParsersAction, session_sources: list[str
     projects = cmd.add_mutually_exclusive_group()
     projects.add_argument("--project", help="exact project/repo label or working directory")
     projects.add_argument("--all-projects", action="store_true")
-    cmd.add_argument("--source", action="append", choices=session_sources)
+    cmd.add_argument(
+        "--source",
+        action="append",
+        choices=[*session_sources, MEMORY_SOURCE],
+        help=f"only these sources; '{MEMORY_SOURCE}' is the project decisions documents",
+    )
     cmd.add_argument("--json", action="store_true")
 
 
@@ -1066,6 +1162,8 @@ def run_recall(args: argparse.Namespace, store: SessionStore) -> int:
     as_of = _as_of(args.as_of)
     window = parse_date_range(" ".join(args.date_expr)) if args.date_expr else None
     records = store.records(args.source)
+    if not args.source or MEMORY_SOURCE in args.source:
+        records.extend(memory_records(store.config))
     project = args.project or (None if args.all_projects else os.getcwd())
     if project:
         records = [r for r in records if r.matches_project(project)]
@@ -1092,12 +1190,15 @@ def run_recall(args: argparse.Namespace, store: SessionStore) -> int:
         print(json.dumps(data, indent=2))
         return 0
     for record, row, withdrawn in selected:
-        ref = f"{record.source}:{record.session_id[:8]}#{row.number}"
+        shown = record.session_id if record.source == MEMORY_SOURCE else record.session_id[:8]
+        ref = f"{record.source}:{shown}#{row.number}"
         revisit = f"revisit {row.revisit_by}" if row.revisit_by else "revisit -"
         claim = row.claim if not row.struck else f"~~{row.claim}~~ [{row.marker or 'struck'}]"
         line = f"{ref}  {row.kind}  {row.confidence}  {row.since}  {revisit}  {claim}"
         if withdrawn is not None and withdrawn[1] == "ledger":
             line += f"  [withdrawn: {withdrawn[0]}]"
+        if row.memory is not None:
+            line += "  [memory]"
         print(line + ("  OVERDUE" if withdrawn is None and row.overdue(as_of) else ""))
     print(f"{len(selected)} decisions")
     return 0
@@ -1110,6 +1211,9 @@ __all__ = [
     "HEADER",
     "HEADING",
     "KINDS",
+    "MEMORY_DOC_TYPE",
+    "MEMORY_SOURCE",
+    "MEMORY_SOURCE_RE",
     "SEPARATOR",
     "STRUCK_RE",
     "SUPERSEDED_RE",
@@ -1123,6 +1227,10 @@ __all__ = [
     "apply",
     "cmd_decide",
     "cmd_forget",
+    "full_ref",
+    "memory_directory",
+    "memory_document",
+    "memory_records",
     "mutate_table",
     "overdue_rows",
     "parse",
@@ -1134,6 +1242,7 @@ __all__ = [
     "rewrite",
     "row_json",
     "run_recall",
+    "shown_ref",
     "strike_withdrawn",
     "withdrawal",
 ]

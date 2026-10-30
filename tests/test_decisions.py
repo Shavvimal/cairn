@@ -131,6 +131,13 @@ class TestGrammar(unittest.TestCase):
         assert isinstance(new, DecisionRow)
         self.assertEqual((new.supersedes, new.citations), (3, ["[codex:9b f2]"]))
 
+    def test_memory_marker_property(self):
+        row = self.row(source="memory:example-app/release-train")
+        self.assertEqual((row.memory, row.citations), ("example-app/release-train", []))
+        self.assertEqual(parse_row(render_row(row)), row)
+        for source in ("memory:example-app", "memory:/x", "see memory:a/b", "[claude:3f f1]"):
+            self.assertIsNone(self.row(source=source).memory, source)
+
     def test_unknown_marker_is_struck_and_kept_verbatim(self):
         # The contract for a later writer: any marker is kept and classed as struck.
         for cell, marker in (
@@ -470,6 +477,19 @@ class TestDecide(DecisionsFixture):
         self.assertEqual((code, out), (0, ""))
         self.assertIn("| 4 | a b c | decision |", path.read_text())
 
+    def test_decide_source_still_rejects_memory_marker(self):
+        path = self.write_doc("a.md", doc())
+        before = path.read_bytes()
+        marker = "memory:example-app/release-train"
+        code, out, err = self.run_verb("decide", "x", "--source", marker, "--session-id", SID)
+        self.assertEqual((code, out), (2, ""))
+        self.assertEqual(
+            err,
+            "Error: --source must be frame citations like [claude:3f2a9c1e f12], separated by "
+            f"spaces, got '{marker}'\n",
+        )
+        self.assertEqual(path.read_bytes(), before)
+
     def test_every_splitlines_break_in_a_claim_becomes_a_space(self):
         path = self.write_doc("a.md", doc())
         breaks = ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
@@ -698,6 +718,7 @@ class TestRecallDecisions(DecisionsFixture):
                 "revisit_by": "2026-10-30",
                 "source": "supersedes #2",
                 "citations": [],
+                "memory": None,
                 "supersedes": 2,
                 "state": "active",
                 "marker": None,
@@ -805,6 +826,92 @@ class TestRecallDecisions(DecisionsFixture):
         self.assertLess(
             elapsed, 10.0, f"recall decisions over 2,000 documents took {elapsed:.2f} s"
         )
+
+
+class TestProjectDocuments(DecisionsFixture):
+    """Project decisions documents (``<data_root>/decisions/<label>.md``)."""
+
+    ROWS = (
+        "| 1 | Ship each change as its own PR | decision | medium | 2026-10-12 |  |"
+        " memory:example-app/release-train |\n"
+        "| 2 | Prefers short replies | fact | medium | 2026-10-13 |  | |\n"
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.project_doc = self.root / "data" / "decisions" / "example-app.md"
+        self.project_doc.parent.mkdir(parents=True)
+        head = (
+            "---\ntype: claude-memory-decisions\nnative_id: memory:example-app\n"
+            'title: "Claude memory: example-app"\nproject: example-app\n'
+            f"cwd: {self.cwd}\nprovenance: agent\n---\n\n# Claude memory: example-app\n\n"
+            "## My Notes\n\nImported rows.\n\n## Decisions\n\n"
+        )
+        self.project_doc.write_text(f"{head}{HEADER}\n{SEPARATOR}\n{self.ROWS}")
+        self.session = self.write_doc(
+            "a.md", doc(rows="| 1 | Keep | fact | high | 2026-10-05 |  |  |")
+        )
+
+    def test_recall_decisions_lists_project_doc(self):
+        code, text, err = self.recall("--as-of", "2026-10-30")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(
+            "memory:example-app#1  decision  medium  2026-10-12  revisit -  "
+            "Ship each change as its own PR  [memory]\n",
+            text,
+        )
+        self.assertIn(
+            "memory:example-app#2  fact  medium  2026-10-13  revisit -  Prefers short replies\n",
+            text,
+        )
+        _, data, _ = self.recall("--json")
+        row = next(
+            r for r in data["decisions"] if r["number"] == 1 and r["session"].startswith("memory")
+        )
+        self.assertEqual(
+            (row["ref"], row["session"], row["memory"], row["project"], row["path"]),
+            (
+                "memory:example-app#1",
+                "memory:example-app",
+                "example-app/release-train",
+                "example-app",
+                str(self.project_doc),
+            ),
+        )
+
+    def test_recall_source_filter_memory(self):
+        def sessions(*argv: str) -> list[str]:
+            _, data, _ = self.recall("--json", *argv)
+            return sorted({r["session"] for r in data["decisions"]})
+
+        self.assertEqual(sessions("--source", "memory"), ["memory:example-app"])
+        self.assertEqual(sessions("--source", "claude"), [f"claude:{SID}"])
+        self.assertEqual(sessions(), [f"claude:{SID}", "memory:example-app"])
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = recall.main(["decisions", "--json", "--project", self.cwd])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            {r["session"] for r in json.loads(out.getvalue())["decisions"]}, {"memory:example-app"}
+        )
+
+    def test_forget_memory_session_id(self):
+        code, out, err = self.run_verb(
+            "forget", "1", "--reason", "stale", "--session-id", "memory:example-app"
+        )
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out, "Withdrew row #1 in memory:example-app (reason: stale)\n")
+        self.assertIn(
+            "| 1 | ~~Ship each change as its own PR~~ withdrawn: stale | decision |",
+            self.project_doc.read_text(),
+        )
+        code, out, _ = self.run_verb(
+            "decide", "Keep the queue", "--session-id", "memory:example-app", "--json"
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["ref"], "memory:example-app#3")
+        code, _, err = self.run_verb("decide", "x", "--session-id", "memory:missing")
+        self.assertEqual((code, err), (1, "Error: Session file not found for memory:m\n"))
 
 
 if __name__ == "__main__":

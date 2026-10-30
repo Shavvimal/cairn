@@ -562,6 +562,20 @@ class ClaudeSource(ConversationSource):
     id_field = "session_id"
     preserved_note = "syncs"
 
+    def find_file(self, session_id: str) -> Path | None:
+        """A session document, or for ``memory:<label>`` the project decisions document
+        that ``cairn claude memory import`` writes (so ``decide``, ``supersede`` and
+        ``forget`` reach its rows)."""
+        from .. import decisions
+
+        label = session_id.removeprefix(f"{decisions.MEMORY_SOURCE}:")
+        if label != session_id:
+            if not decisions.MEMORY_LABEL_RE.match(label):
+                return None
+            path = decisions.memory_document(get_config(), label)
+            return path if path.is_file() else None
+        return super().find_file(session_id)
+
     # ---- rendering ----
     def render_document(
         self, data: SessionData, existing_fm: dict | None, my_notes: str | None
