@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from cairn import digest
+from cairn import digest, verify
 from cairn.frames import locate
 from cairn.verify import CITATION_RE, NEAR_CITATION_RE, REASONS, normalise
 from tests.test_recall_digest import DAY, DigestFixture, document, fixture_document, msg
@@ -266,6 +268,69 @@ class TestChecks(VerifyFixture):
         self.assertEqual(data["citations"]["total"], 1)
         self.assertEqual(data["quotes"]["total"], 0)
 
+    def test_inline_triple_backticks_do_not_open_a_fence(self):
+        """```code``` at the start of a line is an inline span: an info string after a
+        backtick fence cannot hold a backtick, so the rest of the file is still checked."""
+        data = self.report(journal("```code``` is inline.", "", BAD_ORDINAL))
+        self.assertEqual([f["reason"] for f in data["failures"]], ["bad-ordinal"])
+
+    def test_unmatched_quote_mark_does_not_stop_the_scan(self):
+        curly = f'- The 12" display: {OPEN}a completely invented quotation{CLOSE}'
+        self.assertEqual(self.reasons(journal(curly)), ["quote-uncited"])
+        straight = '- The 12" display: "fix the retry test before the release" [claude:3f2a9c1e f8]'
+        self.assertEqual(self.reasons(journal(straight)), ["quote-not-found"])
+        dangling = (
+            f'- A stray " then {OPEN}I moved the cap after the jitter{CLOSE} [claude:3f2a9c1e f11]'
+        )
+        data = self.report(journal(dangling))
+        self.assertEqual((data["exit"], data["quotes"]["verified"]), (0, 1))
+
+    def test_table_rows_without_outer_pipes_are_blocks(self):
+        rows = (
+            "Claim | Source",
+            "--- | ---",
+            '"I moved the cap after the jitter" | none',
+            "Fixed the cap | [claude:3f2a9c1e f11]",
+        )
+        data = self.report(journal(*rows))
+        self.assertEqual(
+            [(f["line"], f["reason"], f["block"]) for f in data["failures"]],
+            [(7, "quote-uncited", [7, 7])],
+        )
+        self.assertEqual(data["citations"], {"total": 1, "verified": 1, "failed": 0})
+
+    def test_unresolved_citation_keeps_its_ordinal(self):
+        failure = self.report(journal("- Elsewhere [claude:99999999 f8]"))["failures"][0]
+        self.assertEqual((failure["ref"], failure["ordinal"]), (None, 8))
+        malformed = self.report(journal("- A claim [f12]"))["failures"][0]
+        self.assertEqual((malformed["ref"], malformed["ordinal"]), (None, None))
+
+    def test_malformed_sidecar(self):
+        (self.out / SIDECAR).write_text("{not json\n", encoding="utf-8")
+        failure = self.report(journal("- Read [claude:3f2a9c1e f8]"))["failures"][0]
+        self.assertEqual(failure["reason"], "sidecar-missing")
+        self.assertTrue(failure["detail"].startswith(f"cannot read {SIDECAR}: "))
+
+    def test_ordinal_gone_after_rerender(self):
+        self.doc.write_bytes(document(SESSION, example_messages()[:10]).encode("utf-8"))
+        failure = self.report(journal("- Found it [claude:3f2a9c1e f11]"))["failures"][0]
+        self.assertEqual(failure["reason"], "hash-mismatch")
+        self.assertEqual(
+            failure["detail"],
+            f"{REF} frame 11 changed since the digest (the export now has 10 frames); "
+            "the export was re-rendered",
+        )
+
+    def test_legacy_export_is_unreadable(self):
+        self.doc.write_text(
+            f"---\ntype: claude-session\nsession_id: {SESSION}\ndate: 2026-03-28\n"
+            "messages: 12\n---\n## Conversation\nLegacy text",
+            encoding="utf-8",
+        )
+        failure = self.report(journal("- Read [claude:3f2a9c1e f8]"))["failures"][0]
+        self.assertEqual(failure["reason"], "export-unreadable")
+        self.assertEqual(failure["detail"], f"{REF}: legacy export without frames")
+
     def test_unverified_section_ignored(self):
         data = self.report(journal(VERIFIED, "", "## Unverified", "", BAD_ORDINAL))
         self.assertEqual((data["exit"], data["citations"]["total"]), (0, 1))
@@ -421,6 +486,42 @@ class TestFix(VerifyFixture):
             f"\r\n## Unverified\r\n\r\n<!-- cairn:unverified line=7 reason=bad-ordinal -->\r\n{BAD_ORDINAL}\r\n",
             fixed,
         )
+
+    def test_fix_json_ok_is_false_and_exit_0(self):
+        """``ok`` says whether every check passed before any move; ``--fix`` exits 0."""
+        code, stdout, _ = self.verify(journal(VERIFIED, "", BAD_ORDINAL), "--fix", "--json")
+        data = json.loads(stdout)
+        self.assertEqual((code, data["ok"], data["moved"]), (0, False, 1))
+
+    def test_fix_refuses_a_file_changed_during_the_check(self):
+        original = journal(BAD_ORDINAL)
+        edited = original + "- An edit saved while verify ran\n"
+        real = verify.check_blocks
+
+        def check_then_edit(*args):
+            report = real(*args)
+            self.journal.write_text(edited, encoding="utf-8")
+            return report
+
+        with mock.patch.object(verify, "check_blocks", check_then_edit):
+            code, _, stderr = self.verify(original, "--fix")
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            stderr,
+            f"Error: {self.journal} changed while verify ran; nothing written, run it again\n",
+        )
+        self.assertEqual(self.journal.read_text(encoding="utf-8"), edited)
+
+    def test_fix_keeps_mode_and_symlink(self):
+        target = self.journal.with_name("target.md")
+        target.write_text(journal(VERIFIED, "", BAD_ORDINAL), encoding="utf-8")
+        target.chmod(0o644)
+        self.journal.symlink_to(target.name)
+        code, _, _ = self.verify(None, "--fix")
+        self.assertEqual(code, 0)
+        self.assertTrue(self.journal.is_symlink())
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
+        self.assertIn("## Unverified", target.read_text(encoding="utf-8"))
 
     def test_fix_on_read_only_file_exits_1(self):
         original = journal(BAD_ORDINAL)

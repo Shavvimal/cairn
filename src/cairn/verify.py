@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 import unicodedata
 from dataclasses import dataclass, field
@@ -22,7 +23,7 @@ from pathlib import Path
 from . import digest
 from .frames import Frame, locate, read_text
 from .frontmatter import FrontmatterParseError, parse_frontmatter
-from .storage import atomic_write
+from .storage import atomic_write, document_lock, locked
 from .store import SessionRecord, SessionStore, resolve
 
 SCHEMA_VERSION = 1
@@ -55,6 +56,12 @@ EXIT_FAILED = 4
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
 _TABLE_ROW = re.compile(r"^ {0,3}\|")
+# A table delimiter row (``--- | :---:``), with or without outer pipes; it makes the line
+# before it a table header, so a table without outer pipes still splits into rows.
+_DELIMITER_CELL = r"[ \t]*:?-+:?[ \t]*"
+_TABLE_DELIMITER = re.compile(
+    rf"^ {{0,3}}(?:\|?{_DELIMITER_CELL}(?:\|{_DELIMITER_CELL})+\|?|\|{_DELIMITER_CELL}\|)[ \t]*$"
+)
 _BLOCKQUOTE = re.compile(r"^ {0,3}>")
 _BLOCKQUOTE_PREFIX = re.compile(r"^ {0,3}> ?")
 _LIST_ITEM = re.compile(r"^[ \t]*(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
@@ -167,7 +174,10 @@ def body_range(lines: list[str]) -> tuple[int, int, list[bool]]:
             ):
                 fence = None
             continue
-        if opening := _FENCE_OPEN.match(line):
+        opening = _FENCE_OPEN.match(line)
+        # A backtick fence's info string holds no backtick (CommonMark 4.5), so a line
+        # that starts with ```code``` is inline code, not a fence that never closes.
+        if opening and not (opening[1][0] == "`" and "`" in line[opening.end() :]):
             fenced[index] = True
             fence = opening[1]
             continue
@@ -176,9 +186,32 @@ def body_range(lines: list[str]) -> tuple[int, int, list[bool]]:
     return start, end, fenced
 
 
+def _table_lines(lines: list[str], start: int, end: int, fenced: list[bool]) -> set[int]:
+    """Lines of tables found by their delimiter row: the header, the delimiter and every
+    following line up to a blank, fenced, heading or ``>`` line."""
+    rows: set[int] = set()
+    for index in range(start + 1, end):
+        header = _bare(lines[index - 1])
+        if (
+            fenced[index]
+            or fenced[index - 1]
+            or "|" not in header
+            or not _TABLE_DELIMITER.match(_bare(lines[index]))
+        ):
+            continue
+        rows.update((index - 1, index))
+        for row in range(index + 1, end):
+            line = _bare(lines[row])
+            if fenced[row] or not line.strip() or _HEADING.match(line) or _BLOCKQUOTE.match(line):
+                break
+            rows.add(row)
+    return rows
+
+
 def split_blocks(lines: list[str]) -> list[Block]:
     """The blocks of the checked part of ``lines`` (journal-verify spec 4.2)."""
     start, end, fenced = body_range(lines)
+    table = _table_lines(lines, start, end, fenced)
     blocks: list[Block] = []
     current: Block | None = None
     for index in range(start, end):
@@ -188,7 +221,7 @@ def split_blocks(lines: list[str]) -> list[Block]:
             continue
         if _HEADING.match(line):
             kind = "heading"
-        elif _TABLE_ROW.match(line):
+        elif index in table or _TABLE_ROW.match(line):
             kind = "table"
         elif _BLOCKQUOTE.match(line):
             kind = "quote"
@@ -213,23 +246,47 @@ def split_blocks(lines: list[str]) -> list[Block]:
     return blocks
 
 
+def _closing(masked: str, char: str, closer: str, after: int) -> int:
+    """The position of the mark that closes a quote opened just before ``after``, or -1.
+    A straight ``"`` closes only after a non-space character."""
+    close = masked.find(closer, after)
+    if char != '"':
+        return close
+    while close >= 0 and masked[close - 1].isspace():
+        close = masked.find(closer, close + 1)
+    return close
+
+
 def inline_quotes(block: Block) -> list[tuple[int, str]]:
-    """``(position, text)`` of each ``"..."`` or curly-quoted span outside inline code."""
+    """``(position, text)`` of each ``"..."`` or curly-quoted span outside inline code.
+
+    A straight ``"`` opens a quote only at the start or after a space or an opening
+    bracket, and before a non-space (so ``12"`` is an inch mark). An opener with no
+    closer is skipped; the scan goes on, so later quotes are still checked.
+    """
     found = []
     position = 0
     masked = block.masked
     while position < len(masked):
         char = masked[position]
         closer = _QUOTE_PAIRS.get(char)
-        if closer is None:
+        if closer is None or (char == '"' and not _opens(masked, position)):
             position += 1
             continue
-        close = masked.find(closer, position + 1)
+        close = _closing(masked, char, closer, position + 1)
         if close < 0:
-            break
+            position += 1
+            continue
         found.append((position, block.text[position + 1 : close]))
         position = close + 1
     return found
+
+
+def _opens(masked: str, position: int) -> bool:
+    """Whether the straight ``"`` at ``position`` can open a quote."""
+    before = masked[position - 1] if position else " "
+    after = masked[position + 1] if position + 1 < len(masked) else " "
+    return (before.isspace() or before in "([{-/") and not after.isspace()
 
 
 def blockquote_text(block: Block) -> str:
@@ -551,6 +608,24 @@ def fix_text(lines: list[str], blocks: list[Block]) -> tuple[str, int]:
     return text, len(moving)
 
 
+def _read(path: Path) -> str:
+    with path.open(encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def _replace(path: Path, snapshot: str, text: str, shown: str) -> None:
+    """Write the fixed journal unless it changed since ``snapshot`` was read.
+
+    Under the document lock, so cairn writers do not interleave; the re-read catches an
+    editor that saved meanwhile. A symlink is written through and the mode is kept.
+    """
+    target = path.resolve()
+    with locked(document_lock(target)):
+        if _read(target) != snapshot:
+            raise ValueError(f"{shown} changed while verify ran; nothing written, run it again")
+        atomic_write(target, text, mode=stat.S_IMODE(target.stat().st_mode))
+
+
 def run_verify(args: argparse.Namespace, store: SessionStore) -> int:
     """``cairn recall verify FILE --digest DIR [--json] [--fix]``.
 
@@ -563,8 +638,8 @@ def run_verify(args: argparse.Namespace, store: SessionStore) -> int:
         raise ValueError(f"no such file: {args.file}")
     directory = Path(args.digest).expanduser()
     verifier = Verifier(directory, store)
-    with path.open(encoding="utf-8", newline="") as handle:
-        lines = handle.read().splitlines(keepends=True)
+    snapshot = _read(path)
+    lines = snapshot.splitlines(keepends=True)
     blocks = split_blocks(lines)
     report = check_blocks(blocks, verifier)
     moved = 0
@@ -572,7 +647,7 @@ def run_verify(args: argparse.Namespace, store: SessionStore) -> int:
         if not os.access(path, os.W_OK):
             raise PermissionError(f"cannot write {args.file}: permission denied")
         text, moved = fix_text(lines, blocks)
-        atomic_write(path, text)
+        _replace(path, snapshot, text, args.file)
     if report.citations["total"] == 0 and report.quotes["total"] == 0:
         print(f"Warning: {args.file} has no citations", file=sys.stderr)
     if args.json:
