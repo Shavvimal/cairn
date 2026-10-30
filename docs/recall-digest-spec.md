@@ -656,7 +656,7 @@ Front matter keys, in this order. Scalars are written as `key: "value"` with
 | `parent` | `source:id` or `null` |
 | `orphan_peer` | `true` or `false` |
 | `provenance` | `user`, `agent`, `tool` or `imported` (added by the provenance layer, `docs/provenance-spec.md`): a valid stored key; otherwise `agent` when the first user frame with text starts with the invoke preamble; otherwise the value derived from front matter |
-| `owner` | copied from the session front matter when present; the key is omitted otherwise |
+| `owner` | the session's front-matter `owner` when it is a non-blank label other than `null`; otherwise the owner label of the invoke preamble (6.1 step 4, added by the provenance layer); the key is omitted when neither exists |
 | `date` | the window day, `YYYY-MM-DD` |
 | `session_started_at` | `record.started_at` in UTC, or `null` |
 | `first_ts`, `last_ts` | first and last effective timestamp among in-window frames |

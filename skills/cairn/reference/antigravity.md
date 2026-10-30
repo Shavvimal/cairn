@@ -55,7 +55,8 @@ last_activity: ISO timestamp
 ```
 
 Then the shared metadata (`cairn_schema`, `source`, `native_id`, `source_revision`, `cwd`,
-`project`, `started_at`, `activity_at`, counts, `activity_dates`) and the preserved tail
+`project`, `started_at`, `activity_at`, counts, `activity_dates`), the `provenance` key
+(`tool`, or `agent` for a peer run or a subagent) and the preserved tail
 (`status`, `tags`, `rating`, `comments`, `projects`, `links`).
 
 ## Hook

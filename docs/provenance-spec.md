@@ -210,14 +210,14 @@ re-rendered. The digest closes the gap (4.5).
 
 ### 4.4 `cairn recall list`
 
-After the subagent and `--min-msgs` filters (`src/cairn/recall.py:143-152`), compute
+After the subagent and `--min-msgs` filters (`src/cairn/recall.py:158-167`), compute
 `effective` once per record. With `--provenance`, drop records outside the set.
 `--provenance agent` does not show subagents unless `--include-subagents` is also
 given. Each JSON row gains `"provenance"` and `"owner"` (the stored label, or `null`)
 after `"parent"`. Each text row becomes
 `<ref>  <time>  <title>  [<precision>] <provenance>[ owner=<owner>][ (subagent of X)]`.
 `recall expand` prints `Provenance: <value>[ (owner <owner>)]` after its `File:` line
-(`src/cairn/recall.py:138`).
+(`src/cairn/recall.py:149-152`).
 
 ### 4.5 `cairn recall digest`
 
@@ -302,6 +302,9 @@ Digest front matter adds `provenance: "agent"` (the digest quotes every string,
 | `test_stored_value_wins` | stored `imported` on a claude doc returns `imported` |
 | `test_absent_key_derives_from_owner_and_parent_link` | `owner` or `parent` link gives `agent`; `peer`/`child` link alone gives `tool` |
 | `test_invalid_stored_value_warns_and_derives` | exact 3.3 warning on stderr, derived value |
+| `test_null_or_blank_owner_is_no_owner` | `owner_of` reads `null`, blank and non-string owners as `None`, so they derive `tool` (added in review) |
+| `test_empty_stored_value_warns` | `provenance:` and `provenance: ""` warn with `provenance ''` (added in review) |
+| `test_absent_key_is_silent` | no key: derived value, empty stderr (added in review) |
 
 Other modules:
 
@@ -309,7 +312,7 @@ Other modules:
 |---|---|
 | `tests/test_frontmatter.py::MutationScoping::test_provenance_survives_tail_mutations` | status, tags, rating, comment, owner and link mutations keep `provenance:` byte for byte |
 | `tests/test_sources_export.py::test_export_writes_provenance_before_status` | a Claude export has `provenance: tool` as the line before `status:` |
-| `tests/test_sources_export.py::test_reexport_keeps_provenance_and_annotations` | re-export after a note and a tag keeps the key, the tag and My Notes |
+| `tests/test_sources_export.py::test_reexport_keeps_provenance_and_annotations` | re-export after a note and a tag keeps the key, the tag and My Notes, and recomputes a hand-edited key |
 | `tests/test_sources_export.py::test_peer_export_is_agent` | a Codex rollout whose first user message carries the preamble exports `provenance: agent` |
 | `tests/test_invoke.py::test_exchange_head_carries_provenance_agent` | `render_exchange` head holds `provenance: agent` and passes `validate_head` |
 | `tests/test_recall.py::TestRecallList::test_list_json_has_provenance_and_owner` | row has `provenance: tool`, `owner: null` |
@@ -319,6 +322,15 @@ Other modules:
 | `tests/test_recall_digest_condense.py::test_provenance_tool_drops_peers` | peer and owner-preamble sessions absent, primary present |
 | `tests/test_recall_digest_condense.py::test_operator_peer_without_key_is_agent` | no stored key, operator preamble: `agent` |
 | `tests/test_recall_digest_condense.py::test_filter_to_nothing_exits_3` | exit 3, only the marker file |
+| `tests/test_recall_digest_condense.py::test_later_preamble_without_key_is_tool` | a preamble in a later user message (operator, owner and caller forms) leaves `provenance: tool`, `role: primary`, no parent, `orphan_peer: false`, no owner (added in review) |
+| `tests/test_recall_digest_condense.py::test_indented_preamble_reads_as_at_export` | leading whitespace before the preamble reads `agent` at export and in the digest (added in review) |
+| `tests/test_recall_digest_condense.py::test_stored_key_beats_body_evidence` | a valid stored key wins over a peer body; an invalid or empty one warns and reads `agent` (added in review) |
+| `tests/test_recall_digest_condense.py::test_filter_to_nothing_clears_a_populated_directory` | a rerun filtered to nothing removes the earlier markdown and sidecars (added in review) |
+| `tests/test_recall.py::TestRecallList::test_owner_in_text_and_json` | `owner=` in list text rows, `(owner ...)` in expand, owner in JSON (added in review) |
+| `tests/test_recall.py::TestRecallList::test_null_or_blank_owner_is_no_owner` | `owner: null` and a blank owner give `"owner": null` (added in review) |
+| `tests/test_recall.py::TestRecallSubagents::test_subagent_export_is_agent` | a Claude subagent export writes `provenance: agent` (added in review) |
+| `tests/test_recall.py::TestRecallSubagents::test_provenance_agent_needs_include_subagents` | `--provenance agent` lists the subagent only with `--include-subagents` (added in review) |
+| `tests/test_sources_export.py::TestGranolaExport::test_export_is_imported` | a Granola export writes `provenance: imported` (added in review) |
 
 Fixture values stay invented (`/tmp/demo`, `routine:example-daily`).
 
