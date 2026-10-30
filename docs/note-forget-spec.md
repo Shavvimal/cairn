@@ -108,7 +108,7 @@ reason: free text could carry the claim into the ledger.
 | already struck as withdrawn | stdout | `Row #3 in claude:3f2a9c1e is already withdrawn (reason: stale)` |
 | reason `private` | stderr | `Note: withdrawn, not erased: the claim text stays in <path> and in the QMD index until you edit the file.` |
 | no table | stderr | `Error: no decisions table in claude:3f2a9c1e` |
-| no row | stderr | `Error: no decision row #9 in claude:3f2a9c1e (rows: 1-5)` |
+| no row | stderr | `Error: no decision row #9 in claude:3f2a9c1e (rows: 1-5)`; a list such as `(rows: 1, 3, 7)` when the numbers have gaps |
 | N < 1 | stderr | `Error: row number must be 1 or greater, got 0` (exit 2) |
 | empty claim | stderr | `Error: row #3 has an empty claim after normalisation; edit it by hand` |
 | guard refusal | stderr | `Error: claim withdrawn on 2026-10-30 (reason: hallucination, claude:3f2a9c1e row #3); pass --force to add it again` |
@@ -130,21 +130,24 @@ does for `close`.
 4. Take `locked(document_lock(path))`. Inside it, parse the table.
 5. Find the row whose `number == N`. If absent, exit 1.
 6. Compute `fp = fingerprint(row.claim)` (section 5.1).
-7. If the row is already struck with a `withdrawn:` marker, print the "already
-   withdrawn" line and exit 0 with no append. Otherwise take `locked(ledger_lock)`, read
-   the ledger state, and append one `withdrawn` record unless `fp` is withdrawn already.
-   Release the ledger lock.
-8. Strike the row: the claim cell becomes `~~<claim>~~ withdrawn: R`. A row that is
-   already struck keeps its marker in front:
+7. If the row is already struck with a `withdrawn: <reason>` marker (a reason from
+   `REASONS`), append a `withdrawn` record with that reason unless `fp` is withdrawn in
+   the ledger already (the ledger can have been deleted, or lifted by a forced `decide`
+   elsewhere), print the "already withdrawn" line and exit 0. The document is not
+   changed.
+8. Otherwise build the strike: the claim cell becomes `~~<claim>~~ withdrawn: R`. A row
+   that is already struck keeps its marker in front:
    `~~<claim>~~ superseded by #4, withdrawn: R`. The struck row must parse back to
-   itself; if it does not, exit 1 before the ledger append (`Error: row #N cannot be
-   struck in a form that reads back; edit it by hand`). Write with `atomic_write`. If
-   `R == private`, print the stderr note.
+   itself; if it does not, exit 1 with nothing written (`Error: row #N cannot be struck
+   in a form that reads back; edit it by hand`). Then take `locked(ledger_lock)`, read
+   the ledger state, append one `withdrawn` record unless `fp` is withdrawn already, and
+   release the ledger lock. Write the strike with `atomic_write`. If `R == private`,
+   print the stderr note.
 9. Release the document lock and print the result (or the JSON in 5.3).
 
 The ledger record is written before the document, so a crash between steps 7 and 8
 leaves the claim withdrawn and the row unstruck. Running `forget` again strikes the row
-and appends nothing, because step 7 finds `fp` already withdrawn.
+and appends nothing, because step 8 finds `fp` already withdrawn.
 
 ### 4.2 Lock order
 
@@ -186,7 +189,10 @@ lock, before the new row is written. `hold` is the caller's `ExitStack`:
 4. If withdrawn and `force`: keep the ledger lock entered on `hold` and return an
    `Unwithdrawal`, the `unwithdrawn` record that names the new row (`source`,
    `session_id`, `row`, `reason: null`). The verb writes the row, then calls `commit()`,
-   which appends the record and prints the warning, then closes `hold`. A write that
+   which appends the record and prints the warning, then closes `hold`. Before it
+   returns, the guard opens the ledger for append once and closes it, so a ledger that
+   cannot be written fails with `Error: <OSError text>` (exit 1) before the document
+   is touched. A write that
    fails, or a crash before the commit, leaves the claim withdrawn: the new row (if it
    was written) is hidden by `ledger` evidence. Holding the ledger lock through the write
    makes a concurrent `forget` of the same claim wait, so it reads the `unwithdrawn`
@@ -294,10 +300,16 @@ No claim text, title, path or cwd is stored.
  "already_withdrawn": false, "appended": true}
 ```
 
+`fingerprint` is null for a row struck as withdrawn by hand whose claim normalises to
+nothing. `already_withdrawn: true` with `appended: true` means the row was struck but
+the ledger record was missing and is now restored.
+
 ### 5.4 Fields added to each `recall decisions --json` and digest `overdue` row
 
 `"withdrawn": bool`, `"withdrawn_reason": str | null`, `"withdrawn_via": "row" | "ledger" | null`.
-`overdue` is false for a withdrawn row.
+`overdue` is false for a withdrawn row. The `row` object of `decide --json` and
+`supersede --json` is the same shape, so it carries the three fields too (always false
+and null for the row just added).
 
 ## 6. Failure modes
 
@@ -314,6 +326,8 @@ No claim text, title, path or cwd is stored.
 | `decide --force`: document write fails | `Error: <OSError text>`, exit 1, no `unwithdrawn` record; the claim stays withdrawn |
 | `decide --force`: `unwithdrawn` append fails after the write | `Error: added #N but could not record it as unwithdrawn: <OSError text>; the claim stays withdrawn`, exit 1; the new row is hidden by `ledger` evidence |
 | `decide --force`: crash between the write and the append | As above, with no message; `forget` or another `decide --force` settles it |
+| Struck row, ledger record lost (deleted, or lifted by `--force` elsewhere) | `forget` on the struck row restores the record; JSON `already_withdrawn: true, appended: true` |
+| Ledger readable but not writable, `decide --force` / `supersede --force` | `Error: <OSError text>`, exit 1, document unchanged |
 | Claim that ends in `~` | Struck as `~~Store files in ~~~ withdrawn: R`; the strike grammar reads the optional `~` before the closing `~~` as part of the claim |
 | Claim edited after withdrawal | New text, new fingerprint, not refused. Documented limit |
 
@@ -344,6 +358,9 @@ No claim text, title, path or cwd is stored.
 - `TestForget.test_forget_round_trips_claims_at_markdown_boundaries`: trailing `~`, leading `~`, escaped `|` and `\\`.
 - `TestForget.test_forget_refuses_a_strike_that_does_not_read_back`.
 - `TestForget.test_short_write_fails_and_leaves_document_unchanged` and `test_append_fsyncs_file_then_directory_on_create`.
+- `TestForget.test_unknown_withdrawn_marker_is_an_ordinary_strike`, `test_forget_struck_row_restores_a_lost_ledger_record`, `test_forget_quiet_prints_nothing`, `test_forget_crash_repair_json`, `test_forget_missing_row_lists_numbers`.
+- `TestGuard.test_forced_add_with_read_only_ledger_writes_nothing`, `test_supersede_force_strikes_and_records_new_row`, `test_failed_append_after_supersede_names_struck_row`, `test_supersede_of_a_tilde_claim_reads_back`, `test_supersede_refuses_a_strike_that_does_not_read_back`.
+- `TestReading.test_bad_ledger_fails_digest_and_forget_and_before_table_warnings`, `test_bad_identity_fields_fail_loud`, `test_torn_first_line_is_truncated_to_empty`.
 - `TestProcesses.test_concurrent_forgets_of_one_claim_append_once` and `test_concurrent_forgets_in_one_document_keep_both_strikes`.
 - `TestGuard.test_withdraw_after_unwithdraw_refuses_again`: the last event wins.
 - `TestReading.test_recall_decisions_hides_withdrawn_by_default`.
@@ -429,14 +446,16 @@ Where the implementation differs from the first draft of this spec:
 - **`%` is punctuation.** The draft listed `%` among the symbols that stay. Unicode puts it
   in category Po, so the normalisation above deletes it. The pseudocode is the contract;
   the sentence was wrong.
-- **The marker grammar.** `WITHDRAWN_RE` is `(?:^|, )withdrawn: (?P<reason>[a-z_]+)$`,
-  searched in the marker. A hand-written `withdrawn: no longer true` does not match, so it
-  stays an ordinary struck row with no `withdrawn` evidence.
+- **The marker grammar.** `WITHDRAWN_RE` is `(?:^|, )withdrawn: (?P<reason>R1|R2|...)$`,
+  built from `REASONS` and searched in the marker. A hand-written `withdrawn: wrong` or
+  `withdrawn: no longer true` does not match, so it stays an ordinary struck row with no
+  `withdrawn` evidence, and `forget` on it appends `, withdrawn: R` and a ledger record.
 - **A claim that ends in `~`.** `decide` accepts `Store files in ~`, and its strike renders
   as `~~Store files in ~~~`. The table's `STRUCK_RE` (layer 07) read no `~~~`, so this
   change lets the claim end in one optional `~` before the closing `~~`:
   `^~~(?P<claim>(?:(?!~~).)+~?)~~(?: (?P<marker>\S.*))?$`. Every cell the old expression
-  matched parses the same way. `forget` also checks that a struck row parses back to
+  matched parses the same way. A claim of exactly `~` renders as `~~~~~` and takes a
+  second branch, `|~`. `forget` and `supersede` also check that a struck row parses back to
   itself before it appends to the ledger.
 - **Ledger validation.** Beyond a missing field and an unknown `event` or `reason`, a
   reader also rejects an unknown `v` or `norm`, a `ts` that is not
