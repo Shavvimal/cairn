@@ -40,6 +40,7 @@ from ..frontmatter import (
     title_line,
 )
 from ..jsonl import (
+    JsonlStats,
     find_session_jsonl,
     find_subagent_jsonl,
     iter_jsonl,
@@ -62,6 +63,7 @@ from ..schema import Message, SessionData, SubagentRef
 from ..store import file_revision, is_current
 from ..timeutil import today_str
 from .base import ConversationSource
+from .guards import ParserDrift
 from .spec_targets import SPEC_TARGETS
 
 COLLECTION = "claude-code-sessions"
@@ -372,9 +374,11 @@ def extract_session_data(records: Iterable[dict], *, sidechain: bool = False) ->
     return data
 
 
-def _records(path: Path, skip_prefixes: tuple[str, ...] = ()) -> Iterator[dict]:
-    """Stream the records of a transcript (malformed lines skipped)."""
-    return (record for _, record in iter_jsonl(path, skip_prefixes))
+def _records(
+    path: Path, skip_prefixes: tuple[str, ...] = (), stats: JsonlStats | None = None
+) -> Iterator[dict]:
+    """Stream the records of a transcript (malformed lines skipped, counted in ``stats``)."""
+    return (record for _, record in iter_jsonl(path, skip_prefixes, stats))
 
 
 # =============================================================================
@@ -710,7 +714,10 @@ class ClaudeSource(ConversationSource):
 
         repo_subdir = repo_subdir_from_name(project, repo) if project and repo else None
 
-        data = extract_session_data(_records(jsonl_path))
+        stats = JsonlStats()
+        data = extract_session_data(_records(jsonl_path, stats=stats))
+        if not self.guard_parse(session_id, jsonl_path, stats, data):
+            raise self.refusal(session_id)
         if not data["messages_ordered"] and not data.get("session_id"):
             return None
         if data.get("session_id") and data["session_id"] != session_id:
@@ -789,7 +796,10 @@ class ClaudeSource(ConversationSource):
             return planned, False
 
         meta = read_subagent_meta(child)
-        data = extract_session_data(_records(child, _CHILD_SKIP_PREFIXES), sidechain=True)
+        stats = JsonlStats()
+        data = extract_session_data(_records(child, _CHILD_SKIP_PREFIXES, stats), sidechain=True)
+        if not self.guard_parse(child_id, child, stats, data, top_level=False):
+            raise self.refusal(child_id)
         if data.get("parent_session_id") != parent_id:
             raise ValueError(
                 f"transcript sessionId {data.get('parent_session_id')!r} "
@@ -929,6 +939,9 @@ class ClaudeSource(ConversationSource):
                 parent_doc, _exported, errors = self.sync_family(
                     session_id, str(session_file), quiet=args.quiet
                 )
+            except ParserDrift:
+                failed = True  # guard_parse already printed the finding
+                continue
             except (OSError, ValueError) as exc:
                 print(f"Error exporting {session_id}: {exc}", file=sys.stderr)
                 failed = True
@@ -973,10 +986,13 @@ class ClaudeSource(ConversationSource):
                 pass
         if not session_id:
             return 0
-        if session_id.startswith("agent-"):
-            self.sync_session(session_id, transcript_path, quiet=args.quiet)
-            return 0
-        _parent, _exported, errors = self.sync_family(session_id, transcript_path, args.quiet)
+        try:
+            if session_id.startswith("agent-"):
+                self.sync_session(session_id, transcript_path, quiet=args.quiet)
+                return 0
+            _parent, _exported, errors = self.sync_family(session_id, transcript_path, args.quiet)
+        except ParserDrift:
+            return 1  # guard_parse already printed the finding
         for error in errors:
             print(f"Error exporting {session_id} subagent {error}", file=sys.stderr)
         return int(bool(errors))

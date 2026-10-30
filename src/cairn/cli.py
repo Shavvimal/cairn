@@ -15,6 +15,8 @@ positionals on ``export`` (via :meth:`ConversationSource.extend_export_parser`).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import sys
 
 from .sources.base import ConversationSource
@@ -120,6 +122,27 @@ def build_parser(source: ConversationSource) -> argparse.ArgumentParser:
     return parser
 
 
+def _run_export(source: ConversationSource, args: argparse.Namespace) -> int:
+    """Run ``export`` / ``sync``: exit 1 on an error finding, one JSON object for ``--json``.
+
+    With ``export --json`` every human line goes to stderr and stdout carries only
+    the run's report (documents written, drift findings, the spec target).
+    """
+    as_json = args.command == "export" and bool(getattr(args, "json", False))
+    if as_json:
+        args.quiet = True
+    with contextlib.redirect_stdout(sys.stderr) if as_json else contextlib.nullcontext():
+        result = args.func(args)
+    if source.report.errors:
+        result = result or 1
+    if as_json:
+        report = source.report.as_dict(
+            source.source_name, result, source.version, source.spec_target
+        )
+        print(json.dumps(report, indent=2))
+    return result
+
+
 def run(source: ConversationSource, argv: list[str] | None = None) -> None:
     """Build the source's parser, dispatch, and exit with the handler's code.
 
@@ -133,7 +156,7 @@ def run(source: ConversationSource, argv: list[str] | None = None) -> None:
 
         with locked(lock_path(source.output_dir, "operation")):
             try:
-                result = args.func(args)
+                result = _run_export(source, args)
             finally:
                 # Persist the catalog before the lock is released so the next
                 # reader sees this run's write-through entries.

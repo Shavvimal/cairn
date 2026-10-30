@@ -25,6 +25,7 @@ from typing import Any, cast
 from .. import cli
 from ..config import get_config
 from ..frontmatter import (
+    FrontmatterParseError,
     _escape_scalar,
     head_close,
     head_open,
@@ -32,14 +33,14 @@ from ..frontmatter import (
     resolve_title,
     title_line,
 )
-from ..jsonl import iter_jsonl
+from ..jsonl import JsonlStats, iter_jsonl
 from ..paths import session_dir_of, subagent_path
 from ..projects import project_from_folder_path, repo_label
 from ..schema import SessionData, SubagentRef
 from ..store import file_revision, is_current
 from ..timeutil import today_str
 from .base import ConversationSource
-from .codex_lineage import Lineage, rollout_lineage, spawn_fields
+from .codex_lineage import Lineage, rollout_id, rollout_lineage, spawn_fields
 from .codex_replay import LIVE_CHILD_WINDOW_S, REPLAY_HEURISTIC_VERSION, ReplayCut
 from .spec_targets import SPEC_TARGETS
 
@@ -174,7 +175,9 @@ def _subagent_title(data: dict) -> str | None:
     return who or where or None
 
 
-def _scan_rollout(file_path: Path, honour_replay: bool) -> tuple[dict | None, bool]:
+def _scan_rollout(
+    file_path: Path, honour_replay: bool, stats: JsonlStats | None = None
+) -> tuple[dict | None, bool]:
     """One pass over a rollout. Returns ``(data, still_replaying_at_eof)``.
 
     The first ``session_meta`` names the thread. A second one (a forked child) starts
@@ -225,7 +228,7 @@ def _scan_rollout(file_path: Path, honour_replay: bool) -> tuple[dict | None, bo
             {"role": "user", "timestamp": timestamp, "text": text, "tool_calls": []}
         )
 
-    for _, record in iter_jsonl(file_path):
+    for _, record in iter_jsonl(file_path, stats=stats):
         rtype = record.get("type")
         payload = record.get("payload")
         if not isinstance(payload, dict):
@@ -421,15 +424,16 @@ def _finish_rollout(data: dict) -> dict:
     return data
 
 
-def parse_rollout(file_path: Path) -> dict | None:
+def parse_rollout(file_path: Path, stats: JsonlStats | None = None) -> dict | None:
     """Parse a Codex rollout JSONL into structured session data (None if unusable).
 
     A forked child whose replayed parent history has no recognisable end is a live
     child when the file changed within :data:`LIVE_CHILD_WINDOW_S` (``None``: skipped
     this run, no error). An older one exports the whole file with
     ``replay_unresolved: True`` and a warning. Replay problems never raise.
+    ``stats`` (optional) receives the line counts of the first pass.
     """
-    data, replaying = _scan_rollout(file_path, honour_replay=True)
+    data, replaying = _scan_rollout(file_path, honour_replay=True, stats=stats)
     if data is None:
         return None
     if replaying:
@@ -449,6 +453,15 @@ def parse_rollout(file_path: Path) -> dict | None:
             return None
         data["replay_unresolved"] = True
     return _finish_rollout(data)
+
+
+def record_kind(record: dict) -> str | None:
+    """``type/payload.type`` (plus ``/role`` for a message), for the drift guard."""
+    payload = record.get("payload")
+    if not isinstance(payload, dict) or not payload.get("type"):
+        return None
+    kind = f"{record.get('type')}/{payload.get('type')}"
+    return f"{kind}/{payload.get('role')}" if payload.get("type") == "message" else kind
 
 
 def _get_all_rollout_files() -> list[Path]:
@@ -622,26 +635,39 @@ class CodexSource(ConversationSource):
         )
 
     # ---- export driver ----
-    @staticmethod
-    def _parse_rollouts(rollouts: list[Path]) -> tuple[list[tuple[Path, dict]], list[Path]]:
+    def _parse_rollouts(self, rollouts: list[Path]) -> tuple[list[tuple[Path, dict]], list[Path]]:
         """Parse each rollout exactly once, stamping its native revision.
 
-        Returns ``(parsed, failed)``: a file that cannot be decoded is reported on
-        stderr and listed in ``failed`` so the others still export.
+        Returns ``(parsed, failed)``: a file that cannot be decoded, or that the
+        parser-drift guard refuses, is reported on stderr and listed in ``failed``
+        so the others still export. A rollout without a ``session_meta`` id that is
+        older than :data:`LIVE_CHILD_WINDOW_S` is checked under its filename id.
         """
         parsed = []
         failed = []
         for rollout in rollouts:
+            stats = JsonlStats(kind_of=record_kind)
             try:
                 revision = file_revision(rollout)
-                data = parse_rollout(rollout)
+                data = parse_rollout(rollout, stats)
+                age = time.time() - rollout.stat().st_mtime
             except (OSError, ValueError) as exc:
                 print(f"Error parsing {rollout}: {exc}", file=sys.stderr)
                 failed.append(rollout)
                 continue
             if data:
+                top_level = not data.get("parent_session_id")
+                if not self.guard_parse(
+                    data["session_id"], rollout, stats, data, top_level=top_level
+                ):
+                    failed.append(rollout)
+                    continue
                 data["source_revision"] = revision
                 parsed.append((rollout, data))
+            elif age >= LIVE_CHILD_WINDOW_S and not self.guard_parse(
+                rollout_id(rollout), rollout, stats, None
+            ):
+                failed.append(rollout)
         return parsed, failed
 
     @staticmethod
@@ -674,7 +700,10 @@ class CodexSource(ConversationSource):
         parent index links where the child is really written."""
         holder = claimed.get(planned)
         if holder is None and planned.exists():
-            holder = read_frontmatter_head(planned).get(self.id_field)
+            try:
+                holder = read_frontmatter_head(planned).get(self.id_field)
+            except FrontmatterParseError:
+                holder = session_id  # export_one refuses it and records the finding
         if holder is not None and holder != session_id:
             digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
             planned = planned.with_stem(planned.stem + "-" + digest)
@@ -784,6 +813,9 @@ class CodexSource(ConversationSource):
         if not own and not failed:
             raise ValueError(f"No readable Codex transcript for {session_id}")
         self.export_rollouts(quiet=True, parsed=parsed)
+        drift = self.drift_error()
+        if drift is not None:
+            raise drift
         if failed:
             # Readable documents are written; fail so the durable hook job retries.
             names = ", ".join(str(p) for p in failed)

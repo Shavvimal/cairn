@@ -371,7 +371,26 @@ def _stages(config: CairnConfig, mode: str, record, exported: set[str]) -> None:
     for name, command in steps:
         record(name, run_step(name, command))
         exported.add(name)
+    if mode != "hook":
+        _exporter_stages(config, record)
     _index_stages(config, embed=mode != "hook", record=record)
+
+
+def _exporter_stages(config: CairnConfig, record) -> None:
+    """After the exports: report the parser-drift findings that are still open."""
+    log_drift(config)
+
+
+def log_drift(config: CairnConfig) -> None:
+    """One ``[exporter-drift]`` line while any warn or error finding stays open."""
+    from .sources.guards import FindingsStore
+
+    found = FindingsStore(config.data_root).open_findings()
+    if not found:
+        return
+    shown = ", ".join(f"{f.ref} {f.kind}" for f in found[:5])
+    more = f", +{len(found) - 5} more" if len(found) > 5 else ""
+    log(f"  [exporter-drift] {len(found)} open findings: {shown}{more}")
 
 
 def _follow_up(config: CairnConfig, mode: str, record, exported: set[str]) -> None:

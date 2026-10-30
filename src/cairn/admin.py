@@ -1096,6 +1096,22 @@ def _check_exporters(config: CairnConfig) -> None:
         if coll is None or not coll.sync.enabled:
             continue
         _ok(f"exporter [{source}]", f"adapter {target.adapter_version}, {target.describe()}")
+    _check_drift(config)
+
+
+def _check_drift(config: CairnConfig) -> None:
+    """Warn-only: the open parser-drift findings, at most five, oldest first."""
+    from .sources.guards import FindingsStore
+
+    store = FindingsStore(config.data_root)
+    found = store.open_findings()
+    for finding in found[:5]:
+        _warn(
+            "parser drift",
+            f"{finding.ref} {finding.kind}: {finding.detail}; first seen {finding.first_seen}",
+        )
+    if len(found) > 5:
+        _warn("parser drift", f"+{len(found) - 5} more; see {store.path}")
 
 
 def doctor_main(argv: list[str] | None = None) -> int:

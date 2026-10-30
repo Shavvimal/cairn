@@ -24,6 +24,8 @@ class SpecTarget:
     harness_version: str  # the version on the machine that day ("unrecorded" if unknown)
     store: str  # what one unit of the native store is
     adapter_version: str  # the adapter's ``version`` when the check was made
+    # Record types that should render a message. A name with a slash is a finer
+    # kind a source counts through ``JsonlStats.kind_of`` (Codex).
     conversational: frozenset[str] = frozenset()
     ignored: frozenset[str] = frozenset()
 
@@ -73,7 +75,17 @@ SPEC_TARGETS: dict[str, SpecTarget] = {
         harness_version="0.165.0",
         store="JSONL rollout per thread fragment",
         adapter_version="2.0.0",
-        conversational=frozenset({"response_item", "event_msg"}),
+        # event_msg and response_item also carry control payloads (task_started,
+        # thread_settings_applied, developer and context messages), so the
+        # conversational names are the finer kinds the parser renders.
+        conversational=frozenset(
+            {
+                "event_msg/user_message",
+                "response_item/message/assistant",
+                "response_item/function_call",
+                "response_item/custom_tool_call",
+            }
+        ),
         ignored=frozenset(
             {
                 "compacted",
@@ -101,7 +113,9 @@ SPEC_TARGETS: dict[str, SpecTarget] = {
         store="SQLite cursorDiskKV rows, one composer per conversation",
         adapter_version="2.0.0",
         # A composer has no record types: each header names one bubble to fetch.
+        # One bubble alone is an aborted request (no text), not drift.
         conversational=frozenset({"bubble"}),
+        ignored=frozenset({"single-bubble"}),
     ),
 }
 

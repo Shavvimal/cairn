@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -21,6 +22,20 @@ from pathlib import Path
 from ..storage import atomic_write
 
 LINEAGE_CACHE_VERSION = 1
+_ROLLOUT_UUID = re.compile(
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$", re.IGNORECASE
+)
+
+
+def rollout_id(path: Path) -> str:
+    """The thread id a rollout's filename carries (its trailing UUID), else the stem.
+
+    Codex names a rollout ``rollout-<timestamp>-<thread id>.jsonl``; the targeted
+    export already finds a thread's files by that name. Reading the name needs no
+    file contents, which is what the gap check and the drift guard need.
+    """
+    match = _ROLLOUT_UUID.search(path.name)
+    return match.group(1) if match else path.stem
 
 
 def spawn_fields(payload: dict) -> dict:
@@ -210,6 +225,7 @@ __all__ = [
     "RolloutMeta",
     "lineage_cache_path",
     "read_first_meta",
+    "rollout_id",
     "rollout_lineage",
     "spawn_fields",
 ]
