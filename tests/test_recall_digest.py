@@ -529,6 +529,30 @@ class TestDigestOverdue(DigestFixture):
             ["claude:agent-0009#1", "claude:due-0001#1", "claude:run-0001#1"],
         )
 
+    def test_provenance_filter_applies_to_overdue_rows(self):
+        earlier = [msg("user", "2026-03-20T10:00:00Z", "x"), msg("assistant", None, "y")]
+        child = document(
+            "agent-0007",
+            earlier,
+            doc_type="claude-subagent",
+            notes=OVERDUE_NOTES,
+            head_extra=("parent_session_id: lead-0001",),
+        )
+        self.write_doc("child.md", child)
+        today = [msg("user", "2026-03-28T10:00:00Z", "x"), msg("assistant", None, "y")]
+        self.write_doc("due.md", document("due-0001", today, notes=OVERDUE_NOTES))
+        for value, refs in (
+            ("tool", ["claude:due-0001#1"]),
+            ("agent", ["claude:agent-0007#1"]),
+            ("user", []),
+        ):
+            with self.subTest(value=value):
+                code, data, _stderr, _out = self.digest(
+                    "--include-subagents", "--provenance", value
+                )
+                self.assertEqual(code, 0 if value == "tool" else 3)
+                self.assertEqual([r["ref"] for r in data["overdue"]], refs)
+
 
 if __name__ == "__main__":
     unittest.main()

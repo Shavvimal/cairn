@@ -238,7 +238,8 @@ with `as_of = end.date()`. Unless `--include-routine-sessions` is given, a sessi
 a routine (front matter `owner: routine:<name>`, or an owner-form preamble on a session of
 the day) and the subagents of such a session give no overdue rows. An out-of-window
 session whose only owner mark is a preamble is not read for it, because the overdue scan
-stops at the conversation anchor. For the digest of day D, that is D + 1, so a row counts as overdue
+stops at the conversation anchor. `--provenance` keeps the same documents: a session of the
+day by its digest row, any other session by its front matter. For the digest of day D, that is D + 1, so a row counts as overdue
 when `revisit_by <= D`. The result depends only on the documents, so the output stays
 deterministic. Add `"overdue": [...]` to the JSON object. Human output adds one
 `Overdue: <ref>  revisit_by <date>  <claim>` line per row. The exit codes and the files

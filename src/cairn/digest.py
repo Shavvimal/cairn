@@ -516,10 +516,23 @@ def run_digest(
     # Rows due for review: revisit_by before the day after the digest day. They depend
     # on the documents only, so the output stays deterministic. A routine's sessions and
     # their subagents give no rows, in or out of the window, unless they are kept.
+    # ``--provenance`` keeps the same documents: a session of the day by its digest row,
+    # any other by its front matter.
     scanned = records if keep_routine else _not_routine(records, excluded)
-    overdue = decisions.overdue_rows(scanned, end.date())
     if getattr(args, "provenance", None):
+        of_day = {d.record.reference: d.row["provenance"] for d in digests}
+        scanned = [
+            r
+            for r in scanned
+            if (
+                of_day[r.reference]
+                if r.reference in of_day
+                else provenance_mod.effective(r.metadata, r.source, r.path)
+            )
+            in args.provenance
+        ]
         digests = [d for d in digests if d.row["provenance"] in args.provenance]
+    overdue = decisions.overdue_rows(scanned, end.date())
     digests.sort(key=lambda d: (d.first_ts, d.record.reference))
     _stems(digests)
     write(out, digests)

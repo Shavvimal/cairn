@@ -89,7 +89,8 @@ Sessions owned by a routine (`owner: routine:<name>`) and their subagents are le
 listed under `excluded`; `--include-routine-sessions` keeps them.
 The JSON also has `overdue`: the active `## Decisions` rows whose `revisit_by` is on or
 before the digest day, from any session outside a routine's (a routine's sessions and
-their subagents give none unless `--include-routine-sessions`). Mention them in the One Thing when they bear on the day's work.
+their subagents give none unless `--include-routine-sessions`; `--provenance` filters them
+too). Mention them in the One Thing when they bear on the day's work.
 An overdue row never changes the exit code.
 
 ### Decisions ("what did we decide about X")
