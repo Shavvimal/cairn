@@ -410,8 +410,21 @@ def main(argv: list[str] | None = None) -> int:
             "agy's settings, printing every rule added"
         ),
     )
+    install.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="codex: print every planned write (file, key or index, sha256); write nothing",
+    )
+    install.add_argument(
+        "--no-trust",
+        action="store_true",
+        help="codex: register the hook but leave its trust to a manual review in /hooks",
+    )
     uninstall = sub.add_parser("uninstall", help="remove owned registration; preserve shared data")
     uninstall.add_argument("--harness", choices=HOOK_HARNESSES)
+    uninstall.add_argument(
+        "--dry-run", action="store_true", help="codex: print the planned removals; write nothing"
+    )
     export = sub.add_parser("export", help=argparse.SUPPRESS)
     export.add_argument(
         "--source", required=True, choices=[s.source for s in BY_NAME.values() if s.targeted]
@@ -419,6 +432,10 @@ def main(argv: list[str] | None = None) -> int:
     export.add_argument("--session-id", required=True)
     export.add_argument("--transcript")
     args = parser.parse_args(argv)
+    if getattr(args, "dry_run", False) and args.harness != "codex":
+        (install if args.command == "install" else uninstall).error(
+            "--dry-run applies to --harness codex"
+        )
     if args.command == "handle" and args.harness == "antigravity":
         return _handle_antigravity()
     try:
@@ -426,7 +443,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.harness == "codex":
                 from .harnesses.codex_registration import configure
 
-                print(configure(None, remove=True))
+                print(configure(None, remove=True, dry_run=args.dry_run))
             elif args.harness == "antigravity":
                 from .harnesses import antigravity_registration
 
@@ -446,11 +463,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "install":
             if args.grant_commands and args.harness != "antigravity":
                 raise ValueError("--grant-commands applies to --harness antigravity")
-            print(install_launcher(config))
+            if args.no_trust and args.harness != "codex":
+                raise ValueError("--no-trust applies to --harness codex")
+            if args.dry_run:
+                print(f"would write {launcher_path()}")
+            else:
+                print(install_launcher(config))
             if args.harness == "codex":
                 from .harnesses.codex_registration import configure
 
-                print(configure(config))
+                print(configure(config, dry_run=args.dry_run, trust_hook=not args.no_trust))
             elif args.harness == "antigravity":
                 from .harnesses import antigravity_registration
 
@@ -482,10 +504,13 @@ def main(argv: list[str] | None = None) -> int:
             report = compact_status(status(config, args.harness), args.all)
             if args.harness == "codex":
                 from .harnesses.codex import Codex
+                from .harnesses.codex_registration import trust_report
 
                 report["host_hooks"] = Codex().inspect_hooks(os.getcwd())
+                report["codex_trust"] = trust_report()
                 report["trust"] = (
-                    "See host_hooks trustStatus; completed jobs are separate evidence of execution."
+                    "See host_hooks trustStatus and codex_trust (read from config.toml); "
+                    "completed jobs are separate evidence of execution."
                 )
             elif args.harness == "antigravity":
                 from .harnesses import antigravity_registration

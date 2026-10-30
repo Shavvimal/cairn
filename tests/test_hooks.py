@@ -446,6 +446,12 @@ class TestCodexRegistration(StoreFixture):
         self.codex_env = patch.dict(os.environ, {"CODEX_HOME": str(self.home)})
         self.codex_env.start()
         self.addCleanup(self.codex_env.stop)
+        # No real `codex --version` probe: trust is covered in tests/test_codex_trust.py.
+        version = patch(
+            "cairn.harnesses.codex_trust.codex_version", return_value=(None, "not probed")
+        )
+        version.start()
+        self.addCleanup(version.stop)
 
     def test_idempotent_fallback_preserves_unrelated_and_removes_owned_only(self):
         from cairn.harnesses.codex_registration import configure

@@ -856,6 +856,43 @@ def _fail(label: str, detail: str = "") -> None:
     print(f"  FAIL {label}" + (f" - {detail}" if detail else ""))
 
 
+def _check_codex_trust() -> None:
+    """One ``Codex hook trust`` line per cairn-owned SessionEnd group, read from
+    hooks.json, config.toml and the receipt; the Codex app-server is not started."""
+    from .harnesses.codex_registration import trust_report
+    from .harnesses.codex_trust import MANUAL_STEP
+
+    report = trust_report()
+    label = "Codex hook trust"
+    if report.get("error"):
+        _warn(label, f"{report['error']}; {MANUAL_STEP}")
+        return
+    reinstall = "run cairn hook install --harness codex, or review/trust it in /hooks"
+    for group in report["groups"]:
+        index, state = group["index"], group["state"]
+        if state == "trusted":
+            who = "cairn" if group["origin"] == "written" else "Codex"
+            _ok(label, f"trusted (written by {who})")
+        elif state == "stale":
+            _warn(
+                label, f"stale: SessionEnd group {index} changed after it was trusted; {reinstall}"
+            )
+        elif state == "missing":
+            _warn(label, f"missing: no trust table for SessionEnd group {index}; {reinstall}")
+        elif state == "disabled":
+            _warn(
+                label,
+                f"disabled: SessionEnd group {index} has enabled = false; enable it in /hooks",
+            )
+        else:
+            version = report["codex_version"] or f"version unknown ({report.get('version_error')})"
+            _warn(
+                label,
+                f"manual: Codex {version} is outside the verified range "
+                f"({report['verified_range']}); {MANUAL_STEP}",
+            )
+
+
 def _check_qmd_runtime(qmd_binary: str) -> tuple[int, IndexStatus | None, str | None]:
     """Probe the configured QMD: version (diagnostic) and ``qmd status`` (runtime).
 
@@ -1292,6 +1329,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
                     )
             except (OSError, ValueError, RuntimeError) as exc:
                 _warn("hook inspection", str(exc))
+            _check_codex_trust()
         else:
             _warn("hook trust", report["trust"])
         _ok("observed sync states", json.dumps(report["counts"]))
