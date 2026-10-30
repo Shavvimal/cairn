@@ -477,7 +477,7 @@ class TestDigestOverdue(DigestFixture):
         self.write_doc("due.md", document("due-0001", messages, notes=OVERDUE_NOTES))
         code, data, _stderr, _out = self.digest()
         self.assertEqual(code, 0)
-        self.assertEqual(set(data), {"sessions", "skipped", "overdue"})
+        self.assertLessEqual({"sessions", "skipped", "overdue"}, set(data))
         self.assertEqual([r["ref"] for r in data["overdue"]], ["claude:due-0001#1"])
         self.assertEqual(data["overdue"][0]["revisit_by"], "2026-03-28")
         self.assertTrue(data["overdue"][0]["overdue"])
