@@ -1,12 +1,13 @@
 # `cairn recall verify` and routine-session exclusion: implementation spec
 
-Status: implemented in this PR, on `main` at 2.9.0. Section 11 lists where the code
-differs from the text below; where they differ, section 11 wins.
+Status: implemented in 2.15.0, on top of the provenance, exporter-guard, trusted-hash,
+routine-hardening and recall-gaps changes. Section 11 lists where the code differs from
+the text below; where they differ, section 11 wins.
 
-Every claim about current behaviour cites `path:line` on `main` at 2.9.0.
+Every claim about current behaviour cites `path:line` on `main` at 2.9.0, the base this
+spec was written against.
 
-Dependencies: none. A `provenance` front matter key, if one lands, is not used; section
-4.6 says why. An error-code registry can later map the reason vocabulary in 5.2 to codes.
+Dependencies: none. The `provenance` front matter key is not used; section 4.6 says why. An error-code registry can later map the reason vocabulary in 5.2 to codes.
 
 ## 1. Purpose and non-goals
 
@@ -302,7 +303,10 @@ the file ends:
 }
 ```
 
-`ref` and `ordinal` are `null` when unresolved. `kind` is `citation` or `quote`.
+`ref` is `null` when the session did not resolve to one digest file. `ordinal` is the
+cited `N` for every citation failure except `malformed-citation`, where it is `null`. A
+quote failure carries `ref` and `ordinal` only when it names exactly one frame. `kind` is
+`citation` or `quote`.
 
 ### 5.2 Reason vocabulary
 
@@ -418,5 +422,26 @@ About 900 lines in all, half of them tests: one day of work.
   least 8 characters`; `quote-uncited`: `"QUOTE" has no citation in its block`.
 - `--fix` checks that `FILE` is writable before it writes, because the atomic rename
   would otherwise replace a read-only file. New lines use the file's first line ending.
+- A line that starts with three backticks opens a fence only when no backtick follows
+  on that line (CommonMark: a backtick fence's info string holds no backtick), so
+  `` ```code``` `` at the start of a line is inline code and the rest of the file is checked.
+- A straight `"` opens a quote only at the start of a block or after a space or `([{-/`,
+  and before a non-space; it closes only after a non-space. So `12"` is an inch mark.
+  An opener with no closer is skipped and the scan goes on.
+- A table is found by its delimiter row (`--- | ---`, with or without outer pipes): the
+  header line, the delimiter and each following line up to a blank, fenced, heading or
+  `>` line are one block each, like a `|` row.
+- `--fix` takes the document lock (`storage.document_lock`) on the resolved path, re-reads
+  the file and writes nothing when it changed since the check read it (`Error: FILE
+  changed while verify ran; nothing written, run it again`, exit 1). An editor that saves
+  between the re-read and the rename can still lose that save; the window is the
+  `atomic_write` call. A symlink is written through, and the file keeps its mode.
+- `ok` in `--json` is `false` when any check failed, also under `--fix`, which then exits
+  0 and reports the moves in `moved`.
+- A subagent's parent is looked up among every record of the digest sources, before the
+  project, day and `--min-msgs` filters, and its owner read from front matter or the
+  owner-form preamble. A routine's subagent is excluded even when the routine session
+  itself is not digested (it ran the day before, sits in another project, or has too few
+  user messages).
 - The prompt block in `skills/cairn/workflows/routine.md` also tells the peer the journal
   path. The example `scheduled` profile allows `Bash(cairn recall verify *)`.

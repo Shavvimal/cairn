@@ -107,6 +107,7 @@ Config resolution: `$CAIRN_CONFIG`, else `$XDG_CONFIG_HOME/cairn/config.json` (e
 cairn sync [--hook | --cron | --all]   # sync enabled sources, then refresh QMD index
 cairn recall list <date> | expand <id> # temporal session timeline (drives /cairn:recall)
 cairn recall digest <date> | frame <ref> <n>  # one day condensed with provenance; open a cited frame
+cairn recall verify <journal> --digest <dir> [--fix]  # check a journal's citations and quotes; exit 4 on a failure
 cairn recall gaps [--json]             # what recall cannot see right now: export/index lag, disabled sources, rg
 cairn doctor [--strict-index]          # check install, config, qmd + index, cron, PATH, stores
 cairn config show [--json]             # print resolved config + integrations
