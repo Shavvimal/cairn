@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.1]
+
+### Added
+- `skills/<name>/routing-eval.jsonl` for all seven skills: 74 paraphrased user intents, each
+  naming the skill it should reach, `null` for "no skill", and an optional `ambiguous_with`.
+- `tests/test_skill_routing.py`: checks that each intent matches the quoted triggers of its
+  skill and of no other skill unless declared, rejects an intent that copies a trigger, and
+  prints the overlap table across skills. It checks trigger text, not the harness router.
+- CONTRIBUTING: "Changing a skill description".
+- `docs/skill-routing-eval-spec.md`.
+
+### Changed
+- The `search` skill description now lists quoted triggers ("cairn search", "search my
+  sessions", "search past sessions", "search my meetings", "grep my sessions", "exact search").
+
 ## [2.19.0]
 
 ### Added
