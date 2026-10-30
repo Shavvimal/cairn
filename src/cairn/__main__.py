@@ -61,6 +61,7 @@ recall (temporal view over shared exported sessions; topic search is qmd's job):
   cairn recall digest yesterday --all-projects --json   one UTC day condensed, cited by f<N>
   cairn recall frame <source:session-id> N [--frames FILE]   print frame N, check its hash
   cairn recall gaps --json                   what recall cannot see right now
+  cairn recall verify FILE --digest DIR [--fix]   check a journal's [SOURCE:ID fN] citations and quotes
 
 peer agents (one foreground round per call; run it in the background):
   cairn invoke codex --prompt TEXT [--effort E] [--profile review|edit|full] [--json]
