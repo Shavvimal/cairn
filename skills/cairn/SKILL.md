@@ -121,19 +121,31 @@ Config resolution: `$CAIRN_CONFIG`, else `$XDG_CONFIG_HOME/cairn/config.json` (e
 
 ```bash
 cairn sync [--hook | --cron | --all]   # sync enabled sources, then refresh QMD index
-cairn recall list <date> | expand <id> # temporal session timeline (drives /cairn:recall)
-cairn recall digest <date> | frame <ref> <n>  # one day condensed with provenance; open a cited frame
+cairn recall list <date>               # temporal session timeline (drives /cairn:recall)
+cairn recall expand <id>               # one session's condensed transcript
+cairn recall digest <date>             # one day condensed with provenance
+cairn recall frame <ref> <n>           # open a cited frame
 cairn recall verify <journal> --digest <dir> [--fix]  # check a journal's citations and quotes; exit 4 on a failure
 cairn recall gaps [--json]             # what recall cannot see right now: export/index lag, disabled sources, rg
 cairn doctor [--strict-index]          # check install, config, qmd + index, cron, PATH, stores
 cairn config show [--json]             # print resolved config + integrations
-cairn config init [--enable ...] | set KEY VALUE | unset KEY | path
-cairn cron install | uninstall         # manage the hourly sync crontab entry
-cairn instructions install | remove | show | status --harness claude|codex   # recall-first block in the user instruction file
-cairn routine install | uninstall NAME # add / remove a routine's launchd job (macOS)
+cairn config init [--enable ...]       # create the per-user config
+cairn config set KEY VALUE             # set one config value
+cairn config unset KEY                 # remove a routine, routine field or invoke profile
+cairn config path                      # print the resolved config path
+cairn cron install                     # add / refresh the hourly sync crontab entry
+cairn cron uninstall                   # remove the cairn cron entry
+cairn instructions install --harness claude|codex   # add the recall-first block to the user instruction file
+cairn instructions remove --harness claude|codex    # delete the block and record an opt-out
+cairn instructions show --harness claude|codex      # print the block for a paste by hand
+cairn instructions status [--json]                  # the block state per harness
+cairn routine install NAME             # add a routine's launchd job (macOS)
+cairn routine uninstall NAME           # remove the launchd job; stamps are kept
 cairn routine run NAME [--day D] [--force] [--dry-run] [--json]   # run the due days now
-cairn routine list | status NAME [--json]   # state, stamps, last run; status exits 0/1/2
-cairn routine pause NAME --reason TEXT | resume NAME   # skip runs until resumed
+cairn routine list [--json]            # every configured routine
+cairn routine status NAME [--json]     # state, stamps, last run; exits 0/1/2
+cairn routine pause NAME --reason TEXT # skip runs until resumed
+cairn routine resume NAME              # remove the pause
 cairn routine kickstart NAME [--force-restart]   # ask launchd to start the job now
 cairn help                             # overview an agent can read to drive the tool
 cairn --version
@@ -159,7 +171,8 @@ cairn invoke status <thread-id> [--follow]                 # health line, progre
 cairn invoke tail <thread-id>                              # one line per tool call (CMD, WRITE, DENIED, RESULT)
 cairn invoke wait <thread-id> --json                       # block until the round exits; print its result line
 cairn invoke codex --resume <thread-id> --prompt "…"        # continue the same thread, any time later
-cairn invoke cancel | publish <thread-id>                  # stop a run; finish pending export/link/index
+cairn invoke cancel <thread-id>                            # stop a run
+cairn invoke publish <thread-id>                           # finish pending export/link/index
 cairn invoke list-models                                   # Codex model and effort catalogue
 cairn agents list [--session SOURCE:ID] [--all]            # peer runs plus Claude/Codex subagents, with health
 cairn agents wait --session SOURCE:ID [--timeout-s N]      # block until the fan-out has exited

@@ -87,20 +87,30 @@ agents (peer runs and subagents of a session):
 
 orchestration / admin:
   cairn sync [--hook | --cron | --all]       sync every source, then refresh QMD
-  cairn hook install | status | worker       configure hooks / inspect / retry sync
-  cairn instructions install | remove | show | status --harness claude|codex   recall-first block in the user instruction file
+  cairn hook install [--harness H]           register a host hook / record the launcher
+  cairn hook status                          inspect hook runs and the queue
+  cairn hook worker                          drain / retry queued sync work
+  cairn instructions install --harness claude|codex   add the recall-first block to the user instruction file
+  cairn instructions remove --harness claude|codex    delete the block and record an opt-out
+  cairn instructions show --harness claude|codex      print the block for a paste by hand
+  cairn instructions status [--json]         the block state per harness
   cairn resume <source:session-id>            print the correct native resume command
   cairn doctor [--strict-index]              check install, config, qmd + index, rg, cron, PATH
-  cairn config init | path                   create / locate the per-user config
+  cairn config init                          create the per-user config
+  cairn config path                          print the resolved config path
   cairn config show [--json]                 print the resolved config + integrations
   cairn config set KEY VALUE                 set one config value (e.g. claude.store …)
   cairn config unset KEY                     remove a routine, routine field or invoke profile
   cairn config add-service-doc NAME PATH     mirror a docs folder into service-docs
-  cairn cron install | uninstall             manage the hourly sync crontab entry
-  cairn routine install | uninstall NAME     add / remove the launchd job (macOS)
+  cairn cron install                         add / refresh the hourly sync crontab entry
+  cairn cron uninstall                       remove the cairn cron entry
+  cairn routine install NAME                 add the launchd job (macOS)
+  cairn routine uninstall NAME               remove the launchd job; stamps are kept
   cairn routine run NAME [--day D] [--force] [--dry-run] [--json]   run due days now
-  cairn routine list | status NAME [--json]  state, stamps, last run; status exits 0/1/2
-  cairn routine pause NAME --reason TEXT | resume NAME   skip runs until resumed
+  cairn routine list [--json]                every configured routine
+  cairn routine status NAME [--json]         state, stamps, last run; exits 0/1/2
+  cairn routine pause NAME --reason TEXT     skip runs until resumed
+  cairn routine resume NAME                  remove the pause
   cairn routine kickstart NAME [--force-restart]   ask launchd to start the job now
   cairn errors [CODE] [--json]               what a failure code means and the next step
 
