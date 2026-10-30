@@ -464,22 +464,25 @@ the sections above in these points:
 20. While the v1 file exists and the receipt is absent or still `prepared`, the v1
     commands keep owning their groups by exact command, so a migration interrupted after
     the prepared receipt can still be completed or uninstalled. Beside an `installed`
-    receipt a leftover v1 file owns nothing; the receipt's sha256 values decide, and the
-    next run deletes the file. Uninstall then strips only the v1 handlers of a group.
+    receipt a leftover v1 file owns nothing (its commands are not cairn's commands any
+    more); the receipt's sha256 values decide, and the next run deletes the file. Uninstall then strips only the v1 handlers of a group.
 21. `hook install --harness codex` writes the launcher only after the registration plan
     (or, with the bundled hook discovered, the removal plan) passed its checks, so a
     refused install, or an `inspect_hooks` failure, writes no file.
 22. Second-review fixes. Note 14's refusal also covers a cairn group with an added foreign
     handler. hooks.json that is not an object, or whose `hooks`, `hooks.SessionEnd` or a
-    group's `hooks` has the wrong type, is `{hooks_path} is not a Codex hooks file
+    group's `hooks` has the wrong type, or a handler's `command` is not a string, is
+    `{hooks_path} is not a Codex hooks file
     ({detail}); cairn changed nothing.` (exit 1, and `error` in `codex_trust`).
-23. The post-write rollback (step 14) removes only a table cairn wrote in this run
-    (`origin: written`). It writes no backup, so `config.toml.cairn-bak` keeps the bytes
-    from before the run, and it deletes a `config.toml` that cairn created and that would
-    be empty. An adopted or inline table stays, with the warning `... after the write; the
-    table is not cairn's, so it stays.`
+23. The post-write rollback (step 14) removes only a table this run wrote, or the
+    interrupted run it finishes wrote (`origin: written`). It writes no backup, so
+    `config.toml.cairn-bak` keeps the bytes from before the run, and it deletes a
+    `config.toml` that this run created and that would be empty (a resumed run cannot
+    tell, so it leaves the emptied file). Any other table stays, with the warning `...
+    after the write; cairn did not write the table in this run, so it stays.`
 24. A table with cairn's exact hash defined inline or by dotted keys is trusted but not
-    recorded in the receipt, so uninstall never has to edit it. Insertion anchors only on
+    recorded in the receipt, so uninstall never has to edit it; a table counts as cairn's
+    to edit only when removing it passes the parse-back check. Insertion anchors only on
     `[hooks.state."<key>"]` headers whose key the parse knows.
 25. A run that finds a `prepared` receipt and both files already written writes the
     installed receipt, runs step 14, and prints `Finished the interrupted Cairn

@@ -337,8 +337,33 @@ class TestInstall(TrustFixture):
             [{"command": self.command(), "trustStatus": "untrusted"}],
         ]
         _, warning = self.run_configure()
-        self.assertIn("the table is not cairn's, so it stays", warning)
+        self.assertIn("cairn did not write the table in this run, so it stays", warning)
         self.assertEqual(self.toml.read_text(), original)
+
+    def test_rollback_leaves_a_table_an_earlier_run_wrote(self):
+        self.run_configure()
+        before = self.toml.read_text()
+        self.hooks_path.write_text(json.dumps(json.loads(self.hooks_path.read_text())))
+        self.inspect_mock.side_effect = [
+            [],
+            [{"command": self.command(), "trustStatus": "untrusted"}],
+        ]
+        _, warning = self.run_configure()
+        self.assertIn("cairn did not write the table in this run, so it stays", warning)
+        self.assertEqual(self.toml.read_text(), before)
+
+    def test_stale_v1_command_owns_nothing_after_install(self):
+        self.run_configure()
+        legacy = self.root / "xdg/cairn/codex-hook-registration.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"path": str(self.hooks_path), "commands": ["echo old"]}))
+        data = json.loads(self.hooks_path.read_text())
+        mine = {"hooks": [{"type": "command", "command": "echo old"}]}
+        data["hooks"]["SessionEnd"].append(mine)
+        self.hooks_path.write_text(json.dumps(data))
+        self.run_configure()  # no refusal: "echo old" is the user's group now
+        self.assertEqual(json.loads(self.hooks_path.read_text())["hooks"]["SessionEnd"][1], mine)
+        self.assertFalse(legacy.exists())
 
     def test_resumed_run_verifies_and_says_so(self):
         real = registration._write_receipt
@@ -371,6 +396,9 @@ class TestInstall(TrustFixture):
             '{"hooks": null}': '"hooks" is not an object',
             '{"hooks": {"SessionEnd": null}}': '"hooks.SessionEnd" is not a list',
             '{"hooks": {"SessionEnd": [{"hooks": null}]}}': "is not an object with a",
+            '{"hooks": {"SessionEnd": [{"hooks": [{"command": []}]}]}}': (
+                'has a "command" that is not a string'
+            ),
         }
         for text, detail in cases.items():
             with self.subTest(text=text):
@@ -683,6 +711,19 @@ class TestTomlEdit(TrustFixture):
         kinds = [e["kind"] for e in self.receipt_data()["entries"]]
         self.assertEqual(kinds, ["hooks_json_group"])
         self.run_configure(remove=True)  # no ValueError: cairn never owned the inline table
+        self.assertEqual(self.toml.read_text(), original)
+
+    def test_inline_table_with_a_header_in_a_string_is_not_owned(self):
+        header = trust.table_header(self.key)
+        original = (
+            f'note = """\n{header}\n"""\n'
+            f'hooks = {{ state = {{ "{self.key}" = {{ trusted_hash = "{self.expected_hash()}" }} }} }}\n'
+        )
+        self.toml.write_text(original)
+        self.run_configure()
+        kinds = [e["kind"] for e in self.receipt_data()["entries"]]
+        self.assertEqual(kinds, ["hooks_json_group"])
+        self.run_configure(remove=True)
         self.assertEqual(self.toml.read_text(), original)
 
     def test_header_inside_multiline_string_is_not_a_table(self):

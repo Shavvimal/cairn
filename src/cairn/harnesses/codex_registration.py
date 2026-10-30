@@ -162,13 +162,15 @@ def _read_receipt(path: Path) -> dict:
     return receipt
 
 
+def _migrating(receipt: dict) -> bool:
+    """v1 commands still own their groups with no receipt, or beside a receipt still
+    ``prepared`` (an interrupted migration). After an installed receipt, a leftover v1
+    file only needs deleting, and the receipt's sha256 values decide."""
+    return not receipt or receipt.get("status") == "prepared"
+
+
 def _legacy_commands(state: _State) -> set[str]:
-    """v1 commands that still own their groups: with no receipt, or beside a receipt
-    still ``prepared`` (an interrupted migration). After an installed receipt, a leftover
-    v1 file only needs deleting, and the receipt's sha256 values decide."""
-    if state.receipt and state.receipt.get("status") != "prepared":
-        return set()
-    return set(state.legacy.get("commands", []))
+    return set(state.legacy.get("commands", [])) if _migrating(state.receipt) else set()
 
 
 def _identity(entry: dict) -> tuple:
@@ -215,7 +217,8 @@ def _load(*, strict: bool = True, need_config: bool = True) -> _State:
         config=_config(need_config or _has_tables(receipt)),
         receipt=receipt,
         legacy=legacy,
-        commands=set(receipt.get("commands", [])) | set(legacy.get("commands", [])),
+        commands=set(receipt.get("commands", []))
+        | (set(legacy.get("commands", [])) if _migrating(receipt) else set()),
     )
 
 
@@ -235,6 +238,12 @@ def _hooks_data(hooks_path: Path, text: str) -> dict:
         for group in hooks.get(EVENT, [])
     ):
         detail = f'a "hooks.{EVENT}" group is not an object with a "hooks" list'
+    elif any(
+        isinstance(handler, dict) and not isinstance(handler.get("command", ""), str)
+        for group in hooks.get(EVENT, [])
+        for handler in group.get("hooks", [])
+    ):
+        detail = f'a "hooks.{EVENT}" handler has a "command" that is not a string'
     if detail is not None:
         raise ValueError(
             f"{hooks_path} is not a Codex hooks file ({detail}); cairn changed nothing."
@@ -628,7 +637,8 @@ def _install(
             if not resumed:
                 return f"Cairn fallback in {hooks_path} is already registered and trusted; nothing changed."
             # An interrupted run wrote both files: finish it, verification included.
-            note = _verify_trust(state, plan, final, command)
+            wrote = (plan.table_entry or {}).get("origin") == "written"
+            note = _verify_trust(state, plan, final, command, wrote=wrote)
             if note is None:
                 return _registered_untrusted(hooks_path, plan)
             return (
@@ -666,7 +676,7 @@ def _install(
         state.legacy_path.unlink(missing_ok=True)
         if plan.trusted_hash is None:
             return _registered_untrusted(hooks_path, plan)
-        note = _verify_trust(state, plan, installed, command)
+        note = _verify_trust(state, plan, installed, command, wrote=plan.key in plan.set_tables)
     if note is None:
         return _registered_untrusted(hooks_path, plan)
     return (
@@ -699,8 +709,15 @@ def _check_written_group(hooks_path: Path, plan: _Plan) -> None:
         )
 
 
-def _verify_trust(state: _State, plan: _Plan, receipt: dict, command: str) -> str | None:
-    """Ask Codex whether it now trusts the hook. ``None`` means the table was rolled back."""
+def _verify_trust(
+    state: _State, plan: _Plan, receipt: dict, command: str, *, wrote: bool
+) -> str | None:
+    """Ask Codex whether it now trusts the hook. ``None`` means the table was rolled back.
+
+    ``wrote`` says this run (or the interrupted run it finishes) wrote the table; only
+    then is it removed. A resumed run cannot tell whether the interrupted one created
+    config.toml, so it leaves an emptied file in place.
+    """
     try:
         observed = Codex().inspect_hooks(os.getcwd())
     except (OSError, ValueError, RuntimeError) as exc:
@@ -711,7 +728,6 @@ def _verify_trust(state: _State, plan: _Plan, receipt: dict, command: str) -> st
         return ""
     snapshot = trust.read_config(state.config.path)
     entry = plan.table_entry or {}
-    wrote = entry.get("origin") == "written"  # an adopted or inline table is not cairn's
     if wrote and trust.canonical_sha(snapshot.state.get(plan.key)) == entry["sha256"]:
         text = trust.edit(snapshot, {}, [plan.key])
         if not state.config.exists and not text.strip():
@@ -721,7 +737,9 @@ def _verify_trust(state: _State, plan: _Plan, receipt: dict, command: str) -> st
             trust.write_config(snapshot, text, backup=False)
     receipt["entries"] = [e for e in receipt["entries"] if e.get("kind") != "config_toml_table"]
     _write_receipt(state, receipt)
-    removed = "trust table removed" if wrote else "the table is not cairn's, so it stays"
+    removed = (
+        "trust table removed" if wrote else "cairn did not write the table in this run, so it stays"
+    )
     _warn(
         f"Codex reports the Cairn hook as {status} after the write; {removed}. "
         "Review/trust it in /hooks."

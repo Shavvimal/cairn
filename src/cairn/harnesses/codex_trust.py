@@ -327,7 +327,13 @@ def _stage(path: Path, text: str, mode: int | None) -> str:
 def has_table(snapshot: ConfigSnapshot, key: str) -> bool:
     """Whether ``key`` has its own ``[hooks.state."<key>"]`` header line."""
     lines = snapshot.text.splitlines(keepends=True)
-    return ("hooks", "state", key) in _spans(lines) and key in snapshot.state
+    if ("hooks", "state", key) not in _spans(lines) or key not in snapshot.state:
+        return False
+    try:
+        edit(snapshot, {}, [key])  # editable: removing it parses back as planned
+    except ValueError:
+        return False
+    return True
 
 
 def remove_config(snapshot: ConfigSnapshot) -> None:
