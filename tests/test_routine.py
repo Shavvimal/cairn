@@ -573,6 +573,7 @@ class TestRun(RoutineFixture):
             code, _out, err = self.cli("run", "daily", children=children)
         self.assertEqual(code, 2)
         self.assertIn("refusing to run inside a peer (CAIRN_INVOKE_DEPTH=1)", err)
+        self.assertTrue(err.endswith("code: ROUTINE_NESTED (run 'cairn errors ROUTINE_NESTED')\n"))
         self.assertEqual(children.calls, [])
 
     def test_run_command_keeps_non_utf8_child_output(self):
@@ -731,6 +732,9 @@ class TestLaunchd(RoutineFixture):
         code, _out, err = self.cli_launchd("install", "daily", fake=fake)
         self.assertEqual(code, 2)
         self.assertIn(f"prompt_file not found: {self.prompt}", err)
+        self.assertTrue(
+            err.endswith("code: ROUTINE_INPUT_INVALID (run 'cairn errors ROUTINE_INPUT_INVALID')\n")
+        )
         self.assertEqual(fake.calls, [])
 
     def test_uninstall_keeps_stamps(self):

@@ -33,8 +33,8 @@ exit; the command decides it.
 | `CONFIG_UNKNOWN_KEY` | 1 (cairn routine: 2) | no | A config object holds a key cairn does not know. |
 | `DECISION_CLAIM_WITHDRAWN` | 3 | no | decide or supersede was refused because the claim was withdrawn with 'forget'. |
 | `DIGEST_EMPTY_DAY` | 3 | no | No session was written for the day. |
-| `EXPORT_DOCUMENT_UNPARSEABLE` | 1 | no | An exported document has front matter cairn cannot parse, so its re-export is refused. |
-| `EXPORT_PARSER_DRIFT` | 1 | no | A source file holds records, but the parser rendered no message, read no line, or found no session id. |
+| `EXPORT_DOCUMENT_UNPARSEABLE` | 1 from 'cairn SOURCE export'; 0 in 'cairn doctor', which only warns | no | An exported document has front matter cairn cannot parse, so its re-export is refused. |
+| `EXPORT_PARSER_DRIFT` | 1 from 'cairn SOURCE export'; 0 in 'cairn doctor', which only warns | no | A source file holds records, but the parser rendered no message, read no line, or found no session id. |
 | `HOOK_NOT_TRUSTED` | 0 | no | Hook files exist, but the host has not confirmed that it trusts them. |
 | `INSTRUCTIONS_BLOCK_EDITED` | 1 | no | The recall-first block was edited by hand since cairn wrote it. |
 | `INSTRUCTIONS_FAILED` | 1 | no | The instruction file or the opt-out ledger could not be read or written: not UTF-8, changed during the write, invalid JSON, or an OS error. |
@@ -62,7 +62,7 @@ exit; the command decides it.
 | `ROUTINE_NESTED` | 2 | no | 'cairn routine run' started inside a peer run. |
 | `ROUTINE_TEMPLATE_UNKNOWN_VAR` | 2 | no | A {{NAME}} token in the prompt file, prepare, validate or profile extra_args is not a known template variable. |
 | `ROUTINE_UNKNOWN` | 2 | no | The routine name is not in the routines config. |
-| `ROUTINE_USAGE` | 2 | no | A routine argument is wrong: a bad name, a --day that has not ended, a bad --reason, or a launchd action off macOS. |
+| `ROUTINE_USAGE` | 2 | no | A routine argument is wrong: a bad name, a --day that has not ended, a bad --reason, or --json with --dry-run. |
 | `SYNC_SOURCE_GAP` | 1 from 'cairn sync --cron' or '--all' (step gap-check:COLLECTION); 0 in 'cairn doctor', which only warns | yes | Sessions changed in the last 30 days have no exported document. |
 
 ## CLI_UNKNOWN_COMMAND
@@ -148,7 +148,7 @@ exit; the command decides it.
 - Why: Re-export rewrites the document and keeps its annotations; with unparseable front matter it cannot tell what to keep.
 - Next step: Fix or move the document the message names, then export again.
 - Verify: `cairn doctor`
-- Exit: 1
+- Exit: 1 from 'cairn SOURCE export'; 0 in 'cairn doctor', which only warns
 - Retryable: no
 - Shown in: doctor [CODE] suffix; the export's own 'Error: refusing to re-export' line has no code yet
 - Raised at: `src/cairn/sources/guards.py:document_finding`, `src/cairn/admin.py:_check_drift`
@@ -159,7 +159,7 @@ exit; the command decides it.
 - Why: The native format probably changed; writing the document would replace the last good one with an empty one, so the export keeps the old document.
 - Next step: Read the finding in 'cairn doctor', then update cairn or report the format change.
 - Verify: `cairn doctor`
-- Exit: 1
+- Exit: 1 from 'cairn SOURCE export'; 0 in 'cairn doctor', which only warns
 - Retryable: no
 - Shown in: doctor [CODE] suffix; the export's own 'Error: parser drift' line has no code yet
 - Raised at: `src/cairn/sources/guards.py:check_parse`, `src/cairn/admin.py:_check_drift`
@@ -463,14 +463,14 @@ exit; the command decides it.
 
 ## ROUTINE_USAGE
 
-- Meaning: A routine argument is wrong: a bad name, a --day that has not ended, a bad --reason, or a launchd action off macOS.
+- Meaning: A routine argument is wrong: a bad name, a --day that has not ended, a bad --reason, or --json with --dry-run.
 - Why: The run refuses before it spends anything and writes no stamp.
 - Next step: Correct the argument the message names.
 - Verify: `cairn routine list`
 - Exit: 2
 - Retryable: no
-- Shown in: stderr code line; 'code' in last-run.json and --json
-- Raised at: `src/cairn/routine.py:main`, `src/cairn/routine_run.py:run_routine`
+- Shown in: stderr code line
+- Raised at: `src/cairn/routine.py:_check_name`, `src/cairn/routine_run.py:run_routine`, `src/cairn/routine_state.py:check_reason`
 
 ## SYNC_SOURCE_GAP
 

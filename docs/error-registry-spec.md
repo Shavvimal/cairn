@@ -208,7 +208,7 @@ plus `"code": "INVOKE_DENIED", "fix": {...}`; `retryable` keeps the per-round va
 | `RECALL_FAILED` | 1 | no | recall could not answer: bad argument, unreadable file, failed or timed-out refresh | Act on the argument or file the message names | `cairn recall list today` | `recall.py:193-195`, `digest.py:84-103` |
 | `DIGEST_EMPTY_DAY` | 3 | no | No session was written for the day | Nothing to digest; stop the day as empty | `cairn recall list yesterday --all-projects` | `digest.py:418` |
 | `ROUTINE_UNKNOWN` | 2 | no | Name is not in `routines` | Use a listed name or add the routine | `cairn routine list` | `routine.py:71-74` |
-| `ROUTINE_USAGE` | 2 | no | Bad name, future `--day`, or launchd-only action off macOS | Correct the argument the message names | `cairn routine list` | `routine.py:78-80, 142-203`, `routine_run.py:545-546` |
+| `ROUTINE_USAGE` | 2 | no | Bad name, future `--day`, a bad `--reason`, or `--json` with `--dry-run` | Correct the argument the message names | `cairn routine list` | `routine.py:78-80, 142-203`, `routine_run.py:545-546` |
 | `ROUTINE_TEMPLATE_UNKNOWN_VAR` | 2 | no | Unknown `{{NAME}}` token | Fix the token, then dry-run | `cairn routine run {name} --dry-run` | `routine_plan.py:113-118` |
 | `ROUTINE_INPUT_INVALID` | 2 | no | prompt_file missing, unreadable or empty; `cd` not a directory | Fix the path in config | `cairn routine run {name} --dry-run` | `routine_plan.py:164-192` |
 | `ROUTINE_NESTED` | 2 | no | `routine run` started inside a peer | Start it from a shell or with `cairn routine kickstart {name}` | `cairn routine status {name}` | `routine_run.py:551-557` |
@@ -335,11 +335,14 @@ prints the code; otherwise the entry describes the failure and `raised_at` names
   `MARKERS_DAMAGED`, and `FAILED` for read, write, race, encoding and ledger errors).
   `FORGET_REASON_UNKNOWN` was dropped: argparse rejects a reason outside the vocabulary
   with its own exit 2. `HOOK_INSTALL_ENTRY_CHANGED` was dropped: uninstall only warns.
-- **Three more fields.** `raised_at` names each site as `path:function`, not `path:line`, so
+- **Three more fields.** `raised_at` names each site as `path:function` (or `path:Class`
+  when an exception class's default code covers many raises, as for
+  `INSTRUCTIONS_FAILED`), not `path:line`, so
   the generated page does not go stale when lines move; a test checks every function
   exists. `shown_in` says where the code is printed today (empty: described only).
   `exit_note` replaces the number when one number cannot describe the exit
-  (`INVOKE_FAILED`, `QMD_INDEX_INCOMPLETE`, `SYNC_SOURCE_GAP`, `RECALL_DEGRADED`).
+  (`INVOKE_FAILED`, `QMD_INDEX_INCOMPLETE`, `SYNC_SOURCE_GAP`, `RECALL_DEGRADED`,
+  `EXPORT_PARSER_DRIFT`, `EXPORT_DOCUMENT_UNPARSEABLE`).
 - **`exit` describes, never drives.** `fail(code, message, *, exit, ...)` takes the
   site's exit and returns it; `exit_for(code, command)` is for tests.
 - **Placeholders** are `{name}`, `{thread_id}`, `{peer}` and `{harness}`.

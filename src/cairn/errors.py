@@ -200,6 +200,7 @@ _ENTRIES = (
         False,
         ("src/cairn/sources/guards.py:check_parse", "src/cairn/admin.py:_check_drift"),
         "doctor [CODE] suffix; the export's own 'Error: parser drift' line has no code yet",
+        exit_note="1 from 'cairn SOURCE export'; 0 in 'cairn doctor', which only warns",
     ),
     ErrorCode(
         "EXPORT_DOCUMENT_UNPARSEABLE",
@@ -213,6 +214,7 @@ _ENTRIES = (
         ("src/cairn/sources/guards.py:document_finding", "src/cairn/admin.py:_check_drift"),
         "doctor [CODE] suffix; the export's own 'Error: refusing to re-export' line has no "
         "code yet",
+        exit_note="1 from 'cairn SOURCE export'; 0 in 'cairn doctor', which only warns",
     ),
     ErrorCode(
         "SYNC_SOURCE_GAP",
@@ -347,14 +349,18 @@ _ENTRIES = (
     ErrorCode(
         "ROUTINE_USAGE",
         "A routine argument is wrong: a bad name, a --day that has not ended, a bad "
-        "--reason, or a launchd action off macOS.",
+        "--reason, or --json with --dry-run.",
         "The run refuses before it spends anything and writes no stamp.",
         "Correct the argument the message names.",
         ("cairn", "routine", "list"),
         2,
         False,
-        ("src/cairn/routine.py:main", "src/cairn/routine_run.py:run_routine"),
-        "stderr code line; 'code' in last-run.json and --json",
+        (
+            "src/cairn/routine.py:_check_name",
+            "src/cairn/routine_run.py:run_routine",
+            "src/cairn/routine_state.py:check_reason",
+        ),
+        "stderr code line",
     ),
     ErrorCode(
         "ROUTINE_TEMPLATE_UNKNOWN_VAR",
