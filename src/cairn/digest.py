@@ -128,6 +128,22 @@ def lineage(record: SessionRecord, frames: list[Frame]) -> Lineage:
     return Lineage("primary", None)
 
 
+def opens_with_preamble(frames: list[Frame]) -> bool:
+    """Whether the first user frame with text starts with the invoke preamble.
+
+    The provenance test of ``provenance.at_export``: a preamble pasted later in a
+    session a person drove does not make it ``agent``.
+    """
+    for frame in frames:
+        if frame.role != "user":
+            continue
+        text = frame.body.replace("\r\n", "\n")
+        if not (text.split("\n", 1)[1] if "\n" in text else "").strip():
+            continue
+        return preamble_match(frame.body) is not None
+    return False
+
+
 def artifacts(text: str, anchor: int) -> list[str]:
     """Paths or URIs listed in the first ``## Artifacts`` section before My Notes."""
     region = text[:anchor].replace("\r\n", "\n")
@@ -291,13 +307,10 @@ def build(
         ("parent", family.parent),
         ("orphan_peer", family.orphan_peer),
     ]
-    # The lineage already read the body: a peer link or an invoke preamble makes a
-    # document exported before the key existed read ``agent``.
+    # A document exported before the key existed reads ``agent`` when its first user
+    # message with text is an invoke preamble (a parent link is front-matter evidence).
     value = provenance_mod.effective(
-        record.metadata,
-        record.source,
-        record.path,
-        peer_body=family.role == "peer" or family.orphan_peer,
+        record.metadata, record.source, record.path, peer_body=opens_with_preamble(frames)
     )
     fields.append(("provenance", value))
     owner = record.metadata.get("owner") or family.owner

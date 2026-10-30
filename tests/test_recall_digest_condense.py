@@ -396,11 +396,50 @@ class TestProvenanceKey(DigestFixture):
             (fm["role"], fm["orphan_peer"], fm["provenance"]), ("primary", "true", "agent")
         )
 
+    def test_later_preamble_without_key_is_tool(self):
+        # Only the first user message with text decides, as at export: a person who
+        # pastes a preamble later in the session still drove it.
+        messages = [
+            msg("user", "2026-03-28T09:00:00Z", "Look at this prompt"),
+            msg("assistant", "2026-03-28T09:01:00Z", "Reading it."),
+            msg("user", "2026-03-28T09:02:00Z", PREAMBLE.format(who="an operator", n=1)),
+        ]
+        self.write_doc("later.md", document("later-0001", messages, source="codex"),
+                       "codex-sessions")  # fmt: skip
+        code, data, _, out = self.digest("--provenance", "tool")
+        self.assertEqual(code, 0)
+        self.assertEqual([row["ref"] for row in data["sessions"]], ["codex:later-0001"])
+        self.assertEqual(split((out / "codex-later0001.md").read_text())[0]["provenance"], "tool")
+
+    def test_stored_key_beats_body_evidence(self):
+        for stored, expected in (("tool", "tool"), ("robot", "agent"), ("", "agent")):
+            with self.subTest(stored=stored):
+                text = document("stored-0001", peer_messages(who="an operator"), source="codex",
+                                head_extra=(f"provenance: {stored}".rstrip(),))  # fmt: skip
+                self.write_doc("stored.md", text, "codex-sessions")
+                code, data, stderr, _ = self.digest()
+                self.assertEqual(code, 0)
+                self.assertEqual(data["sessions"][0]["provenance"], expected)
+                warning = f"provenance '{stored}' is not one of user, agent, tool, imported"
+                self.assertEqual(warning in stderr, stored != "tool")
+
     def test_filter_to_nothing_exits_3(self):
         self.write_doc("fixture.md", fixture_document())
         code, data, _, out = self.digest("--provenance", "imported")
         self.assertEqual(code, 3)
         self.assertEqual(data, {"sessions": [], "skipped": []})
+        self.assertEqual([p.name for p in out.iterdir()], [".cairn-digest"])
+
+    def test_filter_to_nothing_clears_a_populated_directory(self):
+        self.write_doc("fixture.md", fixture_document())
+        code, _, _, out = self.digest()
+        self.assertEqual(code, 0)
+        written = sorted(p.name for p in out.iterdir())
+        self.assertEqual(
+            written, [".cairn-digest", "claude-fixture0001.frames.jsonl", "claude-fixture0001.md"]
+        )
+        code, data, _, _ = self.digest("--provenance", "agent")
+        self.assertEqual((code, data), (3, {"sessions": [], "skipped": []}))
         self.assertEqual([p.name for p in out.iterdir()], [".cairn-digest"])
 
 
