@@ -20,7 +20,7 @@ the next step live in prose spread over `docs/routine-spec.md`, `docs/recall-dig
 and the skills. An agent that reads `exit 2` from `cairn routine run` cannot tell an unknown
 template variable from a nested run without parsing English. This layer gives every
 common failure a stable upper-snake `code`, one registry row with the next step and a
-read-only verify command, an offline lookup (`cairn errors CODE`), a generated reference
+verify command, an offline lookup (`cairn errors CODE`), a generated reference
 page, and `code` + `fix` in machine output.
 
 Non-goals:
@@ -161,7 +161,10 @@ wait` (`agents.py:550-619`), `sync` (`sync.py:425-428`), source `note/close/log`
 
 6. `skills/cairn/SKILL.md` gains a short "On failure" section with the contract line:
    "On a failure, read `code`, run `cairn errors CODE`, run its verify command, then act."
-   It adds that `fix.verify` is always read-only and that an exit code alone is ambiguous
+   It adds that `fix.verify` edits no config or instruction file and never overwrites a
+   finished round's outcome (it can create `data_root`, refresh the catalog cache, or
+   finalise and publish an unfinished invoke round whose runner and peer have both exited,
+   as every invoke reader does) and that an exit code alone is ambiguous
    (2 is usage and denied, 3 is empty day and stalled).
 
 ## 5. Data formats
@@ -332,7 +335,7 @@ prints the code; otherwise the entry describes the failure and `raised_at` names
   `MARKERS_DAMAGED`, and `FAILED` for read, write, race, encoding and ledger errors).
   `FORGET_REASON_UNKNOWN` was dropped: argparse rejects a reason outside the vocabulary
   with its own exit 2. `HOOK_INSTALL_ENTRY_CHANGED` was dropped: uninstall only warns.
-- **Two more fields.** `raised_at` names each site as `path:function`, not `path:line`, so
+- **Three more fields.** `raised_at` names each site as `path:function`, not `path:line`, so
   the generated page does not go stale when lines move; a test checks every function
   exists. `shown_in` says where the code is printed today (empty: described only).
   `exit_note` replaces the number when one number cannot describe the exit

@@ -24,7 +24,11 @@ CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]+$")
 FILL = {"name": "daily", "thread_id": "0198a0c1-0000-7000-8000-000000000000", "peer": "codex"}
 FILL["harness"] = "claude"
 
-# A verify command must only read. Each rule is (argv prefix, a token the argv must hold).
+# A verify command edits no config or instruction file and never overwrites a finished
+# round's outcome. The writes it can make: doctor creates data_root, recall refreshes the
+# catalog cache, and invoke status finalises (and publishes) an unfinished round whose
+# runner and peer have both exited, as every invoke reader does. Each rule is
+# (argv prefix, a token the argv must hold).
 READ_ONLY = (
     (("cairn", "help"), None),
     (("cairn", "config", "path"), None),

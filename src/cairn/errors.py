@@ -1,7 +1,7 @@
 """The error registry: one stable code per common cairn failure, and ``cairn errors``.
 
 Each entry names a failure (``code``), says what it means and why cairn stops, gives
-the next step and a read-only command that checks the state, and records the exit
+the next step and a command that checks the state (``verify``), and records the exit
 status the command already returns. The registry describes exits; it never drives
 them: every site keeps its own return value, and the site tests check the two agree.
 
@@ -595,7 +595,7 @@ def tag(payload: Mapping[str, Any], code: str, **fill: str | None) -> dict[str, 
 
 
 def code_line(code: str) -> str:
-    """The second stderr line of a converted site."""
+    """The ``code:`` stderr line a converted site adds after its message."""
     entry(code)
     return f"code: {code} (run 'cairn errors {code}')"
 
@@ -693,17 +693,20 @@ def render_markdown() -> str:
         "",
         "Each common cairn failure has a stable upper-snake code. A converted command keeps "
         "its first",
-        "stderr line and adds `code: CODE (run 'cairn errors CODE')` as the second; with "
+        "stderr lines and adds `code: CODE (run 'cairn errors CODE')` after them; with "
         "`--json` the",
         'failure object, or the existing result object, carries `"code"` and `"fix"`. Doctor lines',
         "end with ` [CODE]`. `cairn errors CODE` prints one row; it reads no config.",
         "",
         "The contract for an agent:",
         "",
-        "1. Read `code` (the second stderr line, the JSON key, or the doctor suffix).",
+        "1. Read `code` (the `code:` stderr line, the JSON key, or the doctor suffix).",
         "2. Run `cairn errors CODE`.",
-        "3. Run its verify command. Every verify command is read-only (`cairn doctor` creates a",
-        "   missing `data_root` and nothing else).",
+        "3. Run its verify command. A verify command edits no config or instruction file and",
+        "   never overwrites a finished round's outcome. It can write three things: `cairn doctor`",
+        "   creates a missing `data_root`, `recall` commands refresh the catalog cache, and",
+        "   `invoke status` finalises an unfinished round whose runner and peer have both exited,",
+        "   as every invoke reader does; finalising runs the usual publication and indexing.",
         "4. Act on the next step, or ask the user when the step says so.",
         "",
         "An exit status alone is ambiguous: 2 is a usage error and a denied invoke round, 3 is an",
@@ -755,7 +758,7 @@ def render_markdown() -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cairn errors",
-        description="Look up a cairn error code: meaning, next step, read-only verify command.",
+        description="Look up a cairn error code: meaning, next step, verify command.",
     )
     parser.add_argument("code", nargs="?", metavar="CODE", help="a code such as CONFIG_INVALID")
     parser.add_argument("--json", action="store_true")

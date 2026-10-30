@@ -3,16 +3,19 @@
 # cairn error codes
 
 Each common cairn failure has a stable upper-snake code. A converted command keeps its first
-stderr line and adds `code: CODE (run 'cairn errors CODE')` as the second; with `--json` the
+stderr lines and adds `code: CODE (run 'cairn errors CODE')` after them; with `--json` the
 failure object, or the existing result object, carries `"code"` and `"fix"`. Doctor lines
 end with ` [CODE]`. `cairn errors CODE` prints one row; it reads no config.
 
 The contract for an agent:
 
-1. Read `code` (the second stderr line, the JSON key, or the doctor suffix).
+1. Read `code` (the `code:` stderr line, the JSON key, or the doctor suffix).
 2. Run `cairn errors CODE`.
-3. Run its verify command. Every verify command is read-only (`cairn doctor` creates a
-   missing `data_root` and nothing else).
+3. Run its verify command. A verify command edits no config or instruction file and
+   never overwrites a finished round's outcome. It can write three things: `cairn doctor`
+   creates a missing `data_root`, `recall` commands refresh the catalog cache, and
+   `invoke status` finalises an unfinished round whose runner and peer have both exited,
+   as every invoke reader does; finalising runs the usual publication and indexing.
 4. Act on the next step, or ask the user when the step says so.
 
 An exit status alone is ambiguous: 2 is a usage error and a denied invoke round, 3 is an
