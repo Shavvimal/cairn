@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ..jsonl import JsonlStats
 from ..schema import SessionData
@@ -128,6 +130,18 @@ def _revision(path: Path) -> str | None:
         return None
 
 
+def _renders(message: Mapping[str, Any]) -> bool:
+    """True when the message renders a body: text, thinking, tool calls, code blocks
+    or the unrecoverable-reasoning marker (see :func:`cairn.rendering.render_conversation`)."""
+    return bool(
+        message.get("text")
+        or message.get("thinking")
+        or message.get("tool_calls")
+        or message.get("code_blocks")
+        or message.get("reasoning_recoverable") is False
+    )
+
+
 def _unknown_kinds(
     stats: JsonlStats, conversational: frozenset[str], ignored: frozenset[str]
 ) -> list[str]:
@@ -165,11 +179,13 @@ def check_parse(
     ``data`` is ``None`` when the adapter could not build a session at all (Codex: no
     ``session_meta`` id). Messages are what the document would render
     (:func:`cairn.store.messages_of`); user and assistant are counted by role, and
-    only those two roles count as rendered for the zero-messages check.
+    only those two roles count as rendered for the zero-messages check. A message
+    counts only when it renders something (:func:`_renders`): an adapter that still
+    knows a record type but no longer finds its text appends empty turns.
     """
     messages = messages_of(data) if data else []  # type: ignore[arg-type]
-    user = sum(1 for m in messages if m.get("role") == "user")
-    assistant = sum(1 for m in messages if m.get("role") == "assistant")
+    user = sum(1 for m in messages if m.get("role") == "user" and _renders(m))
+    assistant = sum(1 for m in messages if m.get("role") == "assistant" and _renders(m))
     # Tool, system and agent turns alone are not a conversation: a parser that
     # files every record it no longer knows as a tool result still drifted.
     rendered = user + assistant
@@ -311,12 +327,13 @@ class FindingsStore:
     Read once per process. Written only on a change (a new finding, a changed kind,
     a cleared one), as a read-modify-write under the findings lock, so a clean parse
     of an id with no entry costs no I/O. Entries whose source path no longer exists
-    are pruned on the next write. Readers (doctor, the gap check) take no lock.
+    are dropped on every read. Readers (doctor, the gap check) take no lock.
     """
 
     def __init__(self, data_root: Path):
         self.path = findings_path(data_root)
         self._cache: dict[str, Finding] | None = None
+        self._stale: set[str] = set()  # keys on disk whose file is gone
 
     def _read(self) -> dict[str, Finding]:
         try:
@@ -328,7 +345,7 @@ class FindingsStore:
             entries = raw.get("findings")
             if not isinstance(entries, dict):
                 raise TypeError("findings is not an object")
-            return {key: Finding.from_dict(value) for key, value in entries.items()}
+            loaded = {key: Finding.from_dict(value) for key, value in entries.items()}
         except FileNotFoundError:
             return {}
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -337,6 +354,11 @@ class FindingsStore:
                 file=sys.stderr,
             )
             return {}
+        # A finding whose file was moved or deleted no longer holds anything: the
+        # user followed "fix or move it", or the host pruned the transcript.
+        kept = {key: f for key, f in loaded.items() if Path(f.path).exists()}
+        self._stale = set(loaded) - set(kept)
+        return kept
 
     @property
     def findings(self) -> dict[str, Finding]:
@@ -351,7 +373,6 @@ class FindingsStore:
                 current.pop(key, None)
             else:
                 current[key] = finding
-            current = {k: f for k, f in current.items() if Path(f.path).exists()}
             payload = {
                 "schema_version": FINDINGS_SCHEMA,
                 "findings": {k: f.as_dict() for k, f in sorted(current.items())},
@@ -374,6 +395,8 @@ class FindingsStore:
         open_finding = self.findings.get(key)
         if open_finding is not None and (kinds is None or open_finding.kind in kinds):
             self._write(key, None)
+        elif key in self._stale:
+            self._write(key, None)  # drop the entry whose file is gone from disk too
 
     def open_findings(self, severities: tuple[str, ...] = (ERROR, WARN)) -> list[Finding]:
         """Open findings of ``severities``, oldest first."""

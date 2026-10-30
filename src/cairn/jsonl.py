@@ -27,8 +27,9 @@ class JsonlStats:
 
     ``lines`` counts non-blank physical lines, including lines dropped by
     ``skip_prefixes`` (those count as lines only). ``records`` counts decoded JSON
-    values, ``malformed`` the lines that did not decode, and ``types`` the
-    ``str(record.get("type"))`` of each object record. ``bytes`` is the file size
+    objects, ``malformed`` the lines that did not decode or decoded to another JSON
+    value (still yielded, as before), and ``types`` the ``str(record.get("type"))``
+    of each record. ``bytes`` is the file size
     when the read started. A source whose top-level type is too coarse (Codex wraps
     control events and messages in the same ``event_msg``) gives ``kind_of``, and
     ``kinds`` then counts its finer ``type/subtype`` names as well.
@@ -85,12 +86,13 @@ def iter_jsonl(
                 if stats is not None:
                     stats.malformed += 1
                 continue
-            if stats is not None:
+            if stats is not None and not isinstance(record, dict):
+                stats.malformed += 1  # valid JSON, but no source writes a non-object record
+            elif stats is not None:
                 stats.records += 1
-                if isinstance(record, dict):
-                    stats.types[str(record.get("type"))] += 1
-                    if stats.kind_of is not None and (kind := stats.kind_of(record)):
-                        stats.kinds[kind] += 1
+                stats.types[str(record.get("type"))] += 1
+                if stats.kind_of is not None and (kind := stats.kind_of(record)):
+                    stats.kinds[kind] += 1
             yield index, record
 
 

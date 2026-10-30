@@ -363,6 +363,8 @@ A `drifted` case asserts that `check_parse` gives `zero-messages`.
 | A Codex filename UUID differs from `session_meta.id` | It shows as still missing after heal and is named in the log. It is fixed in the enumerator, not hidden. |
 | The user deletes a document on purpose | The gap check re-exports it while the source file is under 30 days old. This is documented, and no tombstone is added. |
 | `findings.json` is corrupt | It is treated as empty and rewritten on the next change. One stderr warning. |
+| A drifted Codex or agy file last active before the export's `--since` cutoff | The finding is stored (doctor and the `[exporter-drift]` line show it) but not printed, and the windowed export exits 0. `--all` and a targeted export stay loud. |
+| The file a finding names is moved or deleted | Every read drops the entry, so it no longer holds the id from the gap check. The next write removes it from the file. |
 | The gap heal times out | `gap-heal:<collection>` TIMEOUT, as `run_step` reports it. Verify still runs and reports. |
 | The store dir is missing | 0 on disk, no lines beyond the count. |
 
@@ -464,6 +466,11 @@ What shipped differs from the sections above in these places.
 | Doctor gap line | `ok` says `no unexplained gaps; N held by parser drift` when held ids exist, else `all exported` | "all exported" would claim held sessions were exported |
 | Codex unknown payload kinds | Under `event_msg` and `response_item` the finer kind decides: a kind in neither set (or a wrapper record with no payload type, `<wrapper>/?`) is unknown, and `ignored` lists the control and context kinds measured on the live store | Taking the whole wrapper as known let a renamed payload type (`response_item/message_v2`) read as `empty` and write an empty document. Re-measured on 807 rollouts: 800 clean, 7 `empty`, no error |
 | Codex fragments | The guard verdict is per logical session: one refused fragment holds every fragment of that session | Dropping only the refused file let an older healthy fragment overwrite the newer document, and a later clean fragment cleared the finding |
+| Guard loudness and `--since` | Codex and agy parse every file before the window filter; a refusal of a file older than the cutoff is stored quietly and does not fail the run | Otherwise one old drifted file failed the `codex-sessions` step of every `cairn sync --cron`. Claude already filters its file list by the window first |
+| What counts as a rendered turn | A user or assistant message counts only when it has text, thinking, tool calls, code blocks or the unrecoverable-reasoning marker | agy appends a turn for every `USER_INPUT` and `PLANNER_RESPONSE` even when no text was found, so a moved `content` field read as a clean parse. Re-measured read-only: Claude 223 sessions and 2,463 subagents, Codex 808 rollouts and 111 agy conversations, with no error or warning and 7 Codex `empty` |
+| Non-object JSON lines | `JsonlStats` counts a line that decodes to a non-object value as malformed (it is still yielded) | A file of `[1]` lines was `empty` instead of `unreadable-lines` |
+| Findings for gone files | Dropped on every read, not only on the next write | A moved document or transcript kept holding its id from the gap heal until an unrelated finding changed |
+| Info findings across Codex fragments | Stored only for a session with no clean fragment | A control-only resume beside a real fragment wrote the `empty` entry and cleared it again on every run |
 | agy gap clock | The agy enumerator places a conversation in the window by the index's `last_modified` when agy recorded one, else the transcript mtime: the same time the export's `--since` filters on | With the mtime alone, a transcript touched long after its last turn was reported missing while the `--since 30d` heal skipped it, so `gap-check:antigravity-sessions` failed on every sync |
 | agy fixture | Invented steps with the record shapes of `AGY_STEPS`, not a copy of its text | Fixture text is invented throughout |
 

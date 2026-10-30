@@ -121,7 +121,7 @@ class TestJsonlStats(GuardFixture):
         stats = JsonlStats()
         records = [r for _, r in iter_jsonl(path, ('"type":"api-request',), stats)]
         self.assertEqual(records, [{"type": "user"}, {"type": "user"}, [1]])
-        self.assertEqual((stats.lines, stats.records, stats.malformed), (5, 3, 1))
+        self.assertEqual((stats.lines, stats.records, stats.malformed), (5, 2, 2))
         self.assertEqual(stats.types, {"user": 2})
         self.assertEqual(stats.bytes, path.stat().st_size)
 
@@ -181,6 +181,23 @@ class TestClassification(GuardFixture):
             finding.detail if finding else None,
             ("rendered 0 messages from 2 records (100 bytes); unknown types: response_item/?"),
         )
+
+    def test_turns_with_nothing_to_render_do_not_count(self):
+        # agy still knows USER_INPUT and PLANNER_RESPONSE but the text moved.
+        data: dict = {"messages": [{"role": "user", "text": ""}, {"role": "assistant", "text": ""}]}
+        finding = _check("antigravity", _stats(USER_INPUT=1, PLANNER_RESPONSE=1), data)
+        self.assertEqual(finding.kind if finding else None, "zero-messages")
+        data["messages"][1]["tool_calls"] = [{"name": "read_file"}]
+        finding = _check("antigravity", _stats(USER_INPUT=1, PLANNER_RESPONSE=1), data)
+        self.assertEqual(finding.kind if finding else None, "no-user-turns")
+
+    def test_non_object_json_lines_are_unreadable_lines(self):
+        path = self.root / "demo.jsonl"
+        path.write_text("[1]\n[2]\n")
+        stats = JsonlStats()
+        self.assertEqual(len(list(iter_jsonl(path, stats=stats))), 2)  # still yielded
+        finding = _check("antigravity", stats, {"messages": []})
+        self.assertEqual(finding.kind if finding else None, "unreadable-lines")
 
     def test_all_lines_malformed_is_unreadable_lines(self):
         stats = JsonlStats(lines=3, malformed=3, bytes=42)
@@ -326,6 +343,33 @@ class TestAdapterGuards(GuardFixture):
             self.assertEqual(document.read_text(), before)
             self.assertEqual(self.findings()[f"codex:{CODEX_ID}"]["kind"], "zero-messages")
 
+    def test_drift_before_the_since_window_is_stored_quietly(self):
+        path = self.drifted_codex()
+        _age(path, 3 * 86400)
+        result = self.run_cli("codex", "export", "--since", "1d", check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("parser drift", result.stderr)
+        self.assertEqual(self.findings()[f"codex:{CODEX_ID}"]["kind"], "zero-messages")
+        result = self.run_cli("codex", "export", "--all", check=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f"Error: parser drift: codex:{CODEX_ID} zero-messages", result.stderr)
+
+    def test_control_only_resume_beside_a_real_fragment_writes_no_finding(self):
+        _age(self._codex_turns(f"rollout-2026-10-01T09-00-00-{CODEX_ID}.jsonl", ["Turn"]), 7200)
+        resume = _jsonl(
+            self.codex / f"rollout-2026-10-02T09-00-00-{CODEX_ID}.jsonl",
+            [
+                {"type": "session_meta", "payload": {"id": CODEX_ID, "cwd": "/tmp/demo"}},
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+            ],
+        )
+        _age(resume, 7200)
+        for _ in range(2):
+            result = self.run_cli("codex", "export", "--all", check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # Never written: no record-then-clear pair of writes on each run.
+            self.assertFalse((self.root / "data/exporter/findings.json").exists())
+
     def test_codex_and_agy_unparseable_document_is_recorded_not_raised(self):
         other = "019e0000-aaaa-7bbb-8ccc-000000000009"
         self.native("codex", CODEX_ID)
@@ -400,6 +444,18 @@ class TestFindingsStore(GuardFixture):
             with redirect_stderr(io.StringIO()) as err:
                 self.assertEqual(FindingsStore(self.root / "data").open_findings(), [])
             self.assertEqual(err.getvalue().count("Warning: ignoring unreadable"), 1, payload)
+
+    def test_finding_for_a_moved_file_is_dropped_on_read(self):
+        finding = _check("claude", _stats(turn_v2=1), {"messages_ordered": []})
+        assert finding is not None
+        moved = _jsonl(self.root / "moved.jsonl", [{"type": "x"}])
+        finding.path = str(moved)
+        FindingsStore(self.root / "data").record(finding)
+        self.assertEqual(len(FindingsStore(self.root / "data").open_findings()), 1)
+        moved.unlink()
+        store = FindingsStore(self.root / "data")
+        self.assertEqual(store.open_findings(), [])
+        self.assertEqual(store.held("claude"), set())
 
     def test_interleaved_writers_keep_each_others_findings(self):
         first, second = FindingsStore(self.root / "data"), FindingsStore(self.root / "data")
