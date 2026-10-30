@@ -161,6 +161,11 @@ quoted phrases after "Use when the user says" are the trigger list.
 The test checks the trigger text, not the harness router. A pass means the description
 still names each request; it does not prove the harness picks that skill.
 
+Before you open a PR that touches `skills/` or `.agents/skills/`, review each changed
+skill with the repo-local `skill-review` skill (`/skill-review skills/NAME` in Claude
+Code, `$skill-review skills/NAME` in Codex) and paste its VERDICT lines in the PR body.
+Write skill text plainly: imperative steps, British spelling, no marketing adjectives.
+
 ## Pull request process
 
 1. Fork and create a topic branch (`git checkout -b my-change`).

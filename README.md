@@ -701,6 +701,7 @@ skills/                    # plugin skills (setup, cairn, recall, search, invoke
 .claude-plugin/            # plugin.json + marketplace.json (this repo is both)
 plugin.json                # portable manifest (authoritative OpenAI settings)
 .agents/plugins/           # Codex GitHub marketplace
+.agents/skills/skill-review/  # repo-local skill review (not shipped); .claude/skills/ links to it
 .codex-plugin/             # generated compatibility manifest
 references/harnesses/      # shared skill execution contract + host tool references
 references/peer-review.md  # adversarial review doctrine shared by the invoke skills
