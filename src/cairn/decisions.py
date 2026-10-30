@@ -1166,7 +1166,24 @@ def run_recall(args: argparse.Namespace, store: SessionStore) -> int:
         records.extend(memory_records(store.config))
     project = args.project or (None if args.all_projects else os.getcwd())
     if project:
-        records = [r for r in records if r.matches_project(project)]
+        root = None
+        if not args.project and any(r.source == MEMORY_SOURCE for r in records):
+            # A project document records the main checkout root that `memory import`
+            # resolved, so match it from a subdirectory or a linked worktree too.
+            from .claude_memory import project_root
+
+            root = project_root(Path(project)).resolve()
+        records = [
+            r
+            for r in records
+            if r.matches_project(project)
+            or (
+                root is not None
+                and r.source == MEMORY_SOURCE
+                and r.cwd is not None
+                and Path(r.cwd).expanduser().resolve() == root
+            )
+        ]
     state = withdrawals.load(withdrawals.ledger_path(store.config))  # fail fast on a bad ledger
     found, problems = collect(records)
     selected = []

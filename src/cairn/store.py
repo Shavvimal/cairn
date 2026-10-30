@@ -249,7 +249,11 @@ class SessionStore:
     def __init__(self, config: CairnConfig):
         self.config = config
 
-    def records(self, sources: list[str] | None = None) -> list[SessionRecord]:
+    def records(
+        self, sources: list[str] | None = None, *, persist: bool = True
+    ) -> list[SessionRecord]:
+        """Every session record of ``sources``; ``persist=False`` leaves the catalog
+        cache unwritten (a dry run)."""
         result = []
         for source in SOURCES:
             if not source.session_type or (sources and source.source not in sources):
@@ -260,7 +264,8 @@ class SessionStore:
             result.extend(
                 collection_records(catalog, source.source, source.id_field, source.session_types)
             )
-            catalog.save()
+            if persist:
+                catalog.save()
         return result
 
     def resolve(self, reference: str, records: list[SessionRecord] | None = None) -> SessionRecord:

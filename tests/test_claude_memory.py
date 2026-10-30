@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from cairn import claude_memory, cli, config, decisions, withdrawals
+from cairn import claude_memory, cli, config, decisions, recall, withdrawals
 from cairn.claude_memory import Memory, MemoryProblem, read_memory
 from cairn.harnesses.claude import claude_project_dir_name
 from tests.test_decisions import SID, DecisionsFixture, doc
@@ -52,6 +52,10 @@ def memory_text(
     return "\n".join([*lines, "---", "", "Body."]) + "\n"
 
 
+def _home(path: Path) -> str:
+    return "~/" + path.resolve().relative_to(Path.home().resolve()).as_posix()
+
+
 class MemoryFixture(DecisionsFixture):
     def setUp(self):
         super().setUp()
@@ -66,6 +70,11 @@ class MemoryFixture(DecisionsFixture):
         shutil.copytree(FIXTURES, self.memory)
         self.session = self.write_doc("2026-10-30-3f2a9c1e.md", doc(rows=None))
         self.project_doc = self.root / "data" / "decisions" / "example-app.md"
+
+    def chdir(self, path: Path) -> None:
+        previous = Path.cwd()
+        os.chdir(path)
+        self.addCleanup(os.chdir, previous)
 
     def write_memory(self, stem: str, text: str) -> Path:
         path = self.memory / f"{stem}.md"
@@ -184,11 +193,6 @@ class TestDiscovery(unittest.TestCase):
 
 
 class TestCurrentProject(MemoryFixture):
-    def chdir(self, path: Path) -> None:
-        previous = Path.cwd()
-        os.chdir(path)
-        self.addCleanup(os.chdir, previous)
-
     def test_dir_name_long_path_glob(self):
         deep = self.root / ("d" * 120) / ("e" * 120)
         deep.mkdir(parents=True)
@@ -250,8 +254,10 @@ class TestCurrentProject(MemoryFixture):
         target = self.projects / claude_project_dir_name(resolved) / "memory"
         shutil.copytree(FIXTURES, target)
         self.chdir(linked / "sub")
-        code, data, err = self.run_json("--dry-run")
+        code, out, err = self.run_import("--dry-run", "--json", memory_dir=False)
         self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["directories"][0]["memory_dir"], _home(target))
         self.assertEqual(data["added"], 3)
 
 
@@ -524,6 +530,135 @@ class TestImport(MemoryFixture):
         data = json.loads(data)
         self.assertEqual([d["label"] for d in data["directories"]], ["example-app", "other-app"])
         self.assertTrue((self.root / "data" / "decisions" / "other-app.md").exists())
+
+
+class TestImportSafety(MemoryFixture):
+    """Identity, cross-document deduplication, failure reporting and dry-run purity."""
+
+    def test_shared_label_fails_every_colliding_directory(self):
+        data = json.loads(self.config.read_text())
+        data["path_resolution"] = {"home_slug_prefixes": ["-tmp-Code-", "-tmp-"]}
+        self.config.write_text(json.dumps(data))
+        config.get_config.cache_clear()
+        shutil.copytree(FIXTURES, self.projects / "-tmp-Code-example-app" / "memory")
+        code, out, _ = self.run_import("--all-projects", "--json", memory_dir=False)
+        data = json.loads(out)
+        self.assertEqual((code, data["added"]), (1, 0))
+        self.assertEqual(data["failed"], 6)
+        reasons = {r["reason"] for r in data["rows"] if r["action"] == "failed"}
+        self.assertEqual(
+            reasons,
+            {
+                "label example-app is shared by 2 memory directories; "
+                "import one of them with --memory-dir DIR"
+            },
+        )
+        self.assertFalse(self.project_doc.exists())
+        self.assertNotIn("memory:", self.session.read_text())
+
+    def test_project_document_of_another_directory_is_refused(self):
+        self.assertEqual(self.run_import()[0], 0)
+        other = self.root / "copy" / "example-app"
+        shutil.copytree(FIXTURES, other)
+        (other / "fresh.md").write_text(memory_text("A fresh note"), encoding="utf-8")
+        before = self.project_doc.read_bytes()
+        code, out, _ = self.run_import("--json", "--memory-dir", str(other), memory_dir=False)
+        data = json.loads(out)
+        self.assertEqual((code, data["added"]), (1, 0))
+        fresh = next(r for r in data["rows"] if r["memory"] == "example-app/fresh")
+        self.assertEqual(fresh["action"], "failed")
+        self.assertIn(f"was imported from {self.memory_dir_value}", fresh["reason"])
+        self.assertEqual(self.project_doc.read_bytes(), before)
+
+    def test_scan_runs_under_the_import_lock(self):
+        held = []
+        scan = claude_memory._existing_markers
+
+        def probe(*args, **kwargs):
+            lock = claude_memory.import_lock(config.get_config())
+            try:
+                with claude_memory.locked(lock, blocking=False):
+                    held.append(False)
+            except BlockingIOError:
+                held.append(True)
+            return scan(*args, **kwargs)
+
+        with mock.patch.object(claude_memory, "_existing_markers", probe):
+            self.assertEqual(self.run_import()[0], 0)
+        self.assertEqual(held, [True])
+
+    def test_marker_in_a_session_of_another_project_is_found(self):
+        self.assertEqual(self.run_import()[0], 0)
+        self.write_memory(
+            "release-train",
+            memory_text("Ship each change as its own PR off a fresh main", origin=UNEXPORTED),
+        )
+        code, data, _ = self.run_json()
+        self.assertEqual((code, data["added"], data["skipped_existing"]), (0, 0, 3))
+        sources = [r.source for r in self.rows(self.project_doc, None)]
+        self.assertNotIn("memory:example-app/release-train", sources)
+
+    def test_damaged_previous_table_blocks_the_add(self):
+        self.assertEqual(self.run_import()[0], 0)
+        text = self.project_doc.read_text()
+        self.project_doc.write_text(text.replace("| # |", "| no |", 1), encoding="utf-8")
+        exported = self.write_doc("2026-10-29-9b1d07aa.md", doc(UNEXPORTED, rows=None))
+        before = exported.read_bytes()
+        code, data, err = self.run_json()
+        self.assertEqual(code, 1)
+        flat = next(r for r in data["rows"] if r["memory"] == "example-app/flat-form")
+        self.assertEqual(flat["action"], "failed")
+        self.assertIn("cannot check", flat["reason"])
+        self.assertIn(f"Error: cannot check {self.project_doc} for imported memories", err)
+        self.assertEqual(exported.read_bytes(), before)
+
+    def test_target_that_is_not_utf8_fails_with_a_summary(self):
+        self.project_doc.parent.mkdir(parents=True)
+        self.project_doc.write_bytes(b"---\ntype: claude-memory-decisions\n\xff\n---\n")
+        code, data, _ = self.run_json()
+        self.assertEqual(code, 1)
+        failed = [r for r in data["rows"] if r["action"] == "failed"]
+        self.assertEqual(len(failed), 2)
+        self.assertEqual({r["reason"] for r in failed}, {f"{self.project_doc} is not UTF-8"})
+        train = next(r for r in data["rows"] if r["memory"] == "example-app/release-train")
+        self.assertEqual(train["action"], "added")  # a later group still runs
+
+    def test_apply_refusal_sets_reason(self):
+        self.session.write_text(doc().replace("## My Notes", "## Other"), encoding="utf-8")
+        _, data, _ = self.run_json()
+        train = next(r for r in data["rows"] if r["memory"] == "example-app/release-train")
+        self.assertEqual(train["action"], "failed")
+        self.assertIn("has no ## My Notes section", train["reason"])
+
+    def test_dry_run_writes_no_cache_or_lock(self):
+        def files() -> dict[str, bytes]:
+            return {
+                str(p): p.read_bytes()
+                for p in sorted(self.root.rglob("*"))
+                if p.is_file() and not p.is_relative_to(self.root / "data" / "logs")
+            }
+
+        before = files()
+        code, _, _ = self.run_import("--dry-run")
+        self.assertEqual(code, 0)
+        self.assertEqual(files(), before)
+
+    @unittest.skipUnless(shutil.which("git"), "git is not installed")
+    def test_recall_from_a_subdirectory_lists_the_project_document(self):
+        main = self.root / "repo" / "example-app"
+        (main / "sub").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+        target = (
+            self.projects / claude_project_dir_name(claude_memory.project_root(main)) / "memory"
+        )
+        shutil.copytree(FIXTURES, target)
+        self.chdir(main / "sub")
+        self.assertEqual(self.run_import(memory_dir=False)[0], 0)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = recall.main(["decisions", "--source", "memory", "--json"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(len(json.loads(out.getvalue())["decisions"]), 2)
 
 
 if __name__ == "__main__":

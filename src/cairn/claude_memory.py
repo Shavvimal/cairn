@@ -22,11 +22,13 @@ is the document first and the ledger second, as :mod:`cairn.withdrawals` require
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -38,7 +40,7 @@ from .frontmatter import _escape_scalar
 from .harnesses.claude import PROJECT_DIR_NAME_LIMIT, claude_project_dir_name, projects_root
 from .mutations import FindFile
 from .projects import project_name_from_dir, repo_name_from_dir
-from .storage import atomic_write, document_lock, locked
+from .storage import atomic_write, document_lock, lock_path, locked
 
 if TYPE_CHECKING:
     from .config import CairnConfig
@@ -264,7 +266,7 @@ def project_root(cwd: Path) -> Path:
 
 def _label(encoded: str) -> str:
     label = repo_name_from_dir(encoded).lstrip("-")
-    if not decisions.MEMORY_LABEL_RE.match(label):
+    if not decisions.MEMORY_LABEL_RE.fullmatch(label):
         raise MemoryImportError(
             f"cannot derive a project label from the directory name {encoded!r}"
         )
@@ -355,7 +357,7 @@ class Item:
     number: int | None = None
     changed: bool = False
     fingerprint: str | None = None
-    extra: dict = field(default_factory=dict)
+    heading: str | None = None  # the conversation heading of the target document
 
     @property
     def marker(self) -> str:
@@ -383,7 +385,7 @@ def _map(item: Item, include_reference: bool) -> None:
     """Fill the row cells of ``item`` from its memory, or set ``invalid``/``reference``."""
     memory = item.memory
     assert memory is not None
-    if not _STEM_RE.match(item.stem):
+    if not _STEM_RE.fullmatch(item.stem):
         item.action, item.reason = "invalid", f"file name {item.stem!r} cannot form a marker"
         return
     if not memory.description or not memory.description.strip():
@@ -428,31 +430,77 @@ def read_items(directory: MemoryDir, include_reference: bool) -> list[Item]:
     return items
 
 
+@dataclass(frozen=True)
+class Unchecked:
+    """A document whose table could not be read, so its markers are unknown.
+
+    ``labels`` holds the labels whose ``memory:<label>/`` text appears in the file;
+    ``None`` means the file could not be read at all, so any label may be in it."""
+
+    path: Path
+    problem: str
+    labels: frozenset[str] | None
+
+    def blocks(self, label: str) -> bool:
+        return self.labels is None or label in self.labels
+
+
+def _labels_in(path: Path, labels: set[str]) -> frozenset[str] | None:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    prefix = decisions.MEMORY_SOURCE.encode()
+    return frozenset(label for label in labels if prefix + b":" + label.encode() + b"/" in data)
+
+
 def _existing_markers(
-    paths: dict[Path, tuple[str, str | None]], config: CairnConfig, projects: set[str]
-) -> dict[str, tuple[str, DecisionRow]]:
-    """Every ``memory`` marker in the tables of ``paths`` and of the Claude records of
-    ``projects``: ``label/stem -> (ref, row)``. ``paths`` maps a path to its reference
-    and conversation heading."""
+    paths: dict[Path, tuple[str, str | None]],
+    config: CairnConfig,
+    labels: set[str],
+    *,
+    persist: bool,
+) -> tuple[dict[str, tuple[str, DecisionRow]], list[Unchecked]]:
+    """Every ``memory`` marker in the tables of ``paths`` and of every Claude record:
+    ``label/stem -> (ref, row)``, and the documents whose table could not be checked.
+    ``paths`` maps a path to its reference and conversation heading.
+
+    Every record is read, whatever its project label: a session exported from a
+    worktree or a subdirectory carries a different label than the memory directory,
+    and a memory whose ``originSessionId`` changed must still find its old row. The
+    read stops at the frame anchor, so a session costs its head, not its transcript.
+    """
     from .store import SessionStore
 
     scan = dict(paths)
-    if projects:
-        for record in SessionStore(config).records(["claude"]):
-            if record.project in projects and record.path not in scan:
-                scan[record.path] = (record.reference, "## Conversation")
+    for record in SessionStore(config).records(["claude"], persist=persist):
+        scan.setdefault(record.path, (record.reference, "## Conversation"))
     found: dict[str, tuple[str, DecisionRow]] = {}
+    unchecked: list[Unchecked] = []
     for path, (ref, heading) in scan.items():
         if not path.exists():
             continue
         try:
-            rows, _problems = decisions.read_table(path, heading)
-        except (OSError, UnicodeDecodeError):
+            rows, problems = decisions.read_table(path, heading)
+        except UnicodeDecodeError:
+            hits = _labels_in(path, labels)
+            if hits is None or hits:
+                unchecked.append(Unchecked(path, "not UTF-8", hits))
             continue
+        except OSError as exc:
+            unchecked.append(Unchecked(path, exc.strerror or str(exc), None))
+            continue
+        if problems:
+            hits = _labels_in(path, labels)
+            if hits is None or hits:
+                first = problems[0]
+                unchecked.append(
+                    Unchecked(path, f"## Decisions line {first.line}: {first.reason}", hits)
+                )
         for row in rows:
             if row.memory is not None:
                 found.setdefault(row.memory, (f"{ref}#{row.number}", row))
-    return found
+    return found, unchecked
 
 
 def _place(item: Item, source: ConversationSource, config: CairnConfig) -> None:
@@ -470,12 +518,12 @@ def _place(item: Item, source: ConversationSource, config: CairnConfig) -> None:
     if path is not None and memory.origin:
         item.placement, item.target = "session", path
         item.target_ref = f"{source.source_name}:{memory.origin}"
-        item.extra["heading"] = source.conversation_heading
+        item.heading = source.conversation_heading
         return
     item.placement = "project"
     item.target = decisions.memory_document(config, item.directory.label)
     item.target_ref = f"{decisions.MEMORY_SOURCE}:{item.directory.label}"
-    item.extra["heading"] = None
+    item.heading = None
 
 
 # --------------------------------------------------------------------------
@@ -544,7 +592,7 @@ def _write_group(
 ) -> None:
     """Append the rows of ``group`` to ``target`` under its document lock."""
     first = group[0]
-    heading = first.extra["heading"]
+    heading = first.heading
 
     def edit(rows: list[DecisionRow]) -> list[DecisionRow]:
         state = withdrawals.load(ledger)  # document lock first, ledger lock second
@@ -585,25 +633,38 @@ def _write_group(
         find_file, lookup = source.find_file, first.target_ref.split(":", 1)[1]
     else:
         find_file, lookup = (lambda _sid: target), first.target_ref
+    said = io.StringIO()
+    reason: str | None = None
     try:
-        written = decisions.apply(
-            find_file,
-            lookup,
-            edit,
-            source=source.source_name,
-            conversation_heading=heading,
-            id_field=source.id_field,
-        )
+        with contextlib.redirect_stderr(said):
+            written = decisions.apply(
+                find_file,
+                lookup,
+                edit,
+                source=source.source_name,
+                conversation_heading=heading,
+                id_field=source.id_field,
+            )
     except OSError as exc:
+        sys.stderr.write(said.getvalue())
         _write_failed(target, exc, group)
         return
-    except withdrawals.LedgerError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    except UnicodeDecodeError:
+        reason = f"{target} is not UTF-8"
         written = None
+    except withdrawals.LedgerError as exc:
+        reason = str(exc)
+        written = None
+    sys.stderr.write(said.getvalue())
     if written is None:
+        if reason is not None:
+            print(f"Error: {reason}", file=sys.stderr)
+        else:  # apply printed its reason as one "Error: ..." line
+            lines = [ln for ln in said.getvalue().splitlines() if ln.startswith("Error: ")]
+            reason = lines[-1].removeprefix("Error: ") if lines else "the table was not written"
         for item in group:
             if item.action in ("", "added"):
-                item.action, item.number = "failed", None
+                item.action, item.number, item.reason = "failed", None, reason
 
 
 def _write_failed(path: Path, exc: OSError, group: list[Item]) -> None:
@@ -618,6 +679,57 @@ def _write_failed(path: Path, exc: OSError, group: list[Item]) -> None:
 # --------------------------------------------------------------------------
 # The command
 # --------------------------------------------------------------------------
+
+
+def import_lock(config: CairnConfig) -> Path:
+    """The lock one import holds from the marker scan to its last write, so two imports
+    cannot both find a memory absent and add it to two different documents."""
+    return lock_path(decisions.memory_directory(config), "memory-import")
+
+
+def _fail(item: Item, reason: str) -> None:
+    item.action, item.reason, item.number = "failed", reason, None
+
+
+def _check_identity(found: list[MemoryDir], items: list[Item], config: CairnConfig) -> None:
+    """Fail the memories of a directory whose label is not its own.
+
+    Two directories can strip to one label (``~/Code/app`` and ``~/app``). Their
+    markers would be equal, so the second directory's notes would be taken for the
+    first's. Refuse both in one run, and refuse a directory whose label already has a
+    project document imported from another memory directory.
+    """
+    from .frontmatter import read_frontmatter_head
+
+    by_label: dict[str, list[MemoryDir]] = {}
+    for directory in found:
+        by_label.setdefault(directory.label, []).append(directory)
+    refused: dict[Path, str] = {}
+    for label, group in by_label.items():
+        if len(group) > 1:
+            for directory in group:
+                refused[directory.path] = (
+                    f"label {label} is shared by {len(group)} memory directories; "
+                    "import one of them with --memory-dir DIR"
+                )
+            continue
+        directory = group[0]
+        doc = decisions.memory_document(config, label)
+        try:
+            recorded = read_frontmatter_head(doc).get("memory_dir") if doc.is_file() else None
+        except (OSError, ValueError):
+            recorded = None  # the write reports an unreadable document
+        here = _home_relative(directory.path)
+        if isinstance(recorded, str) and recorded != here:
+            refused[directory.path] = (
+                f"{doc} was imported from {recorded}, not {here}; "
+                f"label {label} belongs to that directory"
+            )
+    for path, reason in refused.items():
+        print(f"Error: {reason}", file=sys.stderr)
+        for item in items:
+            if item.directory.path == path and item.action == "":
+                _fail(item, reason)
 
 
 def _ledger_state(ledger: Path, *, lock: bool) -> dict[str, withdrawals.Withdrawal]:
@@ -663,6 +775,24 @@ def cmd_memory_import(source: ConversationSource, args: argparse.Namespace) -> i
             print(f"Error: {exc}", file=sys.stderr)
             return 1
         return errors.fail(exc.code, str(exc), exit=1, prefix="Error: ", as_json=as_json)
+    try:
+        with contextlib.nullcontext() if dry_run else locked(import_lock(config)):
+            return _import(source, args, config, found, as_json=as_json, quiet=quiet)
+    finally:
+        if dry_run:
+            source._catalog = None  # a dry run leaves the catalog cache as it was
+
+
+def _import(
+    source: ConversationSource,
+    args: argparse.Namespace,
+    config: CairnConfig,
+    found: list[MemoryDir],
+    *,
+    as_json: bool,
+    quiet: bool,
+) -> int:
+    dry_run = bool(args.dry_run)
     ledger = withdrawals.ledger_path(config)
     try:
         state = _ledger_state(ledger, lock=not dry_run)
@@ -673,6 +803,7 @@ def cmd_memory_import(source: ConversationSource, args: argparse.Namespace) -> i
     items: list[Item] = []
     for directory in found:
         items.extend(read_items(directory, bool(args.include_reference)))
+    _check_identity(found, items, config)
     for item in items:
         if item.action == "":
             _place(item, source, config)
@@ -681,11 +812,18 @@ def cmd_memory_import(source: ConversationSource, args: argparse.Namespace) -> i
     targets: dict[Path, tuple[str, str | None]] = {}
     for item in valid:
         if item.target is not None:
-            targets[item.target] = (item.target_ref, item.extra["heading"])
+            targets[item.target] = (item.target_ref, item.heading)
     for directory in found:
         doc = decisions.memory_document(config, directory.label)
         targets.setdefault(doc, (f"{decisions.MEMORY_SOURCE}:{directory.label}", None))
-    markers = _existing_markers(targets, config, {d.project for d in found})
+    markers, unchecked = _existing_markers(
+        targets, config, {d.label for d in found}, persist=not dry_run
+    )
+    for blocked in unchecked:
+        print(
+            f"Error: cannot check {blocked.path} for imported memories: {blocked.problem}",
+            file=sys.stderr,
+        )
 
     for item in valid:
         existing = markers.get(item.key)
@@ -703,6 +841,10 @@ def cmd_memory_import(source: ConversationSource, args: argparse.Namespace) -> i
                 )
             continue
         if item.action == "reference":
+            continue
+        blocker = next((d for d in unchecked if d.blocks(item.directory.label)), None)
+        if blocker is not None:
+            _fail(item, f"cannot check {blocker.path} for imported memories: {blocker.problem}")
             continue
         assert item.fingerprint is not None
         if withdrawals.is_withdrawn(state, item.fingerprint) is not None:
