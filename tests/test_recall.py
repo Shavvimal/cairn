@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -139,6 +139,32 @@ class TestRecallList(_RecallFixture):
         code, _ = self._run(["list", "whenever", "--all-projects"])
         self.assertEqual(code, 1)
 
+    def test_list_json_has_provenance_and_owner(self):
+        code, out = self._run(["list", "today", "--all-projects", "--json"])
+        self.assertEqual(code, 0)
+        row = json.loads(out)[0]
+        self.assertEqual((row["provenance"], row["owner"]), ("tool", None))
+        self.assertEqual(list(row)[-3:], ["parent", "provenance", "owner"])
+        code, out = self._run(["list", "today", "--all-projects"])
+        self.assertIn("[messages] tool", out)
+
+    def test_provenance_filter(self):
+        argv = ["list", "today", "--all-projects", "--json", "--provenance"]
+        code, out = self._run([*argv, "agent"])
+        self.assertEqual((code, json.loads(out)), (0, []))
+        code, out = self._run([*argv, "tool"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(json.loads(out)), 1)
+        code, out = self._run([*argv, "agent", "--provenance", "tool"])
+        self.assertEqual(len(json.loads(out)), 1)
+
+    def test_bad_provenance_exits_2(self):
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as raised:
+            recall.main(["list", "today", "--all-projects", "--provenance", "robot"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--provenance", err.getvalue())
+
 
 class TestRecallSubagents(_RecallFixture):
     """Children are hidden from ``list`` unless ``--include-subagents`` is given."""
@@ -196,6 +222,7 @@ class TestRecallExpand(_RecallFixture):
         self.assertEqual(code, 0)
         self.assertIn("Investigate the widget pipeline bug", out)
         self.assertIn("3 user messages total", out)
+        self.assertIn("\nProvenance: tool\n", out)
 
     def test_unknown_session_fails_loud(self):
         code, _ = self._run(["expand", "zzzzzzzz", "--all-projects"])

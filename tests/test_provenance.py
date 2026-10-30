@@ -65,7 +65,7 @@ class OnRead(unittest.TestCase):
 
     def test_absent_key_derives_from_owner_and_parent_link(self):
         base = {"type": "codex-session"}
-        cases = [
+        cases: list[tuple[dict, str]] = [
             ({}, "tool"),
             ({"owner": "routine:example-daily"}, "agent"),
             ({"links": [f"parent {CALLER}"]}, "agent"),

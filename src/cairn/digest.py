@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
+from . import provenance as provenance_mod
 from .digest_condense import (
     Condenser,
     parse_parts,
@@ -290,6 +291,15 @@ def build(
         ("parent", family.parent),
         ("orphan_peer", family.orphan_peer),
     ]
+    # The lineage already read the body: a peer link or an invoke preamble makes a
+    # document exported before the key existed read ``agent``.
+    value = provenance_mod.effective(
+        record.metadata,
+        record.source,
+        record.path,
+        peer_body=family.role == "peer" or family.orphan_peer,
+    )
+    fields.append(("provenance", value))
     owner = record.metadata.get("owner") or family.owner
     if owner:
         fields.append(("owner", str(owner)))
@@ -327,6 +337,8 @@ def build(
         "frames_path": "",
         "role": family.role,
         "parent": family.parent,
+        "provenance": value,
+        "owner": str(owner) if owner else None,
         "project": record.project,
         "cwd": record.cwd,
         "frames_today": len(today),
@@ -400,6 +412,8 @@ def run_digest(
             continue
         if digest is not None:
             digests.append(digest)
+    if getattr(args, "provenance", None):
+        digests = [d for d in digests if d.row["provenance"] in args.provenance]
     digests.sort(key=lambda d: (d.first_ts, d.record.reference))
     _stems(digests)
     write(out, digests)
@@ -410,9 +424,10 @@ def run_digest(
         for row in rows:
             dropped = row["truncated"]["frames_dropped"]
             note = f"  [truncated {dropped}]" if dropped else ""
+            owner = f"  owner={row['owner']}" if row["owner"] else ""
             print(
-                f"{row['ref']}  {row['role']}  frames_today={row['frames_today']}  "
-                f"chars={row['chars']}{note}"
+                f"{row['ref']}  {row['role']}  {row['provenance']}  "
+                f"frames_today={row['frames_today']}  chars={row['chars']}{owner}{note}"
             )
         print(f"{len(rows)} sessions written to {out}")
     return 0 if digests else 3

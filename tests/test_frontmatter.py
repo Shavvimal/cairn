@@ -126,7 +126,7 @@ class MutationScoping(unittest.TestCase):
         # mutation keeps the head, so the key survives byte for byte.
         doc = CANONICAL.replace("\nstatus: active", "\nprovenance: tool\nstatus: active", 1)
         head = doc.split("\nstatus:", 1)[0]
-        mutations = (
+        mutations: tuple[tuple[str, object], ...] = (
             ("status", "done"),
             ("tags", ["widget"]),
             ("rating", 7),
@@ -136,7 +136,11 @@ class MutationScoping(unittest.TestCase):
         )
         for key, value in mutations:
             with self.subTest(key=key):
-                out = rewrite_preserved_tail(doc, lambda fm, k=key, v=value: fm.__setitem__(k, v))
+
+                def mutate(fm: dict, k: str = key, v: object = value) -> None:
+                    fm[k] = v
+
+                out = rewrite_preserved_tail(doc, mutate)
                 assert out is not None
                 self.assertTrue(out.startswith(head + "\nstatus:"))
                 self.assertEqual(parse_frontmatter(out)["provenance"], "tool")
