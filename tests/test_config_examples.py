@@ -43,6 +43,9 @@ class TestConfigExamplesInSync(unittest.TestCase):
         routine = loaded.routines["example-daily"]
         self.assertEqual((routine.peer, routine.profile), ("claude", "scheduled"))
         self.assertEqual(routine.outputs["journal_dir"], loaded.data_root / "journal")
+        assert routine.prepare is not None
+        self.assertEqual(routine.prepare[:3], ("cairn", "recall", "digest"))
+        self.assertEqual(routine.validate[:3], ("cairn", "recall", "verify"))
         self.assertIn("scheduled", loaded.invoke.claude.profiles)
         self.assertIn("journal", loaded.collections)
         self.assertIsNone(loaded.collections["journal"].store)

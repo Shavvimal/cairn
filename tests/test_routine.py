@@ -181,6 +181,28 @@ class TestTemplate(RoutineFixture):
             ["--permission-mode", "dontAsk", "--add-dir", f"{data_root}/journal"],
         )
 
+    def test_example_validate_renders_journal_path(self):
+        """The shipped example writes the digest in prepare and verifies the journal."""
+        example = json.loads(config.example_template_text())["routines"]["example-daily"]
+        self.write_config(prepare=example["prepare"], validate=example["validate"])
+        where = self.attempt("2026-11-11", 1)
+        rendered = routine_plan.render_day(
+            self.cfg, self.cfg.routines["daily"], date(2026, 11, 11), where
+        )
+        data_root, digest = str(self.cfg.data_root), f"{where}/digest"
+        self.assertEqual(
+            rendered.prepare,
+            [
+                *("cairn", "recall", "digest", "2026-11-11", "--all-projects", "--json"),
+                "--out",
+                digest,
+            ],
+        )
+        self.assertEqual(
+            rendered.validate,
+            ["cairn", "recall", "verify", f"{data_root}/journal/2026-11-11.md", "--digest", digest],
+        )
+
     def test_single_pass_spaced_braces_and_tilde(self):
         self.prompt.write_text("{{ DAY }} {{#each}} {{DAY}}")
         self.write_config(validate=["~/bin/check", "x~/y", "~", "{{DAY}}"])
