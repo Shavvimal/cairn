@@ -385,6 +385,11 @@ class TestInstructionsSite(unittest.TestCase):
         self.assertEqual(data["code"], "INSTRUCTIONS_HOME_MISSING")
         self.assertEqual(data["harness"], "claude")
         self.assertEqual(data["fix"]["verify"], ["cairn", "instructions", "status", "--json"])
+        # The same failure object as recall, invoke and config show, plus harness and path.
+        self.assertEqual(
+            set(data), {"ok", "code", "error", "exit", "retryable", "fix", "harness", "path"}
+        )
+        self.assertEqual((data["ok"], data["exit"], data["retryable"]), (False, 1, False))
 
 
 if __name__ == "__main__":

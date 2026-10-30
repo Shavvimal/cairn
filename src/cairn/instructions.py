@@ -858,8 +858,10 @@ def _fail(error: InstructionsError, harness: str, as_json: bool) -> int:
     errors.emit(error.code)
     if as_json:
         path = str(error.path) if error.path is not None else None
-        payload = {"harness": harness, "path": path, "error": str(error)}
-        print(json.dumps(errors.tag(payload, error.code, harness=harness)))
+        # The registry failure object, plus the harness and path this command names.
+        payload = errors.failure(error.code, str(error), exit=1, harness=harness)
+        payload.update(harness=harness, path=path)
+        print(json.dumps(payload))
     return 1
 
 
