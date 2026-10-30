@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `cairn errors [CODE] [--json]`: a registry of 38 stable failure codes. Each row gives the meaning,
-  why cairn stops, the next step, a read-only verify command, the exit status and whether a retry can
-  help. It reads no config. `docs/error-codes.md` is generated from it (`python -m cairn.errors
+  why cairn stops, the next step, a verify command (it edits no config or instruction file; it can
+  create `data_root`, refresh the catalog cache, or finalise a dead invoke round), the exit status
+  and whether a retry can help. It reads no config. `docs/error-codes.md` is generated from it (`python -m cairn.errors
   --render`) and a test keeps it current.
 - A converted failure keeps its first stderr line and adds `code: CODE (run 'cairn errors CODE')`.
   With `--json`, `recall`, `invoke`, `config show` and `instructions` print a failure object
