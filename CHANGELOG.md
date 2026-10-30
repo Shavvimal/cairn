@@ -14,11 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Text outside the markers is kept byte for byte; `--dry-run` prints a unified diff. `remove`, or
   deleting the block by hand, records an opt-out that `install` keeps until `--force`.
 - `cairn doctor` reports the recall-first block state (warn only, no config needed).
-- Setup asks before it adds the block and shows the diff; the update workflow upgrades a stale block.
+- Setup asks before it adds the block and shows the diff; the update workflow upgrades a stale
+  block and asks before a first install.
 
 ### Changed
-- `atomic_write` takes opt-in `mode`, `follow_symlinks` and `check_unchanged` keywords; existing
-  writers are unchanged.
+- `atomic_write` takes opt-in `follow_symlinks` and `check_unchanged` keywords; existing writers
+  are unchanged.
 
 ## [2.17.0]
 
