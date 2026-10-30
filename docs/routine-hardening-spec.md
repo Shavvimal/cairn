@@ -45,7 +45,7 @@ nobody looks at it. This spec adds:
 | Topic | Today | Where |
 |---|---|---|
 | `status` exit | Always 0, also with a failed day. Exit 2 only for an unknown routine | `src/cairn/routine.py:371-373`, `:411`, `:584-586` |
-| Install state | `launchctl print` against the plist. `yes`, `unloaded`, `no` or `n/a` | `routine.py:227-234` |
+| Install state | `launchctl print` against the plist, no timeout. `yes`, `unloaded`, `no` or `n/a` | `routine.py:227-234` |
 | `run` flags | `--day`, `--force`, `--dry-run`. No `--json` | `routine.py:543-547` |
 | Log echo | A log line is echoed to stdout only on a TTY | `src/cairn/routine_run.py:130-135` |
 | `last-run.json` | `run_id`, `started_at`, `finished_at`, `exit`, `days`, the four counts, `cost_usd`, `error`, `failures`. No schema version, no per-day rows | `routine_run.py:459-477` |
@@ -133,7 +133,7 @@ class. `validate` keeps its looser rule because its failure is visible as a fail
 | `paused.json` | `pause` | `resume` |
 | `disabled.json` | `run` (the breaker) | `resume` |
 | `breaker.json` | `run` | `resume`, or any run with a done or empty day |
-| `running.json` | `run`, after it takes the lock | `run`, in `finally` |
+| `running.json` | `run`, after it takes the lock | `run`, when `body` returns. A raising run rewrites it as interrupted |
 | `last-run.json` | `run` | never (extended, section 5) |
 
 Export receipts: `<state_home>/cairn/exports/<source>.json`, written by `cli.run` after every
@@ -163,7 +163,9 @@ stderr is the routine log (`routine.py:117-119`).
 
 `classify(config, spec, now) -> Classification` lives in a new module
 `src/cairn/routine_state.py`. It reads files only: no database, no network, no `launchctl`.
-The `installed` field keeps calling `launchctl print` (`routine.py:227-234`), but the exit
+The `installed` field keeps calling `launchctl print` (`routine.py:227-234`), bounded by
+`LAUNCHCTL_PROBE_S` = 5 s. A probe that does not answer in time reads `installed: unknown`
+(doctor warns `'launchctl print' did not answer in 5 s; launchd may be wedged`). The exit
 code never depends on it, so status works while launchd is wedged.
 
 States, first match wins:
@@ -207,8 +209,10 @@ Off macOS, `launchd-missing` is never raised: cron is the user's own business th
 2. `resume NAME` checks the name with `_check_name`, so a routine already removed from
    config can still be resumed. It removes whichever of `paused.json`, `disabled.json` and
    `breaker.json` exist, then prints the list. Exit 0 in both cases.
-3. `run` checks the markers after the depth check and before the lock (`routine_run.py:551-561`).
-   `disabled` is checked first. On a marker, `run` logs `event=skipped-paused reason=...` or
+3. `run` checks the markers after the depth check and before the lock (`routine_run.py:551-561`),
+   and again right after it takes the lock, before `running.json`: the run that held the lock
+   may have tripped the breaker, or a pause may have landed, between the two. `disabled` is
+   checked first. On a marker, `run` logs `event=skipped-paused reason=...` or
    `event=skipped-disabled reason=...`, prints the stderr line and exits 0. It writes no stamp,
    no `last-run.json`, no `running.json` and runs no hook. With `--json`, it prints a report
    with `status: skipped` and `reason: paused` or `disabled`. `--force` does not bypass a
@@ -221,8 +225,11 @@ Off macOS, `launchd-missing` is never raised: cron is the user's own business th
 
 After the lock is taken (`routine_run.py:561`), `run` writes `running.json`
 `{pid, start_token, run_id, started_at}` from `health.process_identity(os.getpid())`.
-It deletes the file in a `finally` inside the lock. A crash leaves the file behind, but the
-dead identity makes status report `interrupted-run`. The next run overwrites the file.
+It deletes the file when `body` returns, inside the lock. When `body` raises (any
+exception, `KeyboardInterrupt` included), `run` rewrites the file with `pid` and
+`start_token` null plus `interrupted` (the exception class) and `interrupted_at`, then
+re-raises, so status reports `interrupted-run` at once. A kill leaves the file as written,
+and the dead identity gives the same result. The next run overwrites the file.
 
 ### 4.4 Breaker
 
@@ -383,7 +390,8 @@ Each follows the format of `routine_run.py:137-139` and passes `LOG_LINE` in
 |---|---|
 | A marker file is corrupt JSON | Treated as present. The reason shows `(unreadable marker)`, so the run fails closed |
 | `last-run.json` is corrupt | `never_run` plus `last-run-exit-unknown` in attention. Exit 1 |
-| `running.json` from a crashed run | `interrupted-run`. The next run overwrites the file |
+| `running.json` from a crashed or raising run | `interrupted-run`. The next run overwrites the file |
+| `launchctl print` hangs | Killed after 5 s. `installed` is `unknown`; state and exit are unchanged |
 | `ps` is missing (identity probe fails) | `process_identity` returns `None`, so `running` is not reported. The run's own lock still protects it |
 | The hook hangs | Killed at 10 s with its process group (`procs.py:96-100`). Logged `exit=timeout` |
 | The hook binary is gone | Exit 127, logged `exit=missing`. The run is unaffected |
@@ -404,6 +412,8 @@ Each follows the format of `routine_run.py:137-139` and passes `LOG_LINE` in
 - `test_interrupted_run_when_identity_dead`: `running.json` with a dead pid.
 - `test_status_exit_codes_0_1_2`: CLI exits for `fresh`, a failed day, and paused.
 - `test_status_never_calls_launchctl_for_exit`: a `Launchctl` fake that raises still gives an exit code.
+- `test_status_answers_when_launchctl_print_hangs`: `subprocess.run` raises `TimeoutExpired`; `status --json` exits 0 with `installed: unknown`, and doctor warns.
+- `test_run_that_raises_leaves_interrupted_evidence`: `KeyboardInterrupt` and `OSError` out of `body` leave `running.json` with no identity; status exits 1 with `interrupted-run`.
 
 `tests/test_routine.py` (extended):
 
@@ -414,6 +424,7 @@ Each follows the format of `routine_run.py:137-139` and passes `LOG_LINE` in
 - `test_install_keeps_pause_marker_and_notes_it`.
 - `test_breaker_disables_after_three_counted_failed_runs`.
 - `test_breaker_ignores_uncounted_failures_and_resets_on_done`.
+- `test_marker_that_lands_before_the_lock_still_skips`: `disabled.json` written while the lock is taken still skips the run.
 - `test_hook_runs_once_per_stamp_with_env_and_stdin`.
 - `test_hook_failure_and_timeout_never_change_stamp_or_exit`.
 - `test_hook_runs_per_day_on_incomplete_input`.

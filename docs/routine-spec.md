@@ -1156,7 +1156,8 @@ daily  peer=claude profile=scheduled at=05:20 installed=yes last=2026-10-28T05:3
 ```
 
 `installed` is `yes` (plist on disk and `launchctl print gui/<uid>/<label>` exits 0),
-`unloaded` (plist on disk, not loaded), `no`, or `n/a` (not macOS). `pending` counts
+`unloaded` (plist on disk, not loaded), `no`, `n/a` (not macOS), or `unknown` (the
+probe did not answer in 5 s). `pending` counts
 window days with no done stamp. `--json` prints a list of objects with the same keys.
 Exit 0. No routines: `no routines configured` and exit 0.
 

@@ -8,6 +8,7 @@ name a state and an exit code while launchd is wedged.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -136,6 +137,16 @@ def write_running(sdir: Path, run_id: str, started_at: str) -> Path:
         },
     )
     return path
+
+
+def mark_interrupted(path: Path, cause: str) -> None:
+    """Rewrite ``running.json`` for a run that raised: no live identity, so status
+    reports ``interrupted-run`` at once, even while the raising process still exists.
+    A write error leaves the old marker, whose identity dies with the process."""
+    marker = read_marker(path) or {}
+    marker.update(pid=None, start_token=None, interrupted=cause, interrupted_at=now_iso())
+    with contextlib.suppress(OSError):
+        write_json(path, marker)
 
 
 def running_alive(marker: dict) -> bool:

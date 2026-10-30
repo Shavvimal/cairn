@@ -9,7 +9,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
-from cairn import routine_state
+from cairn import routine, routine_state
 from cairn.health import process_identity
 from tests.test_routine import Children, Launchctl, RoutineFixture
 
@@ -152,3 +152,55 @@ class TestStatusExit(RoutineFixture):
             code, out, _err = self.cli("status", "daily", "--json")
         report = json.loads(out)
         self.assertEqual((code, report["installed"], report["state"]), (0, "unloaded", "fresh"))
+
+    def test_status_answers_when_launchctl_print_hangs(self):
+        self.cli("run", "daily", children=Children())
+        plist = (
+            self.cfg.data_root.parent / "home/Library/LaunchAgents/dev.cairn.routine.daily.plist"
+        )
+        plist.parent.mkdir(parents=True)
+        plist.write_text("x")
+        timeouts: list[object] = []
+
+        def hung(argv, **kwargs):
+            timeouts.append(kwargs.get("timeout"))
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout") or 0)
+
+        with (
+            patch("cairn.routine.is_macos", return_value=True),
+            patch("cairn.routine.subprocess.run", hung),
+        ):
+            code, out, _err = self.cli("status", "daily", "--json")
+            lines = {label: (lvl, detail) for lvl, label, detail in routine.doctor_checks(self.cfg)}
+        report = json.loads(out)
+        self.assertEqual((code, report["installed"], report["state"]), (0, "unknown", "fresh"))
+        self.assertEqual(timeouts[0], routine.LAUNCHCTL_PROBE_S)
+        self.assertEqual(
+            lines["routine [daily] launchd"],
+            ("warn", "'launchctl print' did not answer in 5 s; launchd may be wedged"),
+        )
+
+
+class TestInterruptedRun(RoutineFixture):
+    def test_run_that_raises_leaves_interrupted_evidence(self):
+        self.cli("run", "daily", children=Children())
+        for error in (KeyboardInterrupt, OSError):
+            with self.subTest(error=error.__name__):
+                with (
+                    patch("cairn.routine_run.Run.body", side_effect=error),
+                    self.assertRaises(error),
+                ):
+                    self.cli("run", "daily", "--day", "2026-11-10", "--force")
+                marker = json.loads((self.state / "running.json").read_text())
+                self.assertEqual((marker["pid"], marker["interrupted"]), (None, error.__name__))
+                with (
+                    patch("cairn.routine.is_macos", return_value=False),
+                    patch("cairn.routine.launchctl", Launchctl()),
+                ):
+                    code, out, _err = self.cli("status", "daily", "--json")
+                report = json.loads(out)
+                self.assertEqual(
+                    (code, report["state"], report["attention"]), (1, "fresh", ["interrupted-run"])
+                )
+        self.cli("run", "daily", "--day", "2026-11-10", "--force", children=Children())
+        self.assertFalse((self.state / "running.json").exists())

@@ -786,13 +786,9 @@ def run_routine(
             f"start it from a shell or with 'cairn routine kickstart {spec.name}'"
         )
     run = Run(config, spec, as_json=as_json, stale_sources=stale_sources)
-    found = routine_state.blocking_marker(run.sdir)
-    if found is not None:
-        # --force does not bypass a marker: 'cairn routine resume' is the one way out.
-        kind, marker = found
-        run.log.event(f"skipped-{kind}", reason=marker.get("reason") or routine_state.UNREADABLE)
-        print(routine_state.skip_line(spec.name, kind, marker), file=sys.stderr)
-        return run.skipped(kind)
+    blocked = skip_on_marker(run)
+    if blocked is not None:
+        return blocked
     run.sdir.mkdir(parents=True, exist_ok=True)
     with ExitStack() as stack:
         try:
@@ -802,13 +798,36 @@ def run_routine(
             if sys.stdout.isatty() and not as_json:
                 print(f"routine {spec.name}: skipped, another run holds the lock")
             return run.skipped("lock-held")
+        # Check again under the lock: the run that held it may have just tripped the
+        # breaker, or a pause may have landed between the first check and the lock.
+        blocked = skip_on_marker(run)
+        if blocked is not None:
+            return blocked
         # Rotate under the lock, so a second start never renames the log mid-run.
         run.log.rotate()
         running = routine_state.write_running(run.sdir, run.run_id, run.started_at)
         try:
-            return run.body(today, day, force)
-        finally:
-            running.unlink(missing_ok=True)
+            code = run.body(today, day, force)
+        except BaseException as exc:
+            # Keep the evidence: status must read interrupted-run, not the previous run.
+            routine_state.mark_interrupted(running, type(exc).__name__)
+            raise
+        running.unlink(missing_ok=True)
+        return code
+
+
+def skip_on_marker(run: Run) -> int | None:
+    """Skip the run when a pause or disabled marker exists; ``None`` when none does.
+
+    --force does not bypass a marker: 'cairn routine resume' is the one way out.
+    """
+    found = routine_state.blocking_marker(run.sdir)
+    if found is None:
+        return None
+    kind, marker = found
+    run.log.event(f"skipped-{kind}", reason=marker.get("reason") or routine_state.UNREADABLE)
+    print(routine_state.skip_line(run.spec.name, kind, marker), file=sys.stderr)
+    return run.skipped(kind)
 
 
 def dry_run_routine(

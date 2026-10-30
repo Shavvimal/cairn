@@ -15,7 +15,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -631,7 +631,7 @@ class Launchctl:
         self.calls: list[tuple[str, ...]] = []
         self.loaded = loaded
 
-    def __call__(self, *args):
+    def __call__(self, *args, timeout=None):
         self.calls.append(args)
         code = 0 if (args[0] != "print" or self.loaded) else 113
         return subprocess.CompletedProcess(["launchctl", *args], code, "", "")
@@ -1052,6 +1052,29 @@ class TestBreaker(HardeningFixture):
         self.assertEqual((code, report["status"]), (1, "partial"))
         self.assertFalse((self.state / "breaker.json").exists())
         self.assertEqual(report["breaker"]["consecutive_failed_runs"], 0)
+
+    def test_marker_that_lands_before_the_lock_still_skips(self):
+        # A run that held the lock tripped the breaker (or a pause landed) between this
+        # run's first marker check and its lock: the check under the lock catches it.
+        self.json_run(children=Children())
+        before = self.last_run()
+        real_locked = routine_run.locked
+        state = self.state
+
+        @contextmanager
+        def tripping_lock(*args, **kwargs):
+            with real_locked(*args, **kwargs):
+                (state / "disabled.json").write_text(json.dumps({"reason": "tripped"}))
+                yield
+
+        children = Children()
+        with patch("cairn.routine_run.locked", tripping_lock):
+            code, report, err = self.json_run("--day", "2026-11-10", "--force", children=children)
+        self.assertEqual((code, report["status"], report["reason"]), (0, "skipped", "disabled"))
+        self.assertEqual(children.calls, [])
+        self.assertIn("(tripped); fix the cause, then run 'cairn routine resume daily'", err)
+        self.assertFalse((self.state / "running.json").exists())
+        self.assertEqual(self.last_run(), before)
 
 
 class TestTerminalHook(HardeningFixture):

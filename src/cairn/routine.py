@@ -45,16 +45,20 @@ from .routine_plan import (
 from .storage import atomic_write
 
 STATUS_HISTORY_DAYS = 30
+# Bound on the read-only `launchctl print` probe, so status, list and doctor answer
+# while launchd is wedged.
+LAUNCHCTL_PROBE_S = 5
 
 
 def is_macos() -> bool:
     return sys.platform == "darwin"
 
 
-def launchctl(*args: str) -> subprocess.CompletedProcess[str]:
-    """Run ``launchctl ARGS``; a missing binary is exit 127."""
+def launchctl(*args: str, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    """Run ``launchctl ARGS``; a missing binary is exit 127. With ``timeout``, a
+    probe that does not finish raises :class:`subprocess.TimeoutExpired`."""
     try:
-        return subprocess.run(["launchctl", *args], capture_output=True, text=True)
+        return subprocess.run(["launchctl", *args], capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError as exc:
         return subprocess.CompletedProcess(["launchctl", *args], 127, "", str(exc))
 
@@ -272,13 +276,18 @@ def resume(config: CairnConfig, name: str) -> int:
 
 
 def install_state(config: CairnConfig, name: str) -> str:
-    """``yes`` (plist on disk and loaded), ``unloaded``, ``no`` or ``n/a`` (not macOS)."""
+    """``yes`` (plist on disk and loaded), ``unloaded``, ``no``, ``n/a`` (not macOS) or
+    ``unknown`` (``launchctl print`` did not answer in ``LAUNCHCTL_PROBE_S``)."""
     if not is_macos():
         return "n/a"
     _state, _log, plist, label = _paths(config, name)
     if not plist.is_file():
         return "no"
-    return "yes" if launchctl("print", f"{_domain()}/{label}").returncode == 0 else "unloaded"
+    try:
+        probe = launchctl("print", f"{_domain()}/{label}", timeout=LAUNCHCTL_PROBE_S)
+    except subprocess.TimeoutExpired:
+        return "unknown"
+    return "yes" if probe.returncode == 0 else "unloaded"
 
 
 def day_rows(spec: RoutineSpec, state: Path, today: date) -> list[dict]:
@@ -496,6 +505,15 @@ def doctor_checks(config: CairnConfig) -> list[tuple[str, str, str]]:
                     "warn",
                     f"{label} launchd",
                     f"plist present but not loaded; run 'cairn routine install {name}'",
+                )
+            )
+        elif installed == "unknown":
+            lines.append(
+                (
+                    "warn",
+                    f"{label} launchd",
+                    f"'launchctl print' did not answer in {LAUNCHCTL_PROBE_S} s; "
+                    "launchd may be wedged",
                 )
             )
         else:
