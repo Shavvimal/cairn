@@ -799,6 +799,9 @@ owner label of the invoke preamble that `lineage` found, or `null`.
 written; a dropped session is not listed in `skipped`. Skipped sessions (legacy, corrupt) are not
 rows; they are stderr warnings and entries of `skipped[]`. With `--json`, stdout is one
 object, `{"sessions": [rows], "skipped": [{"ref", "reason"}]}` (answer 2).
+A later change adds a third key, `coverage`, with the store gaps that can hide a session
+of the day (`docs/recall-gaps-spec.md` section 5.2); `sessions`, `skipped` and the exit
+codes keep their shape.
 
 Without `--json`, stdout is one line per written session,
 `REF  ROLE  PROVENANCE  frames_today=N  chars=C  [owner=X]  [truncated F]`, then

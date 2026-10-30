@@ -57,6 +57,21 @@ class TestListCollections(unittest.TestCase):
         ):
             qmd.list_collections("qmd")
 
+    def test_list_collections_unchanged_after_refactor(self):
+        # Rebuilt on parse_collection_list: the same names, timeout and errors.
+        with mock.patch.object(
+            qmd, "run_capped", return_value=_completed(stdout=_LIST_OUTPUT)
+        ) as run:
+            names = qmd.list_collections("qmd")
+        self.assertEqual(names, set(qmd.parse_collection_list(_LIST_OUTPUT)))
+        run.assert_called_once_with(["qmd", "collection", "list"], timeout=qmd.COLLECTION_TIMEOUT)
+        timeout = qmd.subprocess.TimeoutExpired("qmd", 30)
+        with (
+            mock.patch.object(qmd, "run_capped", side_effect=timeout),
+            self.assertRaisesRegex(RuntimeError, "qmd collection list timed out after 30s"),
+        ):
+            qmd.list_collections("qmd")
+
 
 class TestEnsureCollection(unittest.TestCase):
     def setUp(self):

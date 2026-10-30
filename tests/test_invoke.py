@@ -2534,3 +2534,14 @@ class TestInvokeProfiles(InvokeFixture):
             argv[start : start + 6],
             ["-s", "read-only", "--add-dir", "/tmp/journal", "-c", "x.y=1"],
         )
+
+
+class TestIndexStamp(StoreFixture):
+    def test_update_index_writes_stamp(self):
+        self.fake_qmd()
+        before = time.time_ns()
+        invoke.update_index(config.get_config(), ["codex-sessions"], 5)
+        stamp = json.loads((self.root / "state/cairn/qmd-index.json").read_text())
+        self.assertGreaterEqual(stamp["started_ns"], before)
+        self.assertIn("codex-sessions", stamp["collections"])
+        self.assertEqual(stamp, qmd.read_stamp())

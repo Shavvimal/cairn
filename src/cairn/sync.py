@@ -35,7 +35,15 @@ from pathlib import Path
 
 from .config import CairnConfig, get_config
 from .procs import run_capped
-from .qmd import embed_failures, ensure_collection, index_status, list_collections, locked_index
+from .qmd import (
+    _has_markdown,
+    embed_failures,
+    ensure_collection,
+    index_status,
+    list_collections,
+    locked_index,
+    record_update,
+)
 from .registry import SOURCE_COLLECTIONS as SOURCE_COLLECTIONS
 from .registry import SOURCES as _BINDINGS
 from .storage import atomic_write, lock_path, locked
@@ -337,6 +345,15 @@ def consume_requests(config: CairnConfig) -> str | None:
     return widest
 
 
+def _registered(config: CairnConfig) -> list[str]:
+    """The enabled collections ``_ensure_collections`` registers: those with markdown."""
+    return [
+        name
+        for name, coll in sorted(config.collections.items())
+        if coll.sync.enabled and _has_markdown(config.output_dir(name))
+    ]
+
+
 def _index_stages(config: CairnConfig, embed: bool, record) -> None:
     """Collections, ``qmd update`` and (if ``embed``) embed + verify, under the index lock."""
     qmd = config.qmd_binary
@@ -345,8 +362,11 @@ def _index_stages(config: CairnConfig, embed: bool, record) -> None:
             "qmd-collections",
             run_inproc("qmd-collections", lambda: _ensure_collections(config)),
         )
+        started_ns = time.time_ns()
         updated = run_step("qmd-update", [qmd, "update"])
         record("qmd-update", updated)
+        if updated:
+            record_update(started_ns, _registered(config))
         if not embed:
             return
         if not updated:

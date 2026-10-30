@@ -315,6 +315,29 @@ class TestRunSummary(SyncFixture):
         self.assertTrue(text.rstrip().endswith("failed steps: broken-source\n=== FAILED ==="))
 
 
+class TestIndexStamp(SyncFixture):
+    def stamp(self) -> dict | None:
+        path = self.root / "state/cairn/qmd-index.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def test_stamp_written_after_successful_update(self):
+        self.native("codex", "stamped")
+        before = time.time_ns()
+        self.assertEqual(self.sync_cron().returncode, 0, self.log_text)
+        stamp = self.stamp()
+        assert stamp is not None
+        self.assertEqual(stamp["version"], 1)
+        self.assertGreaterEqual(stamp["started_ns"], before)
+        self.assertLess(stamp["started_ns"], time.time_ns())
+        self.assertEqual(stamp["database"], str((self.root / "cache/qmd/index.sqlite").resolve()))
+        self.assertIn("codex-sessions", stamp["collections"])
+
+    def test_no_stamp_after_failed_update(self):
+        self.scenario({"update": {"rc": 1, "err": "boom\n"}})
+        self.assertEqual(self.sync_cron().returncode, 1)
+        self.assertIsNone(self.stamp())
+
+
 # Writes the grandchild pid to a file before anything else (readiness handshake).
 GRANDCHILD = (
     "import subprocess, sys, time\n"

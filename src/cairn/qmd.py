@@ -8,18 +8,20 @@ so QMD owns its own state.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
-from .config import get_config
+from .config import get_config, state_home
 from .procs import run_capped
 from .runtime import qmd_resources
-from .storage import lock_path, locked
+from .storage import atomic_write, lock_path, locked
 
 COLLECTION_TIMEOUT = 30  # discovery/registration must not hold sync locks indefinitely
 
@@ -123,6 +125,71 @@ def register_context(collection: str) -> int:
 _COLLECTION_URI = re.compile(r"qmd://([^/\s)]+)/")
 
 
+_FILES_LINE = re.compile(r"^\s*Files:\s*([\d,]+)\s*$")
+_UPDATED_LINE = re.compile(r"^\s*Updated:\s*(\d+)\s*([a-z]+)\s+ago\s*$")
+_AGE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+@dataclass(frozen=True)
+class CollectionInfo:
+    """One block of ``qmd collection list``: the indexed file count and update age.
+
+    ``updated_age_s`` is ``Updated:  9m ago`` in seconds and ``updated_unit_s`` the
+    unit it was printed in, so a caller can allow for QMD's rounding. Either is
+    ``None`` when the block has no line cairn can read.
+    """
+
+    files: int | None = None
+    updated_age_s: int | None = None
+    updated_unit_s: int | None = None
+
+
+def parse_collection_list(text: str) -> dict[str, CollectionInfo]:
+    """Parse ``qmd collection list`` into ``{name: CollectionInfo}``.
+
+    A block starts at a line with a ``qmd://NAME/`` token; the indented ``Files:``
+    and ``Updated:`` lines below it belong to that collection. A missing or
+    unreadable line leaves its field ``None``, never zero.
+    """
+    found: dict[str, dict[str, int | None]] = {}
+    current: str | None = None
+    for line in strip_ansi(text).splitlines():
+        names = _COLLECTION_URI.findall(line)
+        if names:
+            for name in names:
+                found.setdefault(name, {})
+            current = names[-1]
+            continue
+        if current is None:
+            continue
+        if files := _FILES_LINE.match(line):
+            found[current]["files"] = int(files.group(1).replace(",", ""))
+        elif updated := _UPDATED_LINE.match(line):
+            unit = _AGE_UNITS.get(updated.group(2))
+            if unit is not None:
+                found[current]["updated_age_s"] = int(updated.group(1)) * unit
+                found[current]["updated_unit_s"] = unit
+    return {name: CollectionInfo(**fields) for name, fields in found.items()}
+
+
+def collection_details(qmd_binary: str, timeout: float) -> dict[str, CollectionInfo]:
+    """Run ``qmd collection list`` once and parse every block.
+
+    Raises ``RuntimeError`` on a timeout or a non-zero exit, and lets ``OSError``
+    through when the binary cannot start, exactly as :func:`list_collections` does.
+    """
+    try:
+        result = run_capped([qmd_binary, "collection", "list"], timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"qmd collection list timed out after {timeout:g}s") from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"`qmd collection list` failed (exit {result.returncode}): "
+            f"{result.stderr.strip() or 'unknown error'}"
+        )
+    return parse_collection_list(result.stdout)
+
+
 def list_collections(qmd_binary: str | None = None) -> set[str]:
     """Return the set of collection names qmd currently has registered.
 
@@ -131,16 +198,66 @@ def list_collections(qmd_binary: str | None = None) -> set[str]:
     caller re-add collections forever.
     """
     qmd_binary = qmd_binary or get_config().qmd_binary
+    return set(collection_details(qmd_binary, COLLECTION_TIMEOUT))
+
+
+# ---------------------------------------------------------------------------
+# Index stamp: when cairn last ran a successful ``qmd update``
+# ---------------------------------------------------------------------------
+#
+# QMD's CLI does not say when a collection was last scanned in a form precise enough
+# to count unindexed files, so cairn records it itself. ``started_ns`` is read
+# before ``qmd update`` starts: a file written during the update counts as
+# unindexed, so the stamp errs towards reporting a gap, never towards hiding one.
+
+STAMP_VERSION = 1
+
+
+def stamp_path() -> Path:
+    """``$XDG_STATE_HOME/cairn/qmd-index.json``."""
+    return state_home() / "cairn" / "qmd-index.json"
+
+
+def _iso(ns: int) -> str:
+    return datetime.fromtimestamp(ns / 1e9, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def record_update(started_ns: int, collections: Iterable[str]) -> None:
+    """Write the index stamp after a ``qmd update`` that exited 0.
+
+    Call it while the index lock is still held. ``collections`` are the names
+    registered when the update ran. A failed write warns on stderr and never fails
+    the caller: the stamp only sharpens ``cairn recall gaps``.
+    """
+    payload = {
+        "version": STAMP_VERSION,
+        "database": str(qmd_resources()[1]),
+        "started_ns": started_ns,
+        "started_at": _iso(started_ns),
+        "collections": sorted(set(collections)),
+    }
     try:
-        result = run_capped([qmd_binary, "collection", "list"], timeout=COLLECTION_TIMEOUT)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"qmd collection list timed out after {COLLECTION_TIMEOUT}s") from exc
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"`qmd collection list` failed (exit {result.returncode}): "
-            f"{result.stderr.strip() or 'unknown error'}"
-        )
-    return set(_COLLECTION_URI.findall(result.stdout))
+        atomic_write(stamp_path(), json.dumps(payload) + "\n")
+    except OSError as exc:
+        print(f"Warning: could not record the qmd update time: {exc}", file=sys.stderr)
+
+
+def read_stamp() -> dict | None:
+    """The index stamp, or ``None`` when it is missing, corrupt or of another version."""
+    try:
+        data = json.loads(stamp_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(data, dict)
+        or data.get("version") != STAMP_VERSION
+        or not isinstance(data.get("database"), str)
+        or type(data.get("started_ns")) is not int
+        or not isinstance(data.get("collections"), list)
+        or not all(isinstance(name, str) for name in data["collections"])
+    ):
+        return None
+    return data
 
 
 def _has_markdown(path: Path) -> bool:
@@ -340,17 +457,24 @@ def embed_failures(output: str) -> list[str]:
 
 
 __all__ = [
+    "STAMP_VERSION",
+    "CollectionInfo",
     "IndexStatus",
     "StatusFormatError",
     "add_context",
+    "collection_details",
     "embed_failures",
     "ensure_collection",
     "index_status",
     "list_collections",
+    "parse_collection_list",
     "parse_status",
     "parse_version",
     "qmd_version",
+    "read_stamp",
+    "record_update",
     "register_context",
     "register_descriptions",
+    "stamp_path",
     "strip_ansi",
 ]

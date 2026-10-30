@@ -114,6 +114,37 @@ class TestParseStatus(unittest.TestCase):
             self.assertIsNone(qmd.parse_status(text), repr(text))
 
 
+# An invented `qmd collection list` in QMD 2.x's block format (with colour codes).
+COLLECTION_LIST = (
+    "Collections (3):\n\n"
+    "\x1b[1mnotes\x1b[0m (qmd://notes/)\n  Pattern:  **/*.md\n  Files:    1,429\n"
+    "  Updated:  3h ago\n\n"
+    "claude-code-sessions (qmd://claude-code-sessions/)\n  Pattern:  **/*.md\n"
+    "  Files:    120\n  Updated:  9m ago\n\n"
+    "cursor-sessions (qmd://cursor-sessions/)\n  Pattern:  **/*.md\n  Files:    0\n"
+    "  Updated:  11d ago\n"
+)
+
+
+class TestParseCollectionList(unittest.TestCase):
+    def test_files_and_relative_updated(self):
+        found = qmd.parse_collection_list(COLLECTION_LIST)
+        self.assertEqual(list(found), ["notes", "claude-code-sessions", "cursor-sessions"])
+        self.assertEqual(found["notes"], qmd.CollectionInfo(1429, 3 * 3600, 3600))
+        self.assertEqual(found["claude-code-sessions"], qmd.CollectionInfo(120, 9 * 60, 60))
+        self.assertEqual(found["cursor-sessions"], qmd.CollectionInfo(0, 11 * 86400, 86400))
+
+    def test_unknown_unit_is_none(self):
+        text = "notes (qmd://notes/)\n  Files:    4\n  Updated:  2mo ago\n"
+        self.assertEqual(qmd.parse_collection_list(text)["notes"], qmd.CollectionInfo(4))
+
+    def test_block_without_files_line(self):
+        text = "qmd://codex-sessions/\nqmd://claude-code-sessions/\n  Updated:  0s ago\n"
+        found = qmd.parse_collection_list(text)
+        self.assertEqual(found["codex-sessions"], qmd.CollectionInfo())
+        self.assertEqual(found["claude-code-sessions"], qmd.CollectionInfo(None, 0, 1))
+
+
 class TestEmbedFailures(unittest.TestCase):
     def test_qmd_115_failed_chunks_and_session_release(self):
         problems = qmd.embed_failures(EMBED_115_FAILED)

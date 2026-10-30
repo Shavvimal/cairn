@@ -13,7 +13,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from cairn import config, mutations
-from cairn.catalog import RACY_GUARD_NS, Catalog, catalog_path, load_catalog
+from cairn.catalog import RACY_GUARD_NS, Catalog, catalog_path, load_catalog, scan
 from cairn.frontmatter import FrontmatterParseError, parse_frontmatter, read_frontmatter_head
 from cairn.store import SessionStore, read_record
 from tests.test_shared_store import StoreFixture
@@ -51,6 +51,23 @@ class TestCatalog(CatalogFixture):
         self.assertEqual(self.records(), self.full_scan())
         saved = json.loads(catalog_path(self.output_dir()).read_text())
         self.assertEqual(len(saved["entries"]), 2)
+
+    def test_scan_matches_walk(self):
+        for sid in ("alpha", "beta"):
+            self.native("codex", sid)
+        self.run_cli("codex", "export", "--all")
+        out = self.output_dir()
+        (out / "notes.txt").write_text("not markdown")
+        (out / "dir.md").mkdir()
+        found = scan(out)
+        walked = Catalog(out)._walk()
+        self.assertEqual(sorted(found), sorted(walked))
+        self.assertEqual(len(found), 2)
+        self.assertTrue(all(name.endswith(".md") for name in found))
+        self.assertEqual(
+            {rel: st.st_mtime_ns for rel, st in found.items()},
+            {rel: st.st_mtime_ns for rel, st in walked.items()},
+        )
 
     def test_warm_load_parses_nothing(self):
         for sid in ("alpha", "beta"):

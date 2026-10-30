@@ -2,7 +2,7 @@
 name: search
 description: Search previously exported Cairn sessions, notes, meetings and indexed docs using QMD BM25 or exact ripgrep. Use for explicit Cairn search or locating material in personal session history. Do not activate for ordinary web searches, repository code searches, or unrelated uses of find/look up. Requires qmd; rg is optional.
 argument-hint: QUERY [-n NUM] [-c COLLECTION] [--full] [--exact]
-allowed-tools: Bash(qmd:*), Bash(rg:*), Bash(head:*)
+allowed-tools: Bash(qmd:*), Bash(rg:*), Bash(head:*), Bash(cairn recall gaps:*)
 ---
 
 Read [the harness contract](../../references/harnesses/contract.md) and its relevant
@@ -113,6 +113,16 @@ Two engines:
    collection, score, and snippet. For rg hits: file path, collection, date (session files
    are named `YYYY-MM-DD-<id>.md`), and the matched line. The user wants a quick answer,
    not a wall of text.
+
+   If a search returns zero hits, or fewer than half of `-n`, run the gaps report once:
+
+   ```bash
+   cairn recall gaps --json
+   ```
+
+   Use only the gaps in its JSON. If `status` is `degraded`, report:
+   `No match for "QUERY", but the index is behind: <gaps>. rg can see unindexed files: /search QUERY --exact.`
+   If `status` is `clean`, report: `No match for "QUERY" in the indexed collections.`
 
 6. **If `--full`** (or the user asks to expand a hit):
 

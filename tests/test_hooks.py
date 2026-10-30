@@ -259,6 +259,22 @@ class TestHooks(StoreFixture):
         self.assertEqual({r.source for r in self.records()}, {"claude", "codex"})
 
 
+class TestIndexStamp(StoreFixture):
+    def test_update_index_writes_stamp(self):
+        self.fake_qmd()
+        out = config.get_config().output_dir("codex-sessions")
+        out.mkdir(parents=True)
+        (out / "a.md").write_text("# a\n")
+        before = time.time_ns()
+        hooks._update_index(config.get_config(), "codex-sessions", 5)
+        stamp = json.loads((self.root / "state/cairn/qmd-index.json").read_text())
+        self.assertGreaterEqual(stamp["started_ns"], before)
+        self.assertEqual(
+            stamp["collections"],
+            ["antigravity-sessions", "claude-code-sessions", "codex-sessions"],
+        )
+
+
 class TestAntigravityHook(StoreFixture):
     """agy's ``Stop`` hook: the camelCase payload, the ``{}`` reply contract, and the
     named-hook registration in ``~/.gemini/config/hooks.json``."""
