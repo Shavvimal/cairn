@@ -67,8 +67,10 @@ do not enable sources or hook policies the user had disabled.
 
 Hooks and cron record absolute engine/config paths and the effective QMD environment,
 including default paths. Repeat this registration after future engine reinstalls or
-intentional changes to those paths. Restart the affected hosts and review/trust changed
-Codex hooks in `/hooks`; installing a hook does not establish trust.
+intentional changes to those paths. Restart the affected hosts. On a verified Codex
+version, `cairn hook install --harness codex` refreshes the trust entry for the changed
+command; check `cairn doctor --harness codex` for `Codex hook trust - trusted`. On another
+version, review/trust the changed Codex hook in `/hooks`.
 
 ## 4. Run incremental sync and verify
 

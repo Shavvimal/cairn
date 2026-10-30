@@ -68,7 +68,8 @@ Seven collections and one search index:
 
 Cairn ships one set of skills, host-specific lifecycle adapters, and a globally installed `cairn` CLI. This repo is **both** the marketplace and the plugin.
 
-For Codex CLI (tested on 0.160.0; hook discovery also checked on 0.163.0):
+For Codex CLI (tested on 0.160.0; hook discovery also checked on 0.163.0; hook trust
+written by `cairn hook install` verified on 0.165.0):
 
 ```sh
 codex plugin marketplace add shavvimal/cairn --ref main
@@ -77,7 +78,10 @@ codex plugin add cairn@cairn
 
 Restart Codex, select **cairn:setup** in `/skills` or the `$` picker, and explicitly run it.
 The plugin's onboarding action points to this same setup skill. Setup is never implicitly
-invoked. Review/trust the Cairn SessionEnd command in `/hooks` when prompted.
+invoked. Setup runs `cairn hook install --harness codex`, which also writes the Codex
+trust entry for Cairn's SessionEnd command on the Codex versions it was verified against
+(0.165.x). On another Codex version, or with `--no-trust`, review/trust the command in
+`/hooks` when prompted.
 
 For Claude Code:
 
@@ -118,7 +122,8 @@ codex plugin add cairn@cairn
 cairn hook install --harness codex
 ```
 
-Then restart Codex and review changed hooks.
+Then restart Codex. On Codex 0.165.x the install refreshes the trust entry for the changed
+command; on another version, review the changed hook in `/hooks`.
 
 For a manual Claude Code update, in a session:
 
@@ -147,7 +152,7 @@ Disable a source's automatic synchronization with `cairn config set codex.on_hoo
 hooks additionally check that the plugin remains enabled and installed.
 
 ```sh
-cairn hook uninstall --harness codex  # only Cairn's registered Codex handlers
+cairn hook uninstall --harness codex  # only Cairn's unchanged Codex handler and trust entry
 codex plugin remove cairn@cairn
 codex plugin marketplace remove cairn
 ```
@@ -421,7 +426,14 @@ interpreters, history-moving git, dotenv files) a headless run needs into agy's
 actual hook discovery. Codex 0.160.0/0.163.0 currently expose portable skills/onboarding
 but omit portable hooks; Cairn installs a narrowly owned user hook as a fallback. If a
 client discovers the bundled hook, setup removes the fallback instead. Unrelated host
-hooks are preserved. Trust is still the host's decision; inspect `/hooks`.
+hooks are preserved. On the Codex versions where cairn verified Codex's trust-hash format
+(0.165.x), the installer also writes the `[hooks.state."<key>"]` trust table for its own
+SessionEnd group in `$CODEX_HOME/config.toml`, keeps a byte backup in
+`config.toml.cairn-bak`, and records a sha256 per entry in
+`$CODEX_HOME/cairn-hook-receipt.json`. `--dry-run` prints every planned write and writes
+nothing; `--no-trust` leaves trust to you. On another Codex version cairn writes no trust:
+review/trust the hook in `/hooks`. `cairn hook uninstall --harness codex` removes only the
+entries whose sha256 still matches the receipt.
 
 The environment that cron, the hook launcher, the Codex and Antigravity hook registrations
 and a routine's launchd job record pins `CAIRN_CONFIG`, `PATH`, the XDG and QMD paths. It

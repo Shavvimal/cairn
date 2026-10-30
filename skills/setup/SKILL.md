@@ -242,8 +242,11 @@ cairn hook install --harness antigravity  # when antigravity is enabled: agy's S
 cairn cron install     # absolute-path 'cairn sync --cron' entry, safe under cron's PATH
 ```
 
-Verify the bundled hook through the harness reference. Codex requires review/trust in
-`/hooks`; file installation does not establish readiness. Use the deterministic install command to inspect bundled discovery and configure only
+Verify the bundled hook through the harness reference. On the Codex versions in the
+harness reference's verified table, `cairn hook install --harness codex` also writes the
+trust entry; confirm it with `cairn doctor --harness codex` (`Codex hook trust - trusted`).
+On another Codex version, Codex requires review/trust in `/hooks`; file installation does
+not establish readiness there. Use the deterministic install command to inspect bundled discovery and configure only
 the needed fallback; do not hand-edit host settings. End a real session, inspect `cairn hook status --harness HOST`, wait for `completed`,
 and search a distinctive phrase from that session. If this cannot be exercised in this
 client, report lifecycle verification as incomplete. Cron is maintenance/recovery, not a
