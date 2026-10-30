@@ -1,6 +1,6 @@
 ---
 name: search
-description: Search previously exported Cairn sessions, notes, meetings and indexed docs using QMD BM25 or exact ripgrep. Use for explicit Cairn search or locating material in personal session history. Do not activate for ordinary web searches, repository code searches, or unrelated uses of find/look up. Requires qmd; rg is optional.
+description: Search previously exported Cairn sessions, notes, meetings and indexed docs using QMD BM25 or exact ripgrep. Use when the user says "cairn search", "search my sessions", "search past sessions", "search my meetings", "grep my sessions", or "exact search", or otherwise asks to locate material in personal session history. Do not activate for ordinary web searches, repository code searches, or unrelated uses of find/look up. Requires qmd; rg is optional.
 argument-hint: QUERY [-n NUM] [-c COLLECTION] [--full] [--exact]
 allowed-tools: Bash(qmd:*), Bash(rg:*), Bash(head:*), Bash(cairn recall gaps:*)
 ---
