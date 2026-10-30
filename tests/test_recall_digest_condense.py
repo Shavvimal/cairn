@@ -398,7 +398,9 @@ class TestProvenanceKey(DigestFixture):
     def test_text_row_shows_provenance_and_owner(self):
         self.write_peer("owned-0001", "routine:example-daily")
         out = self.root / "text"
-        code, stdout, _ = self.cli("digest", DAY, "--all-projects", "--out", str(out))
+        code, stdout, _ = self.cli(
+            "digest", DAY, "--all-projects", "--include-routine-sessions", "--out", str(out)
+        )
         self.assertEqual(code, 0)
         self.assertIn("codex:owned-0001  primary  agent  frames_today=", stdout)
         self.assertIn("  owner=routine:example-daily", stdout)
