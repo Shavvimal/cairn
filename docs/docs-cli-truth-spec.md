@@ -123,11 +123,11 @@ the word `cairn`.
 | 6 | Description column | `cairn routine run NAME   run due days now` | Two or more spaces then a lowercase letter, outside brackets and quotes, ends the argv. This handles help listings. |
 | 7 | Quotes | `--prompt "…"`, `'last week'` | One literal word. It is never a placeholder, so `"…"` is a value. |
 | 8 | Angle placeholder | `<thread-id>`, `<child file>`, `claude:<id>` | `<` opens a span through the next `>`, spaces included. A word that contains such a span is a placeholder. |
-| 9 | Name placeholder | `NAME`, `DATE`, `THREAD_ID`, `SOURCE:ID`, `{{DAY}}`, `$VAR`, `${VAR}`, unquoted `$(…)` | Placeholder. Upper-case shape: `^[A-Z][A-Z0-9_]*(:[A-Z0-9_]+)?$`. In `--opt=<value>` only the value is a placeholder; the option name stays literal, so an unknown option still fails. |
+| 9 | Name placeholder | `NAME`, `DATE`, `THREAD_ID`, `SOURCE:ID`, `{{DAY}}`, `$VAR`, `${VAR}`, unquoted `$(…)` | Placeholder. Upper-case shape: `^[A-Z][A-Z0-9_]*(:[A-Z0-9_]+)?$`. Hyphens are allowed (`YYYY-MM-DD`), and so are `Nd`/`Nw` (`^N[a-z]$`) and a lower-case `{name}` from a registry verify argv. In `--opt=<value>` only the value is a placeholder; the option name stays literal, so an unknown option still fails. |
 | 10 | Ellipsis | `...`, `…`, `args…`, `S...` | A repeatable placeholder. It is dropped if the parser reports it as unrecognised. |
-| 11 | Optional group | `[--day D]`, `[--since 7d \| --all]` | The brackets are removed. Inside a group, `\|` separates alternatives and only the first is kept. Groups can nest. |
-| 12 | Bare alternation | `--harness claude\|codex\|antigravity` | `a\|b` with no spaces keeps `a`. |
-| 13 | Spaced pipe into a subcommand | `cairn routine install \| uninstall NAME` <!-- cairn-cli: skip --> | If the first word after a spaced `\|` is a subcommand name anywhere in the route's parser tree, this is a violation: `usage alternation 'a \| b' runs as a shell pipe; write one command per line`. |
+| 11 | Optional group | `[--day D]`, `[--since 7d \| --all]` | The brackets are removed. Inside a group, a spaced `\|` separates alternatives. Groups can nest. The scanner parses one argv per alternative index: argv `k` takes alternative `k` of every group (or its last), so each alternative is parsed at least once. |
+| 12 | Bare alternation | `--harness claude\|codex\|antigravity` | `a\|b` with no spaces is one word with alternatives, expanded like a group. In a fence, if two alternatives are subcommand names and the word before is not an option, it is a violation under rule 13, because `install\|uninstall` pipes too. Inline, it is prose shorthand. |
+| 13 | Spaced pipe into a subcommand | `cairn routine install \| uninstall NAME` <!-- cairn-cli: skip --> | If the first word after a spaced `\|` is a subcommand name anywhere in the route's parser tree, this is a violation, unless it is a filter (`tail`, `head`, `jq`, `grep`, `less`, `sort`, `wc`, `tee`, `cat`) followed by nothing or an option, which is a real pipe: `usage alternation 'a \| b' runs as a shell pipe; write one command per line`. |
 | 14 | Help and version | `-h`, `--help`, `cairn sync --version` <!-- cairn-cli: skip --> | Parsed like any argv. A parser exit with status 0 (help, or a source parser's own `--version` action) is a pass. `cairn --version` and `cairn -V` are top-level dispatcher flags (`__main__.py:144`) and fall under rule 15. |
 | 15 | Not a command | `cairn - local session…`, `` `cairn invoke: …` `` | If the first argv word does not match `^[a-z][a-z-]*$` and is not a placeholder, there is no invocation. |
 | 16 | Template | `cairn <source> <verb>`, `cairn <command> [args…]` | If every argv word is a placeholder, the line is a usage template and is skipped. |
@@ -141,7 +141,11 @@ it. The candidates are `1`, `2026-01-01`, `7d`, and then every `choices` value i
 route's parser tree, in declaration order. If the error names no sentinel but sentinels
 remain (an `ArgumentTypeError` that does not echo its value), the scanner tries the
 remaining sentinels left to right. A placeholder in the dispatcher slot tries the
-`_SOURCES` keys, then the `_ADMIN` keys. The work is bounded by the number of
+`_SOURCES` keys, then the `_ADMIN` keys; a placeholder whose text holds `source` tries only
+`_SOURCES`, and a literal verb after it keeps only routes that have subcommands, so
+`cairn <source> no-such-verb` <!-- cairn-cli: skip --> cannot pass through `resume` or `errors`. For each sentinel,
+a candidate that makes the argv parse outright wins over an earlier candidate that only
+moves the error on, so `cairn routine <action> NAME --reason x` finds `pause`. The work is bounded by the number of
 placeholders times the number of candidates.
 
 ### 3.4 Markers
@@ -150,7 +154,7 @@ placeholders times the number of candidates.
 |---|---|---|
 | `<!-- cairn-cli: historical -->` | the line directly above a fence | the whole block is exempt |
 | `<!-- cairn-cli: historical -->` | on, or directly above, a line with inline code | the inline spans on that line are exempt |
-| `<!-- cairn-cli: skip -->` | on a line with inline code | the inline spans on that line are exempt |
+| `<!-- cairn-cli: skip -->` | on a line with inline code, or alone on the line above it | the inline spans on that line are exempt |
 | `<!-- cairn-cli: skip -->` | the line directly above a fence | the whole block is exempt; for a block that quotes a file body, not commands |
 
 Use `historical` for an example of an older release's CLI. Use `skip` for a span that is
@@ -169,7 +173,8 @@ parser tree. A fenced line gets no relaxation.
 
 `README.md`, `CONTRIBUTING.md`, `skills/**/*.md`, `references/**/*.md`, `docs/**/*.md`,
 and the `_HELP` string in `src/cairn/__main__.py`, scanned as one text fence with line
-numbers in that file. `CHANGELOG.md` is excluded.
+numbers in that file by its own test (`test_help_overview_invocations_parse`). Files are
+sorted within each folder. `CHANGELOG.md` is excluded.
 
 ### 3.7 Failure message
 
@@ -213,7 +218,8 @@ not the substituted argv.
    `^Bash\(([A-Za-z0-9_.-]+(?: [A-Za-z0-9_.-]+)*)(:\*| \*)\)$`. Both rule forms are
    accepted, and the prefix can hold more than one word (`Bash(cairn recall gaps:*)`). `Bash(cmd *)` is the canonical Claude Code form.
 3. If the skill has no bare `Bash` entry, every program at command position in its
-   `bash`, `sh`, `shell` or `console` fences (and after a spaced `|`) must have a
+   `bash`, `sh`, `shell` or `console` fences (and after a spaced `|`, with continued
+   lines joined first and `VAR=value` prefixes skipped) must have a
    `Bash(program...)` entry. On main this passes. `recall` runs `cairn`, `qmd`, `rg` and
    `head`. `search` runs `qmd`, `rg` and `head`. `invoke-antigravity` runs `cairn` and
    `agy`. The `/search` lines in `skills/search/SKILL.md` sit in an unlabelled fence and
@@ -238,7 +244,7 @@ fences that were checked by hand.
 | `skills/cairn/SKILL.md:91, 92, 95, 96, 97, 99, 125` | spaced-pipe usage alternation (rule 13) | One command per line |
 | `docs/routine-spec.md:775, 777` | spaced-pipe alternation in the help block the spec quotes | Copy the new `_HELP` lines |
 | `src/cairn/__main__.py:83, 86, 91, 92, 94` (`_HELP`) | spaced-pipe alternation | Use the compact `install\|uninstall NAME` form (rule 12), so the overview keeps one line per group |
-| `skills/cairn/workflows/log-session.md:5` | `cairn <source> note/close/log` | `` `cairn <source> note\|close\|log` `` |
+| `skills/cairn/workflows/log-session.md:5` | `cairn <source> note/close/log` | `` `cairn <source> note\|close\|log` `` | <!-- cairn-cli: skip -->
 | `references/harnesses/claude.md:28` | a Monitor description label, not a command | `<!-- cairn-cli: skip -->` |
 | `docs/routine-spec.md:809`, `:1170` | exact error strings that start with `cairn routine ...` | `<!-- cairn-cli: skip -->` |
 
@@ -300,6 +306,15 @@ no file and no JSON.
 - `TestScanner.test_option_value_placeholder_keeps_the_option`: `--no-such-flag=<file>` fails; `--max-msgs=<count>` without the positional fails.
 - `TestScanner.test_help_and_version_are_parsed_on_the_route`: `cairn sync --version` <!-- cairn-cli: skip --> fails, `cairn claude --version` and `cairn sync --help` pass.
 - `TestScanner.test_inline_relaxation_refuses_an_unknown_option`
+- `TestScanner.test_every_alternative_is_parsed`
+- `TestScanner.test_compact_subcommand_alternation_is_a_pipe_in_a_fence`
+- `TestScanner.test_a_pipe_into_a_filter_is_not_an_alternation`
+- `TestScanner.test_source_placeholder_with_a_bogus_verb_fails`
+- `TestScanner.test_verb_placeholder_tries_every_subcommand`
+- `TestRegions.test_skip_marker_above_an_inline_line`
+- `TestRegions.test_escaped_quote_stays_inside_the_literal`
+- `TestShellCommands.test_continuation_and_env_prefix_are_read`
+- `TestShellCommands.test_non_shell_fences_and_comments_are_ignored`
 - `TestDocs.test_scan_finds_the_doc_set`
 - `TestDocs.test_every_documented_invocation_parses`
 - `TestDocs.test_help_overview_invocations_parse`
@@ -369,7 +384,10 @@ The implementation follows sections 3 to 7, with these differences.
   when its leading words start with a rule's words. Continuation lines and `#`
   comments in shell fences are not read as commands.
 - Doc set. 746 invocations in 40 files (214 fenced, 532 inline) and 63 in `_HELP`, at
-  2.18.0.
+  2.18.0. After review (multiline spans, layers 10 and 11 below): 876 in 44 files (214
+  fenced, 662 inline) and 64 in `_HELP`.
+- Placeholders. `{name}` in a registry verify argv (`docs/error-registry-spec.md`) is a
+  placeholder under rule 9.
 
 Drift found at 2.18.0, in addition to the 2.9.0 findings in 4.4:
 

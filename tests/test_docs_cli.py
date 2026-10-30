@@ -49,7 +49,7 @@ WRAPPERS = (
 COMMAND_START = re.compile(
     r"(?:^|&&|\|\||;|\|\s|\$\(|`|\()\s*(?:\$\s+)?" + WRAPPERS + r"(?<![\w./-])cairn(?=\s|$)"
 )
-NAME_PLACEHOLDER = re.compile(r"^[A-Z][A-Z0-9_]*(?::[A-Z0-9_]+)?$")
+NAME_PLACEHOLDER = re.compile(r"^(?:[A-Z][A-Z0-9_-]*(?::[A-Z0-9_-]+)?|N[a-z])$")
 COMMAND_WORD = re.compile(r"^[a-z][a-z-]*$")
 OPTION_VALUE = re.compile(r"^(--?[A-Za-z][A-Za-z0-9_-]*=)(.+)$")
 BASE_CANDIDATES = ("1", "2026-01-01", "7d")
@@ -62,6 +62,7 @@ FAILURE_FOOTER = (
     "line.\nRerun: uv run python -m unittest tests.test_docs_cli"
 )
 SHELL_FENCES = frozenset({"bash", "sh", "shell", "console"})
+UNIX_FILTERS = frozenset({"tail", "head", "jq", "grep", "less", "sort", "wc", "tee", "cat"})
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,8 @@ class Invocation:
     text: str  # source text after ``cairn``, whitespace collapsed
     words: tuple[tuple[str, bool], ...]  # (word, is_placeholder)
     pipe_into: str | None  # first word after a spaced pipe, for the alternation rule
+    variants: tuple[tuple[tuple[str, bool], ...], ...] = ()  # argv per later alternative
+    compact: tuple[tuple[str, tuple[str, ...]], ...] = ()  # (word before, alternatives)
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +125,8 @@ def _inline_regions(path: str, lines: list[str], block: list[tuple[int, str]]) -
     for match in INLINE_SPAN.finditer(text):
         index = next(i for start, i in reversed(starts) if start <= match.start())
         line = lines[index]
-        if SKIP in line or HISTORICAL in line or (index > 0 and HISTORICAL in lines[index - 1]):
+        above = lines[index - 1] if index > 0 else ""
+        if SKIP in line or HISTORICAL in line or HISTORICAL in above or above.strip() == SKIP:
             continue
         span = re.sub(r"\s*\n\s*", " ", match.group(2).strip()).replace("\\|", "|")
         if span.startswith("cairn "):
@@ -211,6 +215,14 @@ BRACE_PLACEHOLDER = re.compile(
 )  # {harness}, {name}: a registry verify argv
 
 
+def _quote_end(text: str, i: int) -> int:
+    """Index of the quote that closes the one at ``i`` (``\\"`` does not close ``"``)."""
+    quote, j = text[i], i + 1
+    while j < len(text) and text[j] != quote:
+        j += 2 if quote == '"' and text[j] == "\\" else 1
+    return min(j, len(text))
+
+
 def _is_placeholder(word: str) -> bool:
     if BRACE_PLACEHOLDER.match(word):
         return True
@@ -241,9 +253,8 @@ def tokenise(text: str) -> tuple[tuple[tuple[str, bool], ...], str | None, int]:
     while i < n:
         c = text[i]
         if c in "'\"":
-            end = text.find(c, i + 1)
-            end = n if end < 0 else end
-            chars.append(text[i + 1 : end])
+            end = _quote_end(text, i)
+            chars.append(text[i + 1 : end].replace('\\"', '"') if c == '"' else text[i + 1 : end])
             state.update(has=True, quoted=True)
             i = end + 1
             continue
@@ -307,8 +318,11 @@ def tokenise(text: str) -> tuple[tuple[tuple[str, bool], ...], str | None, int]:
                 while i < n and not text[i].isspace() and text[i] != "]":
                     i += 1
                 continue
-            match = re.match(r"\s*([a-z][a-z-]*)", text[i + 1 :])
+            match = re.match(r"\s*([a-z][a-z-]*)(\s+\S)?", text[i + 1 :])
             pipe_into = match.group(1) if match else None
+            following = match.group(2) if match else None
+            if pipe_into in UNIX_FILTERS and (following is None or following.strip() == "-"):
+                pipe_into = None  # `| tail -n 5`, `| head`: a real pipe into a filter
             break
         if c in ";&`)":
             break
@@ -338,14 +352,16 @@ def mask_literals(text: str) -> str:
     while i < n:
         c = text[i]
         if c == "'":
-            end = text.find("'", i + 1)
-            end = n if end < 0 else end
+            end = _quote_end(text, i)
             out[i + 1 : end] = "x" * (end - i - 1)
             i = end + 1
         elif c == '"':
             i += 1
             while i < n and text[i] != '"':
-                if text.startswith("$(", i):
+                if text.startswith('\\"', i):
+                    out[i : i + 2] = "xx"
+                    i += 2
+                elif text.startswith("$(", i):
                     i = _closing(text, i + 1, "(", ")")
                 elif text[i] == "`":
                     end = text.find("`", i + 1)
@@ -362,6 +378,79 @@ def mask_literals(text: str) -> str:
     return "".join(out)
 
 
+def _split_top(text: str) -> list[str]:
+    """Split ``text`` at a spaced ``|`` outside nested brackets and quotes."""
+    parts, depth, quote, start = [], 0, "", 0
+    for i, c in enumerate(text):
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+        elif (
+            c == "|" and depth == 0 and (text[i - 1 : i].isspace() or text[i + 1 : i + 2].isspace())
+        ):  # a spaced `|` separates alternatives; `a|b` is one word's alternation
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return parts
+
+
+def _resolve(text: str, k: int, compact: list[tuple[str, tuple[str, ...]]]) -> tuple[str, int]:
+    """``text`` with alternative ``k`` (or the last) chosen in every group and bare alternation.
+
+    Returns the text and the largest number of alternatives seen.
+    """
+    out: list[str] = []
+    widest = 1
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "'\"":
+            end = _quote_end(text, i)
+            out.append(text[i : end + 1])
+            i = end + 1
+        elif c == "[":
+            end = _closing(text, i, "[", "]")
+            alts = _split_top(text[i + 1 : end - 1])
+            widest = max(widest, len(alts))
+            inner, deeper = _resolve(alts[min(k, len(alts) - 1)].strip(), k, compact)
+            widest = max(widest, deeper)
+            out.append("[" + inner + "]")
+            i = end
+        elif not c.isspace() and c != "|":
+            end = i
+            while end < n and not text[end].isspace() and text[end] not in "[]'\"":
+                end += 1
+            word = text[i:end]
+            alts = word.split("|")
+            if len(alts) > 1 and "||" not in word and all(alts):
+                widest = max(widest, len(alts))
+                before = "".join(out).split()
+                compact.append((before[-1] if before else "", tuple(alts)))
+                word = alts[min(k, len(alts) - 1)]
+            out.append(word)
+            i = end
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), widest
+
+
+def alternatives(text: str) -> tuple[list[str], tuple[tuple[str, tuple[str, ...]], ...]]:
+    """One text per alternative index, so every ``[a | b]`` and ``a|b`` branch is parsed.
+
+    Also returns each bare ``a|b`` with the word before it, for the compact-pipe rule.
+    """
+    compact: list[tuple[str, tuple[str, ...]]] = []
+    first, widest = _resolve(text, 0, compact)
+    texts = [first] + [_resolve(text, k, [])[0] for k in range(1, widest)]
+    return texts, tuple(compact)
+
+
 def invocations(region: Region) -> Iterator[Invocation]:
     """Each ``cairn`` at command position in a region, tokenised up to its end."""
     consumed = 0
@@ -371,6 +460,8 @@ def invocations(region: Region) -> Iterator[Invocation]:
         tail = region.text[match.end() :]
         words, pipe_into, stop = tokenise(tail)
         consumed = match.end() + stop
+        texts, compact = alternatives(tail[:stop])
+        variants = tuple(tokenise(text)[0] for text in texts[1:])
         shown = tail[:stop]
         if pipe_into is not None:
             rest = re.split(r"\s{2,}(?=[a-z])", tail[stop:], maxsplit=1)[0]
@@ -382,6 +473,8 @@ def invocations(region: Region) -> Iterator[Invocation]:
             " ".join(shown.split()),
             words,
             pipe_into,
+            variants,
+            compact,
         )
 
 
@@ -489,11 +582,13 @@ def _check_route(command: str, rest: list[str], placeholders: dict[str, str], in
     tried: set[str] = set()
 
     def substitute(sentinel: str, current: str, named: bool) -> list[str] | None:
-        for value in pool:
-            trial = [word.replace(sentinel, value) for word in argv]
-            error = parse_error(parser, trial)
+        trials = [[word.replace(sentinel, value) for word in argv] for value in pool]
+        errors = [parse_error(parser, trial) for trial in trials]
+        for trial, error in zip(trials, errors, strict=True):
             if error is None or _relaxed(error, trial, inline, command):
-                return trial
+                return trial  # a value that passes outright wins over an earlier partial one
+        for value, trial, error in zip(pool, trials, errors, strict=True):
+            assert error is not None
             if _names(error, value):
                 continue
             if named or error != current:
@@ -535,30 +630,18 @@ def _check_route(command: str, rest: list[str], placeholders: dict[str, str], in
     return error
 
 
-def check(invocation: Invocation) -> str | None:
-    """None when the invocation parses, else the violation text after ``cairn <text>:``."""
-    words = list(invocation.words)
-    if not words:
-        return None
-    first, first_is_placeholder = words[0]
-    if not first_is_placeholder and not COMMAND_WORD.match(first):
-        return None  # rule 15: prose such as "cairn - local session…"
-    if all(placeholder for _, placeholder in words):
-        return None  # rule 16: a usage template
-    if first == "help" and not first_is_placeholder:
-        return None
-    commands = list(dispatch._SOURCES) + list(dispatch._ADMIN)
-    if first_is_placeholder:
-        routes = commands
-    elif first in commands:
-        routes = [first]
-    else:
-        return f"cairn: unknown command {first!r}"
-    if invocation.pipe_into is not None:
-        for command in routes:
-            if invocation.pipe_into in subcommand_names(command):
-                left = next((w for w, _ in reversed(words)), first)
-                return PIPE_MESSAGE.format(left, invocation.pipe_into)
+def _routes(words: list[tuple[str, bool]]) -> list[str]:
+    """The routes to try for a dispatcher-slot placeholder, narrowed by what follows it."""
+    first = words[0][0]
+    routes = list(dispatch._SOURCES)
+    if "source" not in first.lower():
+        routes += list(dispatch._ADMIN)
+    if len(words) > 1 and not words[1][1] and not words[1][0].startswith("-"):
+        routes = [c for c in routes if subcommand_names(c)]  # a literal verb needs a verb slot
+    return routes
+
+
+def _check_argv(words: list[tuple[str, bool]], routes: list[str], inline: bool) -> str | None:
     placeholders: dict[str, str] = {}
     rest: list[str] = []
     for word, placeholder in words[1:]:
@@ -573,17 +656,55 @@ def check(invocation: Invocation) -> str | None:
                 rest.append(sentinel)
         else:
             rest.append(word)
-    inline = invocation.kind == "inline"
     first_error: str | None = None
     for command in routes:
         error = _check_route(command, rest, placeholders, inline)
         if error is None:
             return None
         first_error = first_error or error
-    assert first_error is not None
+    if first_error is None:
+        return "cairn: no route takes this argv"
     for sentinel, original in placeholders.items():
         first_error = first_error.replace(sentinel, original)
     return first_error
+
+
+def check(invocation: Invocation) -> str | None:
+    """None when the invocation parses, else the violation text after ``cairn <text>:``."""
+    words = list(invocation.words)
+    if not words:
+        return None
+    first, first_is_placeholder = words[0]
+    if not first_is_placeholder and not COMMAND_WORD.match(first):
+        return None  # rule 15: prose such as "cairn - local session…"
+    if all(placeholder for _, placeholder in words):
+        return None  # rule 16: a usage template
+    if first == "help" and not first_is_placeholder:
+        return None
+    commands = list(dispatch._SOURCES) + list(dispatch._ADMIN)
+    if first_is_placeholder:
+        routes = _routes(words)
+    elif first in commands:
+        routes = [first]
+    else:
+        return f"cairn: unknown command {first!r}"
+    for command in routes:
+        names = subcommand_names(command)
+        if invocation.pipe_into is not None and invocation.pipe_into in names:
+            left = next((w for w, _ in reversed(words)), first)
+            return PIPE_MESSAGE.format(left, invocation.pipe_into)
+        for before, alts in invocation.compact:
+            if invocation.kind == "inline" or before.startswith("-"):
+                continue  # inline `note|close` is prose shorthand; `--x a|b` is a value
+            if sum(alt in names for alt in alts) >= 2:
+                return PIPE_MESSAGE.format(alts[0], alts[1])  # `install|uninstall` pipes too
+    inline = invocation.kind == "inline"
+    for argv in (words, *[list(v) for v in invocation.variants]):
+        if argv and argv[0] == words[0]:
+            error = _check_argv(argv, routes, inline)
+            if error is not None:
+                return error
+    return None
 
 
 def scan_text(path: str, text: str) -> tuple[int, list[str]]:
@@ -672,7 +793,8 @@ class TestTokeniser(unittest.TestCase):
         self.assertEqual(_argv("cairn sync --all > out.log"), ["sync", "--all"])
         invocation = _one("cairn recall list today --json | head -n 5")
         self.assertEqual([w for w, _ in invocation.words], ["recall", "list", "today", "--json"])
-        self.assertEqual(invocation.pipe_into, "head")
+        self.assertIsNone(invocation.pipe_into)  # a pipe into a filter, not an alternation
+        self.assertEqual(_one("cairn invoke status | tail ID").pipe_into, "tail")
 
     def test_angle_placeholder_with_space_is_one_word(self) -> None:
         invocation = _one("cairn recall expand <child file> --max-msgs 5")
@@ -785,6 +907,13 @@ class TestRegions(unittest.TestCase):
         doc = "```\ncairn recall expand \\\n  example.md\n```\n"
         self.assertEqual(scan_text("x.md", doc), (1, []))
 
+    def test_skip_marker_above_an_inline_line(self) -> None:
+        self.assertEqual(list(code_regions("x.md", f"{SKIP}\n`cairn invoke result <id>`\n")), [])
+
+    def test_escaped_quote_stays_inside_the_literal(self) -> None:
+        doc = '```\ncairn codex note "say \\"hi; cairn sync --imaginary\\" twice"\n```\n'
+        self.assertEqual(scan_text("x.md", doc), (1, []))
+
 
 class TestRouting(unittest.TestCase):
     def test_every_dispatch_target_has_a_builder(self) -> None:
@@ -884,6 +1013,40 @@ class TestScanner(unittest.TestCase):
         self.assertEqual(seen, 2)
         self.assertEqual(len(violations), 1, violations)
 
+    def test_every_alternative_is_parsed(self) -> None:
+        for text in (
+            "cairn sync [--hook | --no-such-flag | --all]",
+            "cairn hook install --harness claude|no-such-harness|antigravity",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(len(scan_text("x.md", f"```\n{text}\n```\n")[1]), 1)
+        valid = "```\ncairn instructions status [--harness claude|codex] [--json]\n```\n"
+        self.assertEqual(scan_text("x.md", valid), (1, []))
+
+    def test_compact_subcommand_alternation_is_a_pipe_in_a_fence(self) -> None:
+        [violation] = scan_text("x.md", "```\ncairn routine install|uninstall NAME\n```\n")[1]
+        self.assertIn("usage alternation 'install | uninstall'", violation)
+        self.assertEqual(
+            scan_text("x.md", "Use `cairn codex note|close|log --session-id ID`.\n"), (1, [])
+        )
+
+    def test_a_pipe_into_a_filter_is_not_an_alternation(self) -> None:
+        doc = "```\ncairn invoke list-models | tail -n 5\ncairn <source> list | head\n```\n"
+        self.assertEqual(scan_text("x.md", doc), (2, []))
+        self.assertEqual(len(scan_text("x.md", "```\ncairn invoke status | tail ID\n```\n")[1]), 1)
+
+    def test_source_placeholder_with_a_bogus_verb_fails(self) -> None:
+        for text in ("cairn <source> no-such-verb", "cairn SOURCE no-such-verb --json"):
+            with self.subTest(text=text):
+                self.assertEqual(len(scan_text("x.md", f"```\n{text}\n```\n")[1]), 1)
+
+    def test_verb_placeholder_tries_every_subcommand(self) -> None:
+        doc = (
+            '```\ncairn claude <verb> "got it working"\ncairn config <action> KEY VALUE\n'
+            'cairn routine <action> NAME --reason "text"\ncairn routine run NAME --day YYYY-MM-DD\n```\n'
+        )
+        self.assertEqual(scan_text("x.md", doc), (4, []))
+
 
 class TestDocs(unittest.TestCase):
     def test_scan_finds_the_doc_set(self) -> None:
@@ -916,7 +1079,8 @@ class TestDocs(unittest.TestCase):
 
 BASH_RULE = re.compile(r"^Bash\(([A-Za-z0-9_.-]+(?: [A-Za-z0-9_.-]+)*)(:\*| \*)\)$")
 SHELL_START = re.compile(
-    r"(?:^|&&|\|\||;|\|\s|\$\()\s*(?:\$\s+)?([A-Za-z0-9_./-]+)((?:\s+[a-z][a-z-]*)*)"
+    r"(?:^|&&|\|\||;|\|\s|\$\()\s*(?:\$\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"([A-Za-z0-9_./-]+)((?:\s+[a-z][a-z-]*)*)"
 )
 
 
@@ -948,26 +1112,27 @@ def _tools(value: str) -> list[str]:
 
 
 def _shell_commands(text: str) -> Iterator[tuple[int, list[str]]]:
-    """(line, leading words) for each command at command position in a shell fence."""
+    """(line, leading words) for each command at command position in a shell fence.
+
+    A continued line is joined to its command first, so `\\` then `| jq .` is read.
+    """
     opener: tuple[str, int, str] | None = None
-    continued = False
-    for number, line in enumerate(text.split("\n"), start=1):
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line, number = lines[i], i + 1
+        i += 1
         if opener is None:
             opener = fence_open(line)
             continue
         if fence_closes(line, opener):
             opener = None
             continue
-        if (
-            opener[2].lower() not in SHELL_FENCES
-            or not line.strip()
-            or line.lstrip().startswith("#")
-        ):
+        if opener[2].lower() not in SHELL_FENCES or line.lstrip().startswith("#"):
             continue
-        if continued:
-            continued = bool(CONTINUATION.search(line))
-            continue  # the rest of the previous command's argv
-        continued = bool(CONTINUATION.search(line))
+        while CONTINUATION.search(line) and i < len(lines) and not fence_closes(lines[i], opener):
+            line = CONTINUATION.sub("", line).rstrip() + " " + lines[i].strip()
+            i += 1
         code = re.sub(r"\"[^\"]*\"|'[^']*'", '""', line)
         code = re.sub(r"(^|\s)#.*$", "", code)
         for match in SHELL_START.finditer(code):
@@ -1001,6 +1166,22 @@ class TestSkillFrontmatter(unittest.TestCase):
                         f"{path.relative_to(ROOT)}:{line}: {words[0]} runs but allowed-tools "
                         f"has no Bash({words[0]} *) rule",
                     )
+
+
+class TestShellCommands(unittest.TestCase):
+    def test_continuation_and_env_prefix_are_read(self) -> None:
+        doc = (
+            "```bash\ncairn recall list yesterday --json \\\n  | jq .\n"
+            'cairn=1 python3 -c "import os"\n```\n'
+        )
+        self.assertEqual(
+            list(_shell_commands(doc)),
+            [(2, ["cairn", "recall", "list", "yesterday"]), (2, ["jq"]), (4, ["python3"])],
+        )
+
+    def test_non_shell_fences_and_comments_are_ignored(self) -> None:
+        doc = "```text\njq .\n```\n```sh\n# jq .\nrg x\n```\n"
+        self.assertEqual(list(_shell_commands(doc)), [(6, ["rg", "x"])])
 
 
 if __name__ == "__main__":
