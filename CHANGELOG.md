@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `recall decisions` and the digest `overdue` list hide withdrawn rows, including an
-  unstruck row whose claim the ledger lists as withdrawn. `--include-struck` shows them.
+  unstruck row whose claim the ledger lists as withdrawn. `recall decisions
+  --include-struck` shows them; the digest has no such flag and never lists a withdrawn
+  row.
 
 ## [2.16.0]
 
