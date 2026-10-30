@@ -404,7 +404,7 @@ def _not_routine(records: list[SessionRecord], excluded: dict[str, str]) -> list
     """``records`` without routine-owned sessions and their subagents: front matter
     ``owner`` for every record, plus the refs the digest loop already ``excluded`` (which
     also holds the owner-form preambles of the day's sessions)."""
-    owned = {r.reference for r in records if _routine_owned(r.metadata.get("owner"))}
+    owned = {r.reference for r in records if _routine_owned(provenance_mod.owner_of(r.metadata))}
     owned.update(excluded)
     return [
         r
