@@ -141,6 +141,13 @@ class TestCodexTrustDoctor(unittest.TestCase):
                     "warn Codex hook trust - manual: Codex 0.170.0 is outside the verified range "
                     "(>= 0.165.0, < 0.166.0); Review/trust the Cairn SessionEnd hook in /hooks.",
                 ),
+                (
+                    None,
+                    "",
+                    [],
+                    "warn Codex hook trust - manual: the Codex version is unknown (codex is not "
+                    "on PATH), so cairn cannot check it against the verified range",
+                ),
             ]
             for version, toml, entries, expected in cases:
                 with self.subTest(expected=expected), patch.dict(os.environ, environment):
@@ -150,7 +157,11 @@ class TestCodexTrustDoctor(unittest.TestCase):
                     )
                     output = io.StringIO()
                     with (
-                        patch.object(trust, "codex_version", return_value=(version, "")),
+                        patch.object(
+                            trust,
+                            "codex_version",
+                            return_value=(version, "" if version else "codex is not on PATH"),
+                        ),
                         redirect_stdout(output),
                     ):
                         admin._check_codex_trust()

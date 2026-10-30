@@ -110,7 +110,7 @@ Files and safety rules:
   `<XDG config>/cairn/codex-hook-registration.json`, which the next install or uninstall
   reads once and deletes.
 - `$CODEX_HOME/config.toml.cairn-bak`: the bytes of `config.toml` before cairn's last edit,
-  with the same mode.
+  with the same mode (beside the target file when `config.toml` is a symlink).
 - cairn edits only whole `[hooks.state."<key>"]` tables. Before it replaces the file, the
   new text must parse back to the original with only the planned keys changed, and the file
   must be unchanged since cairn read it (Codex does not take cairn's lock). cairn stages
@@ -120,12 +120,13 @@ Files and safety rules:
 - A table at cairn's key with any key besides `trusted_hash` (for example
   `enabled = false`) is left alone, with a warning.
 - After the write, cairn asks Codex (`hooks/list`) once more. If Codex lists the hook with
-  a `trustStatus` other than `trusted`, cairn removes the table it wrote and prints the
-  `/hooks` step. If `hooks/list` fails, the table stays and the success line ends with
+  a `trustStatus` other than `trusted`, cairn removes the table it wrote in that run (no new
+  backup; a `config.toml` it created is deleted) and prints the `/hooks` step. If `hooks/list` fails, the table stays and the success line ends with
   `(Codex did not answer hooks/list: <reason>)`. If it does not list the hook or gives no
   status, the table stays and the success line has no note.
 - Reinstall replaces cairn's group only while its sha256 equals the receipt's. If you
-  edited the group (timeout, matcher, status message), install stops and changes nothing:
+  edited the group (timeout, matcher, status message, an added handler), install stops
+  and changes nothing:
   restore or remove the group, then run it again. A group whose command you changed is no
   longer cairn's; install appends a new one.
 - During a reinstall the receipt keeps the earlier and the planned entries until the

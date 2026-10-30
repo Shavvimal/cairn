@@ -885,12 +885,17 @@ def _check_codex_trust() -> None:
                 f"disabled: SessionEnd group {index} has enabled = false; enable it in /hooks",
             )
         else:
-            version = report["codex_version"] or f"version unknown ({report.get('version_error')})"
-            _warn(
-                label,
-                f"manual: Codex {version} is outside the verified range "
-                f"({report['verified_range']}); {MANUAL_STEP}",
-            )
+            if report["codex_version"] is None:
+                reason = (
+                    f"the Codex version is unknown ({report.get('version_error')}), so cairn "
+                    f"cannot check it against the verified range ({report['verified_range']})"
+                )
+            else:
+                reason = (
+                    f"Codex {report['codex_version']} is outside the verified range "
+                    f"({report['verified_range']})"
+                )
+            _warn(label, f"manual: {reason}; {MANUAL_STEP}")
 
 
 def _check_qmd_runtime(qmd_binary: str) -> tuple[int, IndexStatus | None, str | None]:

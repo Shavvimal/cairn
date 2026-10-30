@@ -286,7 +286,12 @@ def edit(snapshot: ConfigSnapshot, set_tables: dict[str, str], remove: Iterable[
         elif key in state:
             raise ValueError(refused)
         else:
-            anchors = [s for p, s in spans.items() if p[:2] == ("hooks", "state")]
+            # Only tables the parse knows: a header-shaped line in a string is no anchor.
+            anchors = [
+                s
+                for p, s in spans.items()
+                if p[:2] == ("hooks", "state") and len(p) == 3 and p[2] in state
+            ]
             at = max(end for _, end in anchors) if anchors else len(lines)
             if at > 0 and not lines[at - 1].endswith("\n"):
                 lines[at - 1] += eol
@@ -319,7 +324,23 @@ def _stage(path: Path, text: str, mode: int | None) -> str:
     return temporary
 
 
-def write_config(snapshot: ConfigSnapshot, text: str) -> None:
+def has_table(snapshot: ConfigSnapshot, key: str) -> bool:
+    """Whether ``key`` has its own ``[hooks.state."<key>"]`` header line."""
+    lines = snapshot.text.splitlines(keepends=True)
+    return ("hooks", "state", key) in _spans(lines) and key in snapshot.state
+
+
+def remove_config(snapshot: ConfigSnapshot) -> None:
+    """Delete a config.toml cairn created in this run, unless it changed meanwhile."""
+    if _fingerprint(snapshot.target)[0] != snapshot.fingerprint:
+        raise ValueError(
+            f"{snapshot.path} changed while cairn was writing; cairn changed nothing. "
+            "Run the command again."
+        )
+    snapshot.target.unlink()
+
+
+def write_config(snapshot: ConfigSnapshot, text: str, *, backup: bool = True) -> None:
     """Back up the original bytes, then replace the file through any symlink, keeping
     its mode. Refuses when the file changed since :func:`read_config`; Codex does not
     take cairn's lock.
@@ -330,11 +351,11 @@ def write_config(snapshot: ConfigSnapshot, text: str) -> None:
     """
     target = snapshot.target
     target.parent.mkdir(parents=True, exist_ok=True)
-    backup = target.with_name(target.name + BACKUP_SUFFIX)
+    backup_path = target.with_name(target.name + BACKUP_SUFFIX)
     staged: list[tuple[str, Path]] = []
     try:
-        if snapshot.exists:
-            staged.append((_stage(backup, snapshot.text, snapshot.mode), backup))
+        if snapshot.exists and backup:
+            staged.append((_stage(backup_path, snapshot.text, snapshot.mode), backup_path))
         staged.append((_stage(target, text, snapshot.mode), target))
         current, _ = _fingerprint(target)
         if current != snapshot.fingerprint:
@@ -390,8 +411,11 @@ def trust_state(
     for index, group in enumerate(session_end_groups(hooks_data)):
         if not isinstance(group, dict):
             continue
-        for position, handler in enumerate(group.get("hooks", [])):
-            if handler.get("command") not in commands:
+        handlers = group.get("hooks")
+        for position, handler in enumerate(handlers if isinstance(handlers, list) else []):
+            if not isinstance(handler, dict) or handler.get("command") not in commands:
+                continue
+            if not isinstance(handler.get("type"), str):
                 continue
             key = state_key(hooks_path, "SessionEnd", index, position)
             expected = trusted_hash("SessionEnd", handler)
@@ -425,10 +449,12 @@ __all__ = [
     "canonical_sha",
     "codex_version",
     "edit",
+    "has_table",
     "in_range",
     "parse_version",
     "range_text",
     "read_config",
+    "remove_config",
     "session_end_groups",
     "snake_case",
     "state_key",

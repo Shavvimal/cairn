@@ -30,7 +30,8 @@ repeats. This layer makes the install command finish the job:
 4. `cairn hook uninstall --harness codex` removes only entries whose hash still matches
    the receipt.
 5. `cairn doctor --harness codex` and `cairn hook status --harness codex` report the
-   trust state from the files, without the Codex app-server.
+   trust state from the files, without the Codex app-server (`hook status` still lists
+   `host_hooks` from the app-server beside it, as in 2.9.0).
 6. The trust-hash format is pinned to the Codex versions it was verified against. Outside
    that range, cairn writes no trust and prints the manual `/hooks` step.
 
@@ -426,7 +427,8 @@ the sections above in these points:
 8. Uninstall reads config.toml only when the receipt names a trust table, so a config.toml
    that does not parse cannot block the removal of a v1 registration.
 9. A group with cairn's handler and a foreign handler is not replaced in place: install
-   removes cairn's handler from it and appends a new group, as 2.9.0 did.
+   removes cairn's handler from it and appends a new group, as 2.9.0 did. This holds for
+   v1 ownership only; with a v2 receipt such a group is changed (note 14).
 10. `--dry-run` without `--harness codex` is an argparse error (exit 2) for install and
     uninstall, not only for `--harness antigravity`.
 11. The range renders as `>= 0.165.0, < 0.166.0`. The `codex_trust` report also carries
@@ -467,3 +469,30 @@ the sections above in these points:
 21. `hook install --harness codex` writes the launcher only after the registration plan
     (or, with the bundled hook discovered, the removal plan) passed its checks, so a
     refused install, or an `inspect_hooks` failure, writes no file.
+22. Second-review fixes. Note 14's refusal also covers a cairn group with an added foreign
+    handler. hooks.json that is not an object, or whose `hooks`, `hooks.SessionEnd` or a
+    group's `hooks` has the wrong type, is `{hooks_path} is not a Codex hooks file
+    ({detail}); cairn changed nothing.` (exit 1, and `error` in `codex_trust`).
+23. The post-write rollback (step 14) removes only a table cairn wrote in this run
+    (`origin: written`). It writes no backup, so `config.toml.cairn-bak` keeps the bytes
+    from before the run, and it deletes a `config.toml` that cairn created and that would
+    be empty. An adopted or inline table stays, with the warning `... after the write; the
+    table is not cairn's, so it stays.`
+24. A table with cairn's exact hash defined inline or by dotted keys is trusted but not
+    recorded in the receipt, so uninstall never has to edit it. Insertion anchors only on
+    `[hooks.state."<key>"]` headers whose key the parse knows.
+25. A run that finds a `prepared` receipt and both files already written writes the
+    installed receipt, runs step 14, and prints `Finished the interrupted Cairn
+    registration in {hooks_path} (SessionEnd group {i}), trusted in {config} for Codex
+    {version}. Restart Codex.` The dry-run receipt line says `unchanged` when the receipt
+    would not change, and the group line says `would add` for an appended group.
+26. The receipt's `hooks_path` check also applies to `trust_report()`, so status and doctor
+    report a receipt from another `CODEX_HOME` as `error`.
+27. The backup sits beside the resolved `config.toml` (beside the symlink target when
+    `config.toml` is a symlink); the dry-run line names that path.
+28. In `codex_trust.groups[]`, `origin` is `written` (the receipt records cairn wrote the
+    trusted table), `codex` (trusted, but not by a table cairn wrote, adopted tables
+    included) or `null` (not trusted). The receipt's own `origin` stays `written` or
+    `adopted`. Doctor's `manual` line for an unreadable version reads `manual: the Codex
+    version is unknown ({reason}), so cairn cannot check it against the verified range
+    ({range}); Review/trust the Cairn SessionEnd hook in /hooks.`

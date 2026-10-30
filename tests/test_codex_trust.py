@@ -314,9 +314,90 @@ class TestInstall(TrustFixture):
         self.assertEqual(
             message, f"Registered Cairn fallback in {self.hooks_path} (SessionEnd group 0)."
         )
-        self.assertNotIn(self.key, self.state())
+        # cairn created config.toml in this run, so the rollback takes it away again.
+        self.assertFalse(self.toml.exists())
+        self.assertFalse(self.toml.with_name("config.toml.cairn-bak").exists())
         kinds = [e["kind"] for e in self.receipt_data()["entries"]]
         self.assertEqual(kinds, ["hooks_json_group"])
+
+    def test_rollback_keeps_the_pre_install_backup(self):
+        self.toml.write_text("[tui]\nx = 1\n")
+        command = self.command()
+        self.inspect_mock.side_effect = [[], [{"command": command, "trustStatus": "untrusted"}]]
+        self.run_configure()
+        self.assertEqual(self.toml.read_text(), "[tui]\nx = 1\n")
+        backup = self.toml.with_name("config.toml.cairn-bak")
+        self.assertEqual(backup.read_text(), "[tui]\nx = 1\n")
+
+    def test_rollback_leaves_an_adopted_table(self):
+        original = f'[hooks.state."{self.key}"]\ntrusted_hash = "{self.expected_hash()}"\n'
+        self.toml.write_text(original)
+        self.inspect_mock.side_effect = [
+            [],
+            [{"command": self.command(), "trustStatus": "untrusted"}],
+        ]
+        _, warning = self.run_configure()
+        self.assertIn("the table is not cairn's, so it stays", warning)
+        self.assertEqual(self.toml.read_text(), original)
+
+    def test_resumed_run_verifies_and_says_so(self):
+        real = registration._write_receipt
+        calls: list[str] = []
+
+        def crash_before_installed(state, receipt):
+            calls.append(receipt["status"])
+            if receipt["status"] == "installed":
+                raise OSError("crash")
+            real(state, receipt)
+
+        with (
+            patch.object(registration, "_write_receipt", crash_before_installed),
+            self.assertRaises(OSError),
+        ):
+            self.run_configure()
+        self.assertEqual(self.receipt_data()["status"], "prepared")
+        self.inspect_mock.side_effect = [
+            [],
+            [{"command": self.command(), "trustStatus": "trusted"}],
+        ]
+        message, _ = self.run_configure()
+        self.assertTrue(message.startswith("Finished the interrupted Cairn registration"), message)
+        self.assertEqual(self.inspect_mock.call_count, 3)  # first run 1; resumed run 2
+        self.assertEqual(self.receipt_data()["status"], "installed")
+
+    def test_malformed_hooks_json_is_a_flat_error(self):
+        cases = {
+            "[]": "not a JSON object",
+            '{"hooks": null}': '"hooks" is not an object',
+            '{"hooks": {"SessionEnd": null}}': '"hooks.SessionEnd" is not a list',
+            '{"hooks": {"SessionEnd": [{"hooks": null}]}}': "is not an object with a",
+        }
+        for text, detail in cases.items():
+            with self.subTest(text=text):
+                self.hooks_path.write_text(text)
+                err = io.StringIO()
+                with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                    code = hooks.main(["install", "--harness", "codex"])
+                self.assertEqual(code, 1)
+                self.assertIn(detail, err.getvalue())
+                self.assertIn(detail, registration.trust_report()["error"])
+                self.assertEqual(self.hooks_path.read_text(), text)
+
+    def test_reinstall_refuses_a_group_with_an_added_handler(self):
+        self.run_configure()
+        data = json.loads(self.hooks_path.read_text())
+        data["hooks"]["SessionEnd"][0]["hooks"].append({"type": "command", "command": "echo x"})
+        self.hooks_path.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "SessionEnd group 0 .* changed since cairn wrote"):
+            self.run_configure()
+        self.assertEqual(json.loads(self.hooks_path.read_text()), data)
+
+    def test_receipt_for_another_home_is_reported_by_status(self):
+        self.run_configure()
+        receipt = self.receipt_data()
+        receipt["hooks_path"] = "/tmp/other/hooks.json"
+        self.receipt.write_text(json.dumps(receipt))
+        self.assertIn("was written for /tmp/other/hooks.json", registration.trust_report()["error"])
 
     def test_inspection_failure_after_write_keeps_table(self):
         self.inspect_mock.side_effect = [[], RuntimeError("timed out")]
@@ -584,6 +665,25 @@ class TestTomlEdit(TrustFixture):
         self.assertEqual(self.toml.read_text(), original)
         self.assertFalse(self.hooks_path.exists())
         self.assertFalse(self.receipt.exists())
+
+    def test_header_lines_inside_a_string_are_no_anchor(self):
+        original = 'note = """\n[hooks.state."fake"]\n[other]\n"""\n[tui]\nx = 1\n'
+        self.toml.write_text(original)
+        self.run_configure()
+        self.assertEqual(list(self.state()), [self.key])
+        self.assertEqual(
+            tomllib.loads(self.toml.read_text())["note"], '[hooks.state."fake"]\n[other]\n'
+        )
+
+    def test_inline_identical_table_is_trusted_but_not_owned(self):
+        original = f'hooks = {{ state = {{ "{self.key}" = {{ trusted_hash = "{self.expected_hash()}" }} }} }}\n'
+        self.toml.write_text(original)
+        message, _ = self.run_configure()
+        self.assertIn("and trusted it", message)
+        kinds = [e["kind"] for e in self.receipt_data()["entries"]]
+        self.assertEqual(kinds, ["hooks_json_group"])
+        self.run_configure(remove=True)  # no ValueError: cairn never owned the inline table
+        self.assertEqual(self.toml.read_text(), original)
 
     def test_header_inside_multiline_string_is_not_a_table(self):
         original = 'note = """\n[hooks.state."fake"]\n"""\n[tui]\nx = 1\n'

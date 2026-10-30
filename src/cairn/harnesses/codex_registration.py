@@ -197,7 +197,7 @@ def _load(*, strict: bool = True, need_config: bool = True) -> _State:
         raise ValueError(
             "Cairn registration belongs to another CODEX_HOME; use its matching XDG_CONFIG_HOME to update/remove"
         )
-    if strict and receipt and receipt.get("hooks_path") != str(hooks_path):
+    if receipt and receipt.get("hooks_path") != str(hooks_path):
         raise ValueError(
             f"{receipt_path()} was written for {receipt.get('hooks_path')}, not {hooks_path}; "
             "move it aside to register again"
@@ -211,12 +211,35 @@ def _load(*, strict: bool = True, need_config: bool = True) -> _State:
         legacy_path=legacy_path,
         hooks_exists=hooks_path.exists(),
         hooks_text=hooks_text,
-        data=json.loads(hooks_text) if hooks_text else {},
+        data=_hooks_data(hooks_path, hooks_text),
         config=_config(need_config or _has_tables(receipt)),
         receipt=receipt,
         legacy=legacy,
         commands=set(receipt.get("commands", [])) | set(legacy.get("commands", [])),
     )
+
+
+def _hooks_data(hooks_path: Path, text: str) -> dict:
+    """hooks.json, checked for the shape cairn reads and writes."""
+    data = json.loads(text) if text else {}
+    hooks = data.get("hooks", {}) if isinstance(data, dict) else None
+    detail = None
+    if not isinstance(data, dict):
+        detail = "not a JSON object"
+    elif not isinstance(hooks, dict):
+        detail = '"hooks" is not an object'
+    elif not isinstance(hooks.get(EVENT, []), list):
+        detail = f'"hooks.{EVENT}" is not a list'
+    elif any(
+        not isinstance(group, dict) or not isinstance(group.get("hooks", []), list)
+        for group in hooks.get(EVENT, [])
+    ):
+        detail = f'a "hooks.{EVENT}" group is not an object with a "hooks" list'
+    if detail is not None:
+        raise ValueError(
+            f"{hooks_path} is not a Codex hooks file ({detail}); cairn changed nothing."
+        )
+    return data
 
 
 def _has_tables(receipt: dict) -> bool:
@@ -417,8 +440,7 @@ def _plan_install(
             groups.append(group)
             continue
         if (
-            owned == len(_handlers(group))
-            and state.entries("hooks_json_group")
+            state.entries("hooks_json_group")
             and trust.canonical_sha(group) not in group_shas
             and not _owned_handlers(group, _legacy_commands(state))
         ):
@@ -450,7 +472,8 @@ def _plan_install(
         key=trust.state_key(state.hooks_path, EVENT, index, 0),
     )
     group_sha = trust.canonical_sha(new_group)
-    verb = "would replace" if state.hooks_exists else "would write"
+    in_place = index < len(groups_before) and index not in removed
+    verb = "would write" if not state.hooks_exists else "would replace" if in_place else "would add"
     plan.lines.append(
         f"{verb if plan.hooks_changed else 'unchanged'} {state.hooks_path}: "
         f"SessionEnd group {index} (sha256 {group_sha})"
@@ -494,12 +517,8 @@ def _plan_install(
         plan.config_text = trust.edit(state.config, plan.set_tables, plan.remove_keys)
         if state.config.exists:
             plan.lines.append(
-                f"would back up {state.config.path} to {state.config.path}{trust.BACKUP_SUFFIX}"
+                f"would back up {state.config.path} to {state.config.target}{trust.BACKUP_SUFFIX}"
             )
-    entries = 1 + (plan.table_entry is not None)
-    plan.lines.append(f"would write {state.receipt_path} ({entries} entries)")
-    if state.legacy:
-        plan.lines.append(f"would remove {state.legacy_path}")
     return plan
 
 
@@ -518,6 +537,11 @@ def _plan_table(state: _State, plan: _Plan, owned: list[dict]) -> None:
         "replaced": None,
     }
     header = trust.table_header(plan.key)
+    if current == table and not trust.has_table(state.config, plan.key):
+        # Defined inline or by dotted keys: Codex trusts it, but cairn cannot edit it.
+        plan.lines.append(f"unchanged {state.config.path}: {header} (not cairn's to edit)")
+        plan.trusted_hash = value
+        return
     if current == table:
         match = next((e for e in owned if e["sha256"] == sha), None)
         if match is not None:
@@ -571,10 +595,6 @@ def _install(
     with nullcontext() if dry_run else locked(lock_path(hooks_path, "registration")):
         state = _load()
         plan = _plan_install(state, command, version, reason, want_trust)
-        if dry_run:
-            return "\n".join(plan.lines + ([plan.skip] if plan.skip else []))
-        if before_write is not None:
-            before_write()  # the plan passed every refusal check, so writing starts here
         group_entry = {
             "kind": "hooks_json_group",
             "event": EVENT,
@@ -582,20 +602,40 @@ def _install(
             "sha256": trust.canonical_sha(plan.group),
         }
         entries = [group_entry] + ([plan.table_entry] if plan.table_entry else [])
+        final = _receipt(
+            state,
+            status="installed",
+            commands={command},
+            entries=[{**e, "pending": False} for e in entries],
+            version=version,
+        )
+        receipt_changed = _comparable(final) != _comparable(state.receipt)
+        if dry_run:
+            verb = "would write" if receipt_changed else "unchanged"
+            plan.lines.append(f"{verb} {state.receipt_path} ({len(entries)} entries)")
+            if state.legacy:
+                plan.lines.append(f"would remove {state.legacy_path}")
+            return "\n".join(plan.lines + ([plan.skip] if plan.skip else []))
+        if before_write is not None:
+            before_write()  # the plan passed every refusal check, so writing starts here
         if not (plan.hooks_changed or plan.config_text is not None):
-            final = _receipt(
-                state,
-                status="installed",
-                commands={command},
-                entries=[{**e, "pending": False} for e in entries],
-                version=version,
-            )
-            if _comparable(final) != _comparable(state.receipt):
+            resumed = state.receipt.get("status") == "prepared"
+            if receipt_changed:
                 _write_receipt(state, final)
             state.legacy_path.unlink(missing_ok=True)
-            if plan.trusted_hash is not None:
+            if plan.trusted_hash is None:
+                return _registered_untrusted(hooks_path, plan)
+            if not resumed:
                 return f"Cairn fallback in {hooks_path} is already registered and trusted; nothing changed."
-            return _registered_untrusted(hooks_path, plan)
+            # An interrupted run wrote both files: finish it, verification included.
+            note = _verify_trust(state, plan, final, command)
+            if note is None:
+                return _registered_untrusted(hooks_path, plan)
+            return (
+                f"Finished the interrupted Cairn registration in {hooks_path} (SessionEnd group "
+                f"{plan.index}), trusted in {state.config.path} for Codex {version}. "
+                f"Restart Codex.{note}"
+            )
         # Save ownership first: an interrupted install can always be removed. The
         # earlier entries stay until the installed receipt, so either version of a
         # replaced group or table is still cairn's after a crash.
@@ -669,14 +709,21 @@ def _verify_trust(state: _State, plan: _Plan, receipt: dict, command: str) -> st
     status = next((h.get("trustStatus") for h in mine if h.get("trustStatus")), None)
     if not mine or status in (None, "trusted"):
         return ""
-    assert plan.table_entry is not None
     snapshot = trust.read_config(state.config.path)
-    if trust.canonical_sha(snapshot.state.get(plan.key)) == plan.table_entry["sha256"]:
-        trust.write_config(snapshot, trust.edit(snapshot, {}, [plan.key]))
+    entry = plan.table_entry or {}
+    wrote = entry.get("origin") == "written"  # an adopted or inline table is not cairn's
+    if wrote and trust.canonical_sha(snapshot.state.get(plan.key)) == entry["sha256"]:
+        text = trust.edit(snapshot, {}, [plan.key])
+        if not state.config.exists and not text.strip():
+            trust.remove_config(snapshot)  # cairn created the file; take it away again
+        else:
+            # No backup: config.toml.cairn-bak keeps the bytes from before this run.
+            trust.write_config(snapshot, text, backup=False)
     receipt["entries"] = [e for e in receipt["entries"] if e.get("kind") != "config_toml_table"]
     _write_receipt(state, receipt)
+    removed = "trust table removed" if wrote else "the table is not cairn's, so it stays"
     _warn(
-        f"Codex reports the Cairn hook as {status} after the write; trust table removed. "
+        f"Codex reports the Cairn hook as {status} after the write; {removed}. "
         "Review/trust it in /hooks."
     )
     plan.skip = None
