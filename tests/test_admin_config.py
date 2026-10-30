@@ -11,7 +11,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from cairn import admin, config
+from cairn import admin, config, instructions
+from tests.test_shared_store import StoreFixture
 
 
 def _capture(fn, *args) -> tuple[int, str]:
@@ -537,3 +538,84 @@ class TestDisableSourceInRoutine(_ConfigFixture):
         self.assertEqual(rc, 0, err)
         self.assertNotIn("note:", out)
         self.assertEqual(config.get_config().routines["example-daily"].sources, ("claude", "codex"))
+
+
+class TestDoctorRecallFirst(StoreFixture):
+    def setUp(self):
+        super().setUp()
+        self.claude_home = Path(os.environ["CLAUDE_CONFIG_DIR"])
+        self.claude_home.mkdir()
+        self.claude_md = self.claude_home / "CLAUDE.md"
+
+    def check(self, harness: str | None = "claude") -> str:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            admin._check_recall_first(harness)
+        return buf.getvalue()
+
+    def test_doctor_reports_recall_first_states(self):
+        md = self.claude_md
+        self.assertEqual(
+            self.check(),
+            f"  warn recall-first [claude] - not in {md}; run 'cairn instructions install "
+            "--harness claude' (or 'remove' to silence this)\n",
+        )
+        # no ledger record yet: an older version on disk is stale
+        md.write_text(
+            "mine\n<!-- cairn:recall-first:begin v0 -->\nold\n<!-- cairn:recall-first:end -->\n"
+        )
+        self.assertEqual(
+            self.check(),
+            "  warn recall-first [claude] - stale (v0 on disk, v1 shipped); run 'cairn "
+            "instructions install --harness claude'\n",
+        )
+        md.write_text("mine\n")
+        with redirect_stdout(io.StringIO()):
+            instructions.main(["install", "--harness", "claude"])
+        self.assertEqual(self.check(), f"  ok   recall-first [claude] - v1 current in {md}\n")
+        md.write_text(md.read_text().replace("this machine", "my laptop"))
+        self.assertEqual(
+            self.check(),
+            "  warn recall-first [claude] - edited by hand inside the markers; edits there "
+            "are replaced by 'install --force'\n",
+        )
+        with redirect_stdout(io.StringIO()):
+            instructions.main(["remove", "--harness", "claude"])
+        date = self.check().split("opted out on ")[1][:10]
+        self.assertEqual(
+            self.check(),
+            f"  ok   recall-first [claude] - opted out on {date}; 'cairn instructions install "
+            "--harness claude --force' adds it\n",
+        )
+        md.write_text("<!-- cairn:recall-first:end -->\n")
+        self.assertEqual(
+            self.check(),
+            f"  warn recall-first [claude] - damaged markers in {md}; fix them by hand\n",
+        )
+        codex_home = Path(os.environ["CODEX_HOME"])
+        self.assertEqual(
+            self.check("codex"), f"  warn recall-first [codex] - {codex_home} not found\n"
+        )
+        self.assertEqual(self.check("antigravity"), "")
+        out = self.check(None)  # without --harness, a missing home is skipped
+        self.assertIn("[claude]", out)
+        self.assertNotIn("[codex]", out)
+        codex_home.mkdir()
+        (codex_home / "AGENTS.override.md").write_text("rules\n")
+        self.assertIn("(AGENTS.override.md is the active file)", self.check("codex"))
+
+    def test_doctor_recall_first_runs_without_config(self):
+        os.environ["CAIRN_CONFIG"] = str(self.root / "missing.json")
+        config.get_config.cache_clear()
+        buf = io.StringIO()
+        with (
+            redirect_stdout(buf),
+            mock.patch.object(admin, "_current_crontab", return_value=[]),
+        ):
+            rc = admin.doctor_main([])
+        out = buf.getvalue()
+        self.assertEqual(rc, 1)
+        self.assertIn("  FAIL config", out)
+        self.assertIn("  warn recall-first [claude] - not in", out)
+        self.assertNotIn("[codex]", out)
+        self.assertFalse(self.claude_md.exists())
