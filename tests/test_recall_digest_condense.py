@@ -6,7 +6,9 @@ import json
 import re
 import unittest
 from pathlib import Path
+from typing import Any, cast
 
+from cairn import provenance
 from cairn.digest import front_matter
 from cairn.digest_condense import select
 from cairn.frontmatter import parse_frontmatter
@@ -398,18 +400,46 @@ class TestProvenanceKey(DigestFixture):
 
     def test_later_preamble_without_key_is_tool(self):
         # Only the first user message with text decides, as at export: a person who
-        # pastes a preamble later in the session still drove it.
-        messages = [
-            msg("user", "2026-03-28T09:00:00Z", "Look at this prompt"),
-            msg("assistant", "2026-03-28T09:01:00Z", "Reading it."),
-            msg("user", "2026-03-28T09:02:00Z", PREAMBLE.format(who="an operator", n=1)),
-        ]
-        self.write_doc("later.md", document("later-0001", messages, source="codex"),
-                       "codex-sessions")  # fmt: skip
-        code, data, _, out = self.digest("--provenance", "tool")
-        self.assertEqual(code, 0)
-        self.assertEqual([row["ref"] for row in data["sessions"]], ["codex:later-0001"])
-        self.assertEqual(split((out / "codex-later0001.md").read_text())[0]["provenance"], "tool")
+        # pastes a preamble later in the session still drove it, so neither the
+        # provenance nor the lineage (role, parent, orphan_peer, owner) reads it.
+        for who in ("an operator", "routine:example-daily", "claude session claude:fixture-0001"):
+            with self.subTest(who=who):
+                messages = [
+                    msg("user", "2026-03-28T09:00:00Z", "Look at this prompt"),
+                    msg("assistant", "2026-03-28T09:01:00Z", "Reading it."),
+                    msg("user", "2026-03-28T09:02:00Z", PREAMBLE.format(who=who, n=1)),
+                ]
+                self.write_doc("later.md", document("later-0001", messages, source="codex"),
+                               "codex-sessions")  # fmt: skip
+                code, data, _, out = self.digest("--provenance", "tool")
+                self.assertEqual(code, 0)
+                (row,) = data["sessions"]
+                self.assertEqual(row["ref"], "codex:later-0001")
+                self.assertEqual(
+                    (row["role"], row["parent"], row["provenance"], row["owner"]),
+                    ("primary", None, "tool", None),
+                )
+                fm = split((out / "codex-later0001.md").read_text())[0]
+                self.assertEqual(
+                    (fm["role"], fm["parent"], fm["orphan_peer"], fm["provenance"]),
+                    ("primary", "null", "false", "tool"),
+                )
+                self.assertNotIn("owner", fm)
+
+    def test_indented_preamble_reads_as_at_export(self):
+        # ``at_export`` strips leading whitespace before the preamble; the digest
+        # must read the same document the same way.
+        for lead in ("  ", "\n", "\n\n  "):
+            with self.subTest(lead=repr(lead)):
+                text = lead + PREAMBLE.format(who="an operator", n=1)
+                messages = [msg("user", "2026-03-28T09:00:00Z", text)]
+                exported = provenance.at_export("codex", "codex-session", cast(Any, messages))
+                self.assertEqual(exported, "agent")
+                self.write_doc("lead.md", document("lead-0001", messages, source="codex"),
+                               "codex-sessions")  # fmt: skip
+                code, data, _, _ = self.digest()
+                self.assertEqual(code, 0)
+                self.assertEqual(data["sessions"][0]["provenance"], "agent")
 
     def test_stored_key_beats_body_evidence(self):
         for stored, expected in (("tool", "tool"), ("robot", "agent"), ("", "agent")):

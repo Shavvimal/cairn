@@ -105,7 +105,10 @@ def check_out(out: Path) -> None:
 
 
 def lineage(record: SessionRecord, frames: list[Frame]) -> Lineage:
-    """Role and parent, in order: subagent, peer by link, peer by preamble, primary (6.1)."""
+    """Role and parent, in order: subagent, peer by link, peer by preamble, primary (6.1).
+
+    The preamble counts only in the first user frame with text (:func:`first_user_frame`).
+    """
     if record.is_subagent:
         return Lineage("subagent", f"{record.source}:{record.parent_id}")
     links = record.metadata.get("links")
@@ -118,30 +121,37 @@ def lineage(record: SessionRecord, frames: list[Frame]) -> Lineage:
                 file=sys.stderr,
             )
         return Lineage("peer", parents[0])
-    for frame in frames:
-        if frame.role != "user" or (match := preamble_match(frame.body)) is None:
-            continue
-        caller = match["caller"]
-        if caller and match["caller_source"] == match["ref_source"] and _LINK_REF.match(caller):
-            return Lineage("peer", caller)
-        return Lineage("primary", None, orphan_peer=True, owner=match["owner"])
-    return Lineage("primary", None)
+    first = first_user_frame(frames)
+    if first is None or (match := preamble_match(first.body)) is None:
+        return Lineage("primary", None)
+    caller = match["caller"]
+    if caller and match["caller_source"] == match["ref_source"] and _LINK_REF.match(caller):
+        return Lineage("peer", caller)
+    return Lineage("primary", None, orphan_peer=True, owner=match["owner"])
 
 
-def opens_with_preamble(frames: list[Frame]) -> bool:
-    """Whether the first user frame with text starts with the invoke preamble.
+def first_user_frame(frames: list[Frame]) -> Frame | None:
+    """The first user frame with text after its header, or ``None``.
 
-    The provenance test of ``provenance.at_export``: a preamble pasted later in a
-    session a person drove does not make it ``agent``.
+    Only this frame can carry the invoke preamble of a peer run, the test that
+    ``provenance.at_export`` applies to the first user message: a preamble pasted
+    later in a session a person drove makes it neither a peer nor ``agent``. The
+    Codex exporter already drops host-context user messages (``<environment_context>``,
+    AGENTS.md instructions), so they never come first.
     """
     for frame in frames:
         if frame.role != "user":
             continue
         text = frame.body.replace("\r\n", "\n")
-        if not (text.split("\n", 1)[1] if "\n" in text else "").strip():
-            continue
-        return preamble_match(frame.body) is not None
-    return False
+        if (text.split("\n", 1)[1] if "\n" in text else "").strip():
+            return frame
+    return None
+
+
+def opens_with_preamble(frames: list[Frame]) -> bool:
+    """Whether the first user frame with text starts with the invoke preamble."""
+    first = first_user_frame(frames)
+    return first is not None and preamble_match(first.body) is not None
 
 
 def artifacts(text: str, anchor: int) -> list[str]:

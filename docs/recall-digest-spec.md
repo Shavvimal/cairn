@@ -478,13 +478,14 @@ For each candidate record, in this order:
    document and `child <peer>:<thread>` on the caller (`src/cairn/invoke.py:535-555`,
    roles in `src/cairn/mutations.py:35`). `role: peer`, `parent` = that reference. With
    more than one `parent` entry, take the first and print a warning.
-3. Peer by preamble. A user frame whose text, after the header and blank line, matches
-   the regex in 6.2. Scan all user frames of the whole session in ordinal order and use
-   the first match. Not only the first user frame: a Codex session can open with
-   host-context user messages (UNVERIFIED: whether Codex records the environment context
-   as a `user_message` before the prompt; `user_message` at
-   `src/cairn/sources/codex.py:214-225` takes both event and response items). If the
-   match names a caller, `role: peer`, `parent` = the caller reference.
+3. Peer by preamble. The first user frame with text, after the header and blank line,
+   matches the regex in 6.2. Later user frames do not count: a person who pastes a
+   preamble into a session they drive does not make it a peer run. (Changed by the
+   provenance layer, `docs/provenance-spec.md` 4.5; this step first scanned every user
+   frame in case a Codex session opened with host-context user messages, but the Codex
+   exporter drops `<environment_context>`, AGENTS.md instructions and `<skill>` messages
+   before they become user messages, `src/cairn/sources/codex.py:313-315`.) If the match
+   names a caller, `role: peer`, `parent` = the caller reference.
 4. Orphan peer. A preamble match that names no caller (`an operator`, or an owner label
    such as `routine:daily` from `cairn invoke --owner`), or a caller whose
    reference fails `_LINK_REF`-style validation (`src/cairn/mutations.py:36-37`):
