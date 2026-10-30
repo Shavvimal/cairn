@@ -136,7 +136,9 @@ does for `close`.
    Release the ledger lock.
 8. Strike the row: the claim cell becomes `~~<claim>~~ withdrawn: R`. A row that is
    already struck keeps its marker in front:
-   `~~<claim>~~ superseded by #4, withdrawn: R`. Write with `atomic_write`. If
+   `~~<claim>~~ superseded by #4, withdrawn: R`. The struck row must parse back to
+   itself; if it does not, exit 1 before the ledger append (`Error: row #N cannot be
+   struck in a form that reads back; edit it by hand`). Write with `atomic_write`. If
    `R == private`, print the stderr note.
 9. Release the document lock and print the result (or the JSON in 5.3).
 
@@ -146,8 +148,9 @@ and appends nothing, because step 7 finds `fp` already withdrawn.
 
 ### 4.2 Lock order
 
-Always document lock, then ledger lock. `decide --force` follows the same order. No code
-path takes the ledger lock and then a document lock, so the two cannot deadlock.
+Always document lock, then ledger lock. `decide --force` follows the same order and keeps
+the ledger lock until after its document write (4.4). No code path takes the ledger lock
+and then a document lock, so the two cannot deadlock.
 
 ### 4.3 Ledger append and read
 
@@ -162,22 +165,32 @@ Append, under the ledger lock:
 
 Read, under the ledger lock: parse each terminated line. A line that is not a JSON object,
 lacks a field from 5.2, or has an unknown `v`, `event`, `reason` or `norm`, a bad `ts`,
-`row` or `fingerprint`, fails loudly (exit 1). An unterminated last line is ignored with
+`row` or `fingerprint`, or a non-null `reason` on an `unwithdrawn` record, fails loudly
+(exit 1). `v` and `norm` must be JSON integers (`1.0` is rejected), `ts` must be a real
+UTC time, and `ts` and `fingerprint` must match their whole value (a trailing newline
+inside the string is rejected). An unterminated last line is ignored with
 the warning. The state per fingerprint is the last event in file order: `withdrawn`
 means withdrawn, `unwithdrawn` means not. A missing ledger is an empty state.
 
 ### 4.4 The guard
 
-`withdrawals.guard(config, claim, *, force, source, session_id, row) -> bool`, called by
-`decide` and `supersede` under the document lock, before the new row is written:
+`withdrawals.guard(config, claim, *, force, source, session_id, row, hold) ->
+(allowed, unwithdrawal | None)`, called by `decide` and `supersede` under the document
+lock, before the new row is written. `hold` is the caller's `ExitStack`:
 
 1. `fp = fingerprint(claim)`. A claim that normalises to nothing (`"!!!"`) skips the guard:
    no record can hold its fingerprint.
 2. Read the state. If `fp` is not withdrawn, return True.
 3. If withdrawn and not `force`: print the refusal and return False; the verb exits 3 and
    writes nothing (a refused `supersede` does not strike row N either).
-4. If withdrawn and `force`: print the warning, append an `unwithdrawn` record that names
-   the new row (`source`, `session_id`, `row`, `reason: null`), return True.
+4. If withdrawn and `force`: keep the ledger lock entered on `hold` and return an
+   `Unwithdrawal`, the `unwithdrawn` record that names the new row (`source`,
+   `session_id`, `row`, `reason: null`). The verb writes the row, then calls `commit()`,
+   which appends the record and prints the warning, then closes `hold`. A write that
+   fails, or a crash before the commit, leaves the claim withdrawn: the new row (if it
+   was written) is hidden by `ledger` evidence. Holding the ledger lock through the write
+   makes a concurrent `forget` of the same claim wait, so it reads the `unwithdrawn`
+   record and withdraws the claim again.
 
 `decide --force` on a claim that is not withdrawn adds the row and appends nothing.
 
@@ -298,6 +311,10 @@ No claim text, title, path or cwd is stored.
 | Two `forget` calls on one document | Serialised by the document lock |
 | `forget` in two documents at once | Serialised at the append by the ledger lock; each line is whole |
 | `data_root` not writable | `Error: <OSError text>`, exit 1, document unchanged (ledger first) |
+| `decide --force`: document write fails | `Error: <OSError text>`, exit 1, no `unwithdrawn` record; the claim stays withdrawn |
+| `decide --force`: `unwithdrawn` append fails after the write | `Error: added #N but could not record it as unwithdrawn: <OSError text>; the claim stays withdrawn`, exit 1; the new row is hidden by `ledger` evidence |
+| `decide --force`: crash between the write and the append | As above, with no message; `forget` or another `decide --force` settles it |
+| Claim that ends in `~` | Struck as `~~Store files in ~~~ withdrawn: R`; the strike grammar reads the optional `~` before the closing `~~` as part of the claim |
 | Claim edited after withdrawal | New text, new fingerprint, not refused. Documented limit |
 
 ## 7. Tests
@@ -322,6 +339,12 @@ No claim text, title, path or cwd is stored.
 - `TestGuard.test_decide_refuses_case_and_punctuation_variant`.
 - `TestGuard.test_decide_refuses_across_sources`: withdrawn in claude, refused in codex.
 - `TestGuard.test_decide_force_appends_unwithdrawn_and_adds_row`.
+- `TestGuard.test_failed_forced_write_leaves_claim_withdrawn` and `test_failed_unwithdrawn_append_keeps_claim_withdrawn`.
+- `TestGuard.test_forced_guard_holds_ledger_lock_until_commit`: another process sees the ledger lock taken during the write.
+- `TestForget.test_forget_round_trips_claims_at_markdown_boundaries`: trailing `~`, leading `~`, escaped `|` and `\\`.
+- `TestForget.test_forget_refuses_a_strike_that_does_not_read_back`.
+- `TestForget.test_short_write_fails_and_leaves_document_unchanged` and `test_append_fsyncs_file_then_directory_on_create`.
+- `TestProcesses.test_concurrent_forgets_of_one_claim_append_once` and `test_concurrent_forgets_in_one_document_keep_both_strikes`.
 - `TestGuard.test_withdraw_after_unwithdraw_refuses_again`: the last event wins.
 - `TestReading.test_recall_decisions_hides_withdrawn_by_default`.
 - `TestReading.test_recall_decisions_include_withdrawn_marks_rows` (through `--include-struck`).
@@ -392,7 +415,8 @@ Where the implementation differs from the first draft of this spec:
 - **Where the guard runs.** The guard runs inside the `edit` callback of
   `decisions.apply`, under the document lock, because the `unwithdrawn` record names the
   new row number and the full native id. `apply` gained an `on_read(native_id)` callback
-  for that. A refusal raises `decisions.ClaimWithdrawn`, which is not a `DecisionError`,
+  for that. A forced guard keeps the ledger lock until `cmd_decide` has written the row and
+  committed the `unwithdrawn` record. A refusal raises `decisions.ClaimWithdrawn`, which is not a `DecisionError`,
   so it leaves `apply` with nothing written and `cmd_decide` exits 3.
 - **`forget` in `decisions.py`.** `cmd_forget` lives beside `cmd_decide`, and the
   `withdrawals` module holds only the ledger. So `withdrawals` never imports `decisions`.
@@ -408,8 +432,16 @@ Where the implementation differs from the first draft of this spec:
 - **The marker grammar.** `WITHDRAWN_RE` is `(?:^|, )withdrawn: (?P<reason>[a-z_]+)$`,
   searched in the marker. A hand-written `withdrawn: no longer true` does not match, so it
   stays an ordinary struck row with no `withdrawn` evidence.
+- **A claim that ends in `~`.** `decide` accepts `Store files in ~`, and its strike renders
+  as `~~Store files in ~~~`. The table's `STRUCK_RE` (layer 07) read no `~~~`, so this
+  change lets the claim end in one optional `~` before the closing `~~`:
+  `^~~(?P<claim>(?:(?!~~).)+~?)~~(?: (?P<marker>\S.*))?$`. Every cell the old expression
+  matched parses the same way. `forget` also checks that a struck row parses back to
+  itself before it appends to the ledger.
 - **Ledger validation.** Beyond a missing field and an unknown `event` or `reason`, a
   reader also rejects an unknown `v` or `norm`, a `ts` that is not
-  `YYYY-MM-DDTHH:MM:SSZ`, a `row` below 1 and a `fingerprint` that is not 64 lowercase hex
-  characters. Extra keys are ignored.
+  `YYYY-MM-DDTHH:MM:SSZ` (a real time, matched as a whole), a `v` or `norm` that is not a
+  JSON integer, a `row` below 1, a `fingerprint` that is not 64 lowercase hex characters
+  (matched as a whole) and a non-null `reason` on an `unwithdrawn` record. Extra keys are
+  ignored.
 - **Digest determinism.** The `overdue` list now depends on the documents and the ledger.

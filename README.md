@@ -209,9 +209,9 @@ cairn recall decisions --overdue # active decision rows due for review
 
 `forget` strikes the row as `~~claim~~ withdrawn: <reason>` and appends a SHA-256
 fingerprint of the normalised claim to `withdrawn.jsonl` in the data root. The ledger
-holds no claim text. Withdrawal does not erase: the claim stays in the session document,
-in the QMD index and in any backup until you edit the file. Recall and the digest hide
-withdrawn rows.
+holds no claim text. Withdrawal does not erase: the claim stays in the session document
+until you edit the file, in the QMD index until the next index update after that edit,
+and in any backup or copy of the file. Recall and the digest hide withdrawn rows.
 
 Service docs is a verbatim mirror with no `--since`/`--all`:
 `cairn service-docs export [--clean]`.
