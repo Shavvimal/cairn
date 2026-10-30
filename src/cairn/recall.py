@@ -9,9 +9,8 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 
-from . import digest, provenance
+from . import digest, provenance, verify
 from . import recall_gaps as gaps
-from . import digest, verify
 from .config import ConfigError, get_config
 from .registry import SOURCES
 from .store import SessionStore, bounded_content
