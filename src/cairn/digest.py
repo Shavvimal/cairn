@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
+from . import decisions
 from . import provenance as provenance_mod
 from .digest_condense import (
     Condenser,
@@ -448,6 +449,9 @@ def run_digest(
     check_out(out)
     if not args.include_subagents:
         records = [r for r in records if not r.is_subagent]
+    # Rows due for review: revisit_by before the day after the digest day. They depend
+    # on the documents only, so the output stays deterministic.
+    overdue = decisions.overdue_rows(records, end.date())
     selected = [
         r
         for r in records
@@ -509,6 +513,7 @@ def run_digest(
     cov = coverage(bool(digests), skipped) if coverage is not None else None
     if args.json:
         payload: dict = {"sessions": rows, "skipped": skipped, "excluded": excluded_rows}
+        payload["overdue"] = overdue
         if cov is not None:
             payload["coverage"] = cov
         print(json.dumps(payload, indent=2))
@@ -527,6 +532,8 @@ def run_digest(
                 "pass --include-routine-sessions to keep them"
             )
         print(f"{len(rows)} sessions written to {out}")
+        for item in overdue:
+            print(f"Overdue: {item['ref']}  revisit_by {item['revisit_by']}  {item['claim']}")
     if cov is not None and (degraded := coverage_note(cov)):
         print(degraded, file=sys.stderr)
     return 0 if digests else 3

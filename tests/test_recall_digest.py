@@ -460,5 +460,42 @@ class TestRoutineExclusion(DigestFixture):
         self.assertEqual(data["excluded"], [{"ref": "claude:run-0001", "owner": "routine:daily"}])
 
 
+OVERDUE_NOTES = (
+    "## My Notes\n\nmine\n\n## Decisions\n\n"
+    "| # | claim | kind | confidence | since | revisit_by | source |\n"
+    "|---|-------|------|------------|-------|------------|--------|\n"
+    "| 1 | Due on the day | commitment | high | 2026-03-01 | 2026-03-28 |  |\n"
+    "| 2 | Due the day after | commitment | high | 2026-03-01 | 2026-03-29 |  |\n"
+    "| 3 | ~~Struck~~ superseded by #4 | fact | low | 2026-03-01 | 2026-03-02 |  |\n"
+    "| 4 | Undated | fact | low | 2026-03-02 |  | supersedes #3 |"
+)
+
+
+class TestDigestOverdue(DigestFixture):
+    def test_digest_json_lists_overdue_relative_to_day_after(self):
+        messages = [msg("user", "2026-03-28T10:00:00Z", "x"), msg("assistant", None, "y")]
+        self.write_doc("due.md", document("due-0001", messages, notes=OVERDUE_NOTES))
+        code, data, _stderr, _out = self.digest()
+        self.assertEqual(code, 0)
+        self.assertEqual(set(data), {"sessions", "skipped", "overdue"})
+        self.assertEqual([r["ref"] for r in data["overdue"]], ["claude:due-0001#1"])
+        self.assertEqual(data["overdue"][0]["revisit_by"], "2026-03-28")
+        self.assertTrue(data["overdue"][0]["overdue"])
+        code, data, _stderr, _out = self.digest(day="2026-03-29")
+        self.assertEqual([r["number"] for r in data["overdue"]], [1, 2])
+        out = self.root / "human"
+        code, stdout, _ = self.cli("digest", DAY, "--all-projects", "--out", str(out))
+        self.assertEqual(code, 0)
+        self.assertIn("Overdue: claude:due-0001#1  revisit_by 2026-03-28  Due on the day\n", stdout)
+
+    def test_overdue_does_not_change_exit_3(self):
+        messages = [msg("user", "2026-03-20T10:00:00Z", "x"), msg("assistant", None, "y")]
+        self.write_doc("due.md", document("due-0001", messages, notes=OVERDUE_NOTES))
+        code, data, _stderr, out = self.digest()
+        self.assertEqual((code, data["sessions"]), (3, []))
+        self.assertEqual([r["number"] for r in data["overdue"]], [1])
+        self.assertEqual(sorted(p.name for p in out.iterdir()), [".cairn-digest"])
+
+
 if __name__ == "__main__":
     unittest.main()
