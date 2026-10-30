@@ -16,6 +16,7 @@ import json
 import os
 import shlex
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from .codex import Codex
 
 RECEIPT_NAME = "cairn-hook-receipt.json"
 RECEIPT_VERSION = 2
+ENTRY_KINDS = ("hooks_json_group", "config_toml_table")
 HOOK_TIMEOUT_S = 3
 STATUS_MESSAGE = "Cairn automatic session sync"
 EVENT = "SessionEnd"
@@ -48,20 +50,6 @@ def receipt_path() -> Path:
 
 def _warn(message: str) -> None:
     print(f"warning: {message}", file=sys.stderr)
-
-
-def _remove_owned(data: dict, commands: set[str]) -> None:
-    """Legacy removal by exact command: a group whose only handler is cairn's is
-    dropped, a mixed group keeps its other handlers."""
-    groups = data.get("hooks", {}).get(EVENT, [])
-    retained = []
-    for group in groups:
-        # Only remove handlers whose exact command Cairn previously recorded.
-        handlers = [h for h in group.get("hooks", []) if h.get("command") not in commands]
-        if handlers or not group.get("hooks"):
-            retained.append({**group, "hooks": handlers})
-    if EVENT in data.get("hooks", {}):
-        data["hooks"][EVENT] = retained
 
 
 def _command(config: CairnConfig) -> str:
@@ -128,7 +116,62 @@ class _State:
 
 
 def _read_json(path: Path) -> dict:
-    return json.loads(path.read_text()) if path.exists() else {}
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{path} is not valid JSON ({exc}); move it aside to register again"
+        ) from None
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object; move it aside to register again")
+    if not _strings(data.get("commands", [])):
+        raise ValueError(f"{path} has a commands value that is not a list of strings")
+    return data
+
+
+def _strings(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _read_receipt(path: Path) -> dict:
+    """The receipt, checked for the shape the rest of this module reads."""
+    receipt = _read_json(path)
+    if not receipt:
+        return receipt
+
+    def bad(detail: str) -> ValueError:
+        return ValueError(
+            f"{path} is not a cairn hook receipt ({detail}); move it aside to register again"
+        )
+
+    if receipt.get("receipt_version") != RECEIPT_VERSION:
+        raise bad(f"receipt_version {receipt.get('receipt_version')!r}, expected {RECEIPT_VERSION}")
+    entries = receipt.get("entries", [])
+    if not isinstance(entries, list):
+        raise bad("entries is not a list")
+    for number, entry in enumerate(entries):
+        if not isinstance(entry, dict) or entry.get("kind") not in ENTRY_KINDS:
+            raise bad(f"entry {number} has no known kind")
+        if not isinstance(entry.get("sha256"), str):
+            raise bad(f"entry {number} has no sha256")
+        if entry["kind"] == "config_toml_table" and not isinstance(entry.get("key"), str):
+            raise bad(f"entry {number} has no key")
+    return receipt
+
+
+def _identity(entry: dict) -> tuple:
+    return entry.get("kind"), entry.get("key"), entry.get("sha256")
+
+
+def _tables_by_key(state: _State) -> dict[str, list[dict]]:
+    """Owned trust-table entries per key. An interrupted reinstall leaves two for one
+    key, the earlier table and the planned one; either hash marks the table as cairn's."""
+    tables: dict[str, list[dict]] = {}
+    for entry in state.entries("config_toml_table"):
+        tables.setdefault(entry["key"], []).append(entry)
+    return tables
 
 
 def _load(*, strict: bool = True, need_config: bool = True) -> _State:
@@ -138,7 +181,7 @@ def _load(*, strict: bool = True, need_config: bool = True) -> _State:
     config.toml that does not parse cannot block removing a v1 registration.
     """
     hooks_path, legacy_path = _paths()
-    receipt = _read_json(receipt_path())
+    receipt = _read_receipt(receipt_path())
     legacy = _read_json(legacy_path)
     if strict and legacy and legacy.get("path") != str(hooks_path):
         raise ValueError(
@@ -223,26 +266,25 @@ def _index_shift(groups: list, removed: list[int]) -> None:
 def _uninstall(*, dry_run: bool) -> list[str]:
     """Remove owned, unchanged entries in reverse order; return dry-run plan lines."""
     hooks_path = _paths()[0]
-    with locked(lock_path(hooks_path, "registration")):
+    # A dry run reads only, so it takes no lock: the lock file is state too.
+    with nullcontext() if dry_run else locked(lock_path(hooks_path, "registration")):
         state = _load(need_config=False)
         plan: list[str] = []
         kept: list[dict] = []
         remove_keys = []
-        for entry in state.entries("config_toml_table"):
-            current = state.config.state.get(entry["key"])
+        for key, entries in _tables_by_key(state).items():
+            current = state.config.state.get(key)
             if current is None:
                 continue
-            if trust.canonical_sha(current) == entry.get("sha256"):
-                remove_keys.append(entry["key"])
+            sha = trust.canonical_sha(current)
+            if any(e["sha256"] == sha for e in entries):
+                remove_keys.append(key)
                 plan.append(
-                    f"would remove {state.config.path}: {trust.table_header(entry['key'])} "
-                    f"(sha256 {entry['sha256']})"
+                    f"would remove {state.config.path}: {trust.table_header(key)} (sha256 {sha})"
                 )
             else:
-                _warn(
-                    f"{_table_label(state, entry['key'])} changed since cairn wrote it; left in place."
-                )
-                kept.append(entry)
+                _warn(f"{_table_label(state, key)} changed since cairn wrote it; left in place.")
+                kept.extend(entries)
         group_entries = state.entries("hooks_json_group")
         group_shas = {e.get("sha256") for e in group_entries}
         groups = trust.session_end_groups(state.data)
@@ -274,6 +316,12 @@ def _uninstall(*, dry_run: bool) -> list[str]:
                 kept_group = True
         if kept_group:
             kept.extend(group_entries)  # their sha256 still marks the group as cairn's
+        elif group_entries and not removed:
+            indexes = ", ".join(sorted({str(e.get("index")) for e in group_entries}))
+            _warn(
+                f"no SessionEnd group in {hooks_path} runs cairn's command any more (cairn wrote "
+                f"group {indexes}); left as it is, and its receipt entry dropped."
+            )
         config_text = trust.edit(state.config, {}, remove_keys) if remove_keys else None
         hooks_changed = len(retained) != len(groups) or any(
             a is not b for a, b in zip(retained, groups, strict=False)
@@ -342,6 +390,9 @@ def _plan_install(
     groups_before = list(hooks.get(EVENT, []))
     commands = state.commands | {command}
     new_group = _group(command)
+    # A v2 receipt owns a group by its sha256; command ownership is for v1 only.
+    group_shas = {e["sha256"] for e in state.entries("hooks_json_group")}
+    group_shas.add(trust.canonical_sha(new_group))
     groups: list = []
     removed: list[int] = []
     index = None
@@ -349,7 +400,18 @@ def _plan_install(
         owned = _owned_handlers(group, commands)
         if not owned:
             groups.append(group)
-        elif owned == len(_handlers(group)) and index is None:
+            continue
+        if (
+            owned == len(_handlers(group))
+            and state.entries("hooks_json_group")
+            and trust.canonical_sha(group) not in group_shas
+        ):
+            raise ValueError(
+                f"SessionEnd group {position} in {state.hooks_path} changed since cairn wrote "
+                "it; cairn changed nothing. Restore or remove that group, then run the "
+                "command again."
+            )
+        if owned == len(_handlers(group)) and index is None:
             index = len(groups)  # replace in place: later groups keep their indexes
             groups.append(new_group)
         elif owned == len(_handlers(group)):
@@ -393,21 +455,21 @@ def _plan_install(
             "The Cairn hook command has a non-ASCII character, and the trust hash is not "
             f"verified for one; trust not written. {trust.MANUAL_STEP}"
         )
-    owned_tables = {e["key"]: e for e in state.entries("config_toml_table")}
+    owned_tables = _tables_by_key(state)
     checked = plan.key if plan.skip is None else None
     if checked is not None:
-        _plan_table(state, plan, owned_tables.get(checked))
-    for key, entry in owned_tables.items():
+        _plan_table(state, plan, owned_tables.get(checked, []))
+    for key, recorded in owned_tables.items():
         if key == checked:
             continue
         current = state.config.state.get(key)
         if current is None:
             continue
-        if trust.canonical_sha(current) == entry.get("sha256"):
+        sha = trust.canonical_sha(current)
+        if any(e["sha256"] == sha for e in recorded):
             plan.remove_keys.append(key)
             plan.lines.append(
-                f"would remove {state.config.path}: {trust.table_header(key)} "
-                f"(sha256 {entry['sha256']})"
+                f"would remove {state.config.path}: {trust.table_header(key)} (sha256 {sha})"
             )
         else:
             _warn(f"{_table_label(state, key)} changed since cairn wrote it; left in place.")
@@ -418,13 +480,14 @@ def _plan_install(
             plan.lines.append(
                 f"would back up {state.config.path} to {state.config.path}{trust.BACKUP_SUFFIX}"
             )
-    plan.lines.append(f"would write {state.receipt_path}")
+    entries = 1 + (plan.table_entry is not None)
+    plan.lines.append(f"would write {state.receipt_path} ({entries} entries)")
     if state.legacy:
         plan.lines.append(f"would remove {state.legacy_path}")
     return plan
 
 
-def _plan_table(state: _State, plan: _Plan, owned: dict | None) -> None:
+def _plan_table(state: _State, plan: _Plan, owned: list[dict]) -> None:
     handler = plan.group["hooks"][0]
     value = trust.trusted_hash(EVENT, handler)
     table = {"trusted_hash": value}
@@ -440,9 +503,10 @@ def _plan_table(state: _State, plan: _Plan, owned: dict | None) -> None:
     }
     header = trust.table_header(plan.key)
     if current == table:
-        if owned is not None and owned.get("sha256") == sha:
-            entry["origin"] = owned.get("origin", "written")
-            entry["replaced"] = owned.get("replaced")
+        match = next((e for e in owned if e["sha256"] == sha), None)
+        if match is not None:
+            entry["origin"] = match.get("origin", "written")
+            entry["replaced"] = match.get("replaced")
         else:
             entry["origin"] = "adopted"
         plan.lines.append(f"unchanged {state.config.path}: {header} (sha256 {sha})")
@@ -456,7 +520,7 @@ def _plan_table(state: _State, plan: _Plan, owned: dict | None) -> None:
         and set(current) == {"trusted_hash"}
         and isinstance(current["trusted_hash"], str)
     ):
-        ours = owned is not None and trust.canonical_sha(current) == owned.get("sha256")
+        ours = any(e["sha256"] == trust.canonical_sha(current) for e in owned)
         entry["replaced"] = None if ours else current["trusted_hash"]
         plan.set_tables[plan.key] = value
         plan.lines.append(
@@ -482,7 +546,7 @@ def _install(config: CairnConfig, *, dry_run: bool, want_trust: bool) -> str:
     command = _command(config)
     version, reason = trust.codex_version() if want_trust else (None, "")
     hooks_path = _paths()[0]
-    with locked(lock_path(hooks_path, "registration")):
+    with nullcontext() if dry_run else locked(lock_path(hooks_path, "registration")):
         state = _load()
         plan = _plan_install(state, command, version, reason, want_trust)
         if dry_run:
@@ -508,17 +572,16 @@ def _install(config: CairnConfig, *, dry_run: bool, want_trust: bool) -> str:
             if plan.trusted_hash is not None:
                 return f"Cairn fallback in {hooks_path} is already registered and trusted; nothing changed."
             return _registered_untrusted(hooks_path, plan)
-        # Save ownership first: an interrupted install can always be removed.
+        # Save ownership first: an interrupted install can always be removed. The
+        # earlier entries stay until the installed receipt, so either version of a
+        # replaced group or table is still cairn's after a crash.
+        planned = {_identity(e) for e in entries}
+        previous = [e for e in state.receipt.get("entries", []) if _identity(e) not in planned]
         prepared = _receipt(
             state,
             status="prepared",
             commands=state.commands | {command},
-            entries=[{**e, "pending": True} for e in entries]
-            + [
-                {**e, "pending": True}
-                for e in state.entries("config_toml_table")
-                if e["key"] in plan.remove_keys
-            ],
+            entries=[{**e, "pending": True} for e in entries + previous],
             version=version,
         )
         _write_receipt(state, prepared)

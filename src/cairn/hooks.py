@@ -333,16 +333,31 @@ def install_launcher(config: CairnConfig) -> Path:
     The file is POSIX ``sh`` assignments (values quoted with :func:`shlex.quote`), so
     the bundled launcher can source it without needing any Python to bootstrap.
     """
+    content = launcher_content(config)
+    for path in launcher_paths():
+        atomic_write(path, content)
+    return launcher_path()
+
+
+def launcher_content(config: CairnConfig) -> str:
     environment = background_environment(config)
     values = {
         "CAIRN_PYTHON": sys.executable,
         "CAIRN_PATH": environment.pop("PATH"),
         **environment,
     }
-    content = "".join(f"export {k}={shlex.quote(v)}\n" for k, v in values.items())
+    return "".join(f"export {k}={shlex.quote(v)}\n" for k, v in values.items())
+
+
+def launcher_plan(config: CairnConfig) -> list[str]:
+    """``--dry-run`` lines for every file :func:`install_launcher` writes."""
+    content = launcher_content(config)
+    sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    lines = []
     for path in launcher_paths():
-        atomic_write(path, content)
-    return launcher_path()
+        same = path.exists() and path.read_text(encoding="utf-8") == content
+        lines.append(f"{'unchanged' if same else 'would write'} {path} (sha256 {sha})")
+    return lines
 
 
 def compact_status(report: dict, show_all: bool) -> dict:
@@ -466,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.no_trust and args.harness != "codex":
                 raise ValueError("--no-trust applies to --harness codex")
             if args.dry_run:
-                print(f"would write {launcher_path()}")
+                print("\n".join(launcher_plan(config)))
             else:
                 print(install_launcher(config))
             if args.harness == "codex":

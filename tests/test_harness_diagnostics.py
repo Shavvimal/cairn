@@ -91,8 +91,17 @@ class TestCodexTrustDoctor(unittest.TestCase):
             hooks_path.write_text(json.dumps({"hooks": {"SessionEnd": [{"hooks": [handler]}]}}))
             key = f"{hooks_path}:session_end:0:0"
             good = trust.trusted_hash("SessionEnd", handler)
-            entry = {"kind": "config_toml_table", "key": key, "trusted_hash": good}
-            receipt = {"hooks_path": str(hooks_path), "commands": ["echo cairn"]}
+            entry = {
+                "kind": "config_toml_table",
+                "key": key,
+                "trusted_hash": good,
+                "sha256": trust.canonical_sha({"trusted_hash": good}),
+            }
+            receipt = {
+                "receipt_version": 2,
+                "hooks_path": str(hooks_path),
+                "commands": ["echo cairn"],
+            }
             header = trust.table_header(key)
             cases = [
                 (

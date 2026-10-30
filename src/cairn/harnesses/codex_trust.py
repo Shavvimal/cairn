@@ -19,9 +19,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import stat
 import subprocess
+import tempfile
 import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -301,20 +303,56 @@ def edit(snapshot: ConfigSnapshot, set_tables: dict[str, str], remove: Iterable[
     return text
 
 
+def _stage(path: Path, text: str, mode: int | None) -> str:
+    """Write ``text`` to a fsynced temporary file beside ``path``; return its name."""
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temporary, mode)
+    except BaseException:
+        os.unlink(temporary)
+        raise
+    return temporary
+
+
 def write_config(snapshot: ConfigSnapshot, text: str) -> None:
     """Back up the original bytes, then replace the file through any symlink, keeping
     its mode. Refuses when the file changed since :func:`read_config`; Codex does not
-    take cairn's lock."""
-    current, _ = _fingerprint(snapshot.target)
-    if current != snapshot.fingerprint:
-        raise ValueError(
-            f"{snapshot.path} changed while cairn was writing; cairn changed nothing. "
-            "Run the command again."
-        )
-    if snapshot.exists:
-        backup = snapshot.target.with_name(snapshot.target.name + BACKUP_SUFFIX)
-        atomic_write(backup, snapshot.text, mode=snapshot.mode)
-    atomic_write(snapshot.target, text, mode=snapshot.mode)
+    take cairn's lock.
+
+    Both files are staged and fsynced first, and the race check runs after that, just
+    before the two renames. A Codex save that lands between that check and the rename
+    of the config is still lost; no lock-free check can close that last window.
+    """
+    target = snapshot.target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup = target.with_name(target.name + BACKUP_SUFFIX)
+    staged: list[tuple[str, Path]] = []
+    try:
+        if snapshot.exists:
+            staged.append((_stage(backup, snapshot.text, snapshot.mode), backup))
+        staged.append((_stage(target, text, snapshot.mode), target))
+        current, _ = _fingerprint(target)
+        if current != snapshot.fingerprint:
+            raise ValueError(
+                f"{snapshot.path} changed while cairn was writing; cairn changed nothing. "
+                "Run the command again."
+            )
+        for temporary, destination in staged:
+            os.replace(temporary, destination)
+        directory = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        for temporary, _ in staged:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 def write_json(path: Path, text: str) -> None:
@@ -347,11 +385,7 @@ def trust_state(
     version_ok: bool,
 ) -> list[dict]:
     """Per cairn-owned SessionEnd group: key, state and who wrote the trusted table."""
-    written = {
-        entry.get("key"): entry
-        for entry in receipt.get("entries", [])
-        if entry.get("kind") == "config_toml_table"
-    }
+    tables = [e for e in receipt.get("entries", []) if e.get("kind") == "config_toml_table"]
     groups = []
     for index, group in enumerate(session_end_groups(hooks_data)):
         if not isinstance(group, dict):
@@ -363,11 +397,14 @@ def trust_state(
             expected = trusted_hash("SessionEnd", handler)
             table = config_state.get(key)
             state = table_state(table, expected, version_ok)
-            entry = written.get(key) or {}
             origin = None
             if state == "trusted":
-                cairn_wrote = (
-                    entry.get("trusted_hash") == expected and entry.get("origin") == "written"
+                # An interrupted reinstall leaves two receipt entries for one key.
+                cairn_wrote = any(
+                    e.get("key") == key
+                    and e.get("trusted_hash") == expected
+                    and e.get("origin") == "written"
+                    for e in tables
                 )
                 origin = "written" if cairn_wrote else "codex"
             groups.append({"index": index, "key": key, "state": state, "origin": origin})

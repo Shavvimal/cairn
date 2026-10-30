@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import tomllib
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -60,6 +61,32 @@ class TestTrustHash(StoreFixture):
         for candidate in outside:
             self.assertFalse(trust.in_range(candidate), candidate)
         self.assertEqual(trust.range_text(), ">= 0.165.0, < 0.166.0")
+
+    def test_version_probe_reports_each_failure(self):
+        probe = "cairn.harnesses.codex_trust.run_capped"
+        done = subprocess.CompletedProcess
+        cases = [
+            (FileNotFoundError(), (None, "codex is not on PATH")),
+            (
+                subprocess.TimeoutExpired(["codex"], 5),
+                (None, "codex --version did not answer in 5s"),
+            ),
+            (done([], 2, "", ""), (None, "codex --version exited 2")),
+            (
+                done([], 0, "codex-cli dev\n", ""),
+                (None, "unrecognised codex --version output 'codex-cli dev'"),
+            ),
+            (done([], 0, "codex-cli 0.165.0\n", ""), ("0.165.0", "")),
+        ]
+        for outcome, expected in cases:
+            with self.subTest(expected=expected):
+                kwargs = (
+                    {"side_effect": outcome}
+                    if isinstance(outcome, BaseException)
+                    else {"return_value": outcome}
+                )
+                with patch(probe, **kwargs):
+                    self.assertEqual(trust.codex_version(), expected)
 
 
 class TrustFixture(StoreFixture):
@@ -328,6 +355,121 @@ class TestInstall(TrustFixture):
         self.assertNotIn(self.key, self.state())
         self.assertFalse(self.receipt.exists())
 
+    def test_interrupted_reinstall_keeps_both_versions_owned(self):
+        with patch.object(registration, "_command", return_value="echo cairn-a"):
+            self.run_configure()
+        for crash_in in ("write_json", "write_config"):
+            with self.subTest(crash_in=crash_in):
+                before = {p: p.read_bytes() for p in (self.hooks_path, self.toml)}
+                with (
+                    patch.object(registration, "_command", return_value="echo cairn-b"),
+                    patch.object(trust, crash_in, side_effect=OSError("crash")),
+                    self.assertRaises(OSError),
+                ):
+                    self.run_configure()
+                self.assertEqual(self.receipt_data()["status"], "prepared")
+                if crash_in == "write_json":
+                    self.assertEqual({p: p.read_bytes() for p in before}, before)
+                # Uninstall still knows both the old and the planned entries as cairn's.
+                _, warning = self.run_configure(remove=True)
+                self.assertNotIn("changed since cairn wrote it", warning)
+                self.assertEqual(json.loads(self.hooks_path.read_text())["hooks"]["SessionEnd"], [])
+                self.assertNotIn(self.key, self.state())
+                self.assertFalse(self.receipt.exists())
+                with patch.object(registration, "_command", return_value="echo cairn-a"):
+                    self.run_configure()
+
+    def test_reinstall_after_interrupt_finishes_the_job(self):
+        with patch.object(registration, "_command", return_value="echo cairn-a"):
+            self.run_configure()
+        with (
+            patch.object(registration, "_command", return_value="echo cairn-b"),
+            patch.object(trust, "write_config", side_effect=OSError("crash")),
+            self.assertRaises(OSError),
+        ):
+            self.run_configure()
+        with patch.object(registration, "_command", return_value="echo cairn-b"):
+            _, warning = self.run_configure()
+        self.assertEqual(warning, "")
+        receipt = self.receipt_data()
+        self.assertEqual(receipt["status"], "installed")
+        self.assertEqual(len(receipt["entries"]), 2)
+        self.assertIsNone(receipt["entries"][1]["replaced"])
+        self.assertEqual(
+            self.state()[self.key]["trusted_hash"],
+            trust.trusted_hash("SessionEnd", cairn_handler("echo cairn-b")),
+        )
+
+    def test_reinstall_refuses_an_edited_group(self):
+        self.run_configure()
+        for edit in ({"timeout": 99}, {"command": "echo edited"}):
+            with self.subTest(edit=edit):
+                data = json.loads(self.hooks_path.read_text())
+                group = data["hooks"]["SessionEnd"][0]
+                original = json.loads(json.dumps(group))
+                group["matcher"] = "x"
+                group["hooks"][0].update(edit)
+                self.hooks_path.write_text(json.dumps(data))
+                snapshot = {p: p.read_bytes() for p in (self.hooks_path, self.toml, self.receipt)}
+                if "command" in edit:
+                    # No longer cairn's command: a foreign group, and cairn appends its own.
+                    self.run_configure()
+                    groups = json.loads(self.hooks_path.read_text())["hooks"]["SessionEnd"]
+                    self.assertEqual(groups[0], group)
+                    self.assertEqual(groups[1]["hooks"][0]["command"], self.command())
+                    continue
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"SessionEnd group 0 in {self.hooks_path} changed since cairn wrote it; "
+                    "cairn changed nothing. Restore or remove that group",
+                ):
+                    self.run_configure()
+                self.assertEqual({p: p.read_bytes() for p in snapshot}, snapshot)
+                data["hooks"]["SessionEnd"][0] = original
+                self.hooks_path.write_text(json.dumps(data))
+
+    def test_concurrent_change_while_staging_refuses(self):
+        self.toml.write_text("[tui]\ntheme = 'dark'\n")
+        stage = trust._stage
+        calls: list[Path] = []
+
+        def codex_saves_during_backup(path, text, mode):
+            calls.append(path)
+            if len(calls) == 1:
+                self.toml.write_text("[tui]\ntheme = 'light'\n")
+            return stage(path, text, mode)
+
+        with (
+            patch.object(trust, "_stage", codex_saves_during_backup),
+            self.assertRaisesRegex(ValueError, "changed while cairn was writing"),
+        ):
+            self.run_configure()
+        self.assertEqual(calls[0].name, "config.toml.cairn-bak")
+        self.assertEqual(self.toml.read_text(), "[tui]\ntheme = 'light'\n")
+        self.assertFalse(self.toml.with_name("config.toml.cairn-bak").exists())
+        self.assertEqual(sorted(p.name for p in self.home.iterdir() if p.name.startswith(".")), [])
+
+    def test_malformed_receipt_is_a_flat_error(self):
+        cases = {
+            "[1]": "is not a JSON object",
+            "{": "is not valid JSON",
+            '{"receipt_version": 2, "entries": [{"kind": "x"}]}': "entry 0 has no known kind",
+            '{"receipt_version": 2, "entries": [{"kind": "config_toml_table", "sha256": "a"}]}': (
+                "entry 0 has no key"
+            ),
+            '{"receipt_version": 3}': "receipt_version 3, expected 2",
+        }
+        for text, detail in cases.items():
+            with self.subTest(text=text):
+                self.receipt.write_text(text)
+                err = io.StringIO()
+                with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                    code = hooks.main(["uninstall", "--harness", "codex"])
+                self.assertEqual(code, 1)
+                self.assertIn(str(self.receipt), err.getvalue())
+                self.assertIn(detail, err.getvalue())
+                self.assertIn(detail, registration.trust_report()["error"])
+
 
 class TestTomlEdit(TrustFixture):
     def test_toml_edit_preserves_foreign_bytes(self):
@@ -441,6 +583,19 @@ class TestUninstall(TrustFixture):
         self.assertIn("changed since cairn wrote it", warning)
         self.assertEqual(json.loads(self.hooks_path.read_text()), data)
 
+    def test_uninstall_warns_when_the_command_was_edited(self):
+        self.run_configure()
+        data = json.loads(self.hooks_path.read_text())
+        data["hooks"]["SessionEnd"][0]["hooks"][0]["command"] = "echo mine now"
+        self.hooks_path.write_text(json.dumps(data))
+        _, warning = self.run_configure(remove=True)
+        self.assertIn(
+            f"warning: no SessionEnd group in {self.hooks_path} runs cairn's command any more "
+            "(cairn wrote group 0); left as it is, and its receipt entry dropped.",
+            warning,
+        )
+        self.assertEqual(json.loads(self.hooks_path.read_text()), data)
+
     def test_uninstall_warns_on_index_shift(self):
         self.run_configure()
         data = json.loads(self.hooks_path.read_text())
@@ -453,30 +608,36 @@ class TestUninstall(TrustFixture):
             warning,
         )
 
+    def tree(self) -> dict[Path, bytes | None]:
+        return {p: (p.read_bytes() if p.is_file() else None) for p in sorted(self.root.rglob("*"))}
+
     def test_dry_run_writes_nothing(self):
         self.toml.write_text("[tui]\nx = 1\n")
+        before = self.tree()
         out = io.StringIO()
         with redirect_stdout(out):
             code = hooks.main(["install", "--harness", "codex", "--dry-run"])
         self.assertEqual(code, 0)
-        self.assertFalse(hooks.launcher_path().exists())
-        self.assertFalse(self.hooks_path.exists())
-        self.assertFalse(self.receipt.exists())
-        self.assertEqual(self.toml.read_text(), "[tui]\nx = 1\n")
+        self.assertEqual(self.tree(), before)  # no lock file, launcher, receipt or edit
         plan = out.getvalue()
-        self.assertIn(f"would write {hooks.launcher_path()}", plan)
+        launchers = hooks.launcher_paths()
+        self.assertEqual(len(launchers), 2)  # XDG copy and the default-home discovery copy
+        for launcher in launchers:
+            self.assertIn(f"would write {launcher} (sha256 ", plan)
         self.assertIn(f"would write {self.hooks_path}: SessionEnd group 0 (sha256 ", plan)
         self.assertIn(f"trusted_hash = {self.expected_hash()} (sha256 ", plan)
-        self.assertIn(f"would write {self.receipt}", plan)
+        self.assertIn(f"would write {self.receipt} (2 entries)", plan)
 
         self.run_configure()
-        snapshot = {p: p.read_bytes() for p in (self.hooks_path, self.toml, self.receipt)}
+        lock = registration.lock_path(self.hooks_path, "registration")
+        lock.unlink()
+        before = self.tree()
         out = io.StringIO()
         with redirect_stdout(out):
             hooks.main(["uninstall", "--harness", "codex", "--dry-run"])
         self.assertIn(f"would remove {self.home.resolve() / 'config.toml'}: ", out.getvalue())
         self.assertIn(f"would remove {self.hooks_path}: SessionEnd group 0", out.getvalue())
-        self.assertEqual({p: p.read_bytes() for p in snapshot}, snapshot)
+        self.assertEqual(self.tree(), before)
 
     def test_flags_apply_to_codex_only(self):
         err = io.StringIO()
@@ -502,3 +663,17 @@ class TestTrustReport(TrustFixture):
             [{"index": 0, "key": self.key, "state": "trusted", "origin": "written"}],
         )
         self.assertFalse(Path(os.environ["HOME"], ".codex").exists())
+
+    def test_cli_status_reports_host_hooks_and_codex_trust(self):
+        self.run_configure()
+        listed = [{"command": self.command(), "trustStatus": "trusted"}]
+        self.inspect_mock.return_value = listed
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = hooks.main(["status", "--harness", "codex"])
+        self.assertEqual(code, 0)
+        report = json.loads(out.getvalue())
+        self.assertEqual(report["host_hooks"], listed)
+        self.assertEqual(report["codex_trust"]["groups"][0]["state"], "trusted")
+        self.assertEqual(report["codex_trust"]["codex_version"], "0.165.0")
+        self.assertIn("codex_trust (read from config.toml)", report["trust"])
