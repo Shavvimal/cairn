@@ -1,0 +1,11 @@
+{"intent": "have codex take a look at this diff and review it", "expected": "invoke-codex"}
+{"intent": "can you ask the codex agent whether this migration is safe", "expected": "invoke-codex"}
+{"intent": "invoke a headless codex run on the plan", "expected": "invoke-codex"}
+{"intent": "run this prompt through codex in the background", "expected": "invoke-codex"}
+{"intent": "get codex to audit the hook installer", "expected": "invoke-codex"}
+{"intent": "I want a second opinion on the schema from codex", "expected": "invoke-codex"}
+{"intent": "resume the codex thread from the review earlier", "expected": "invoke-codex"}
+{"intent": "use astra on high effort to check the refactor", "expected": "invoke-codex"}
+{"intent": "review this with codex before I commit", "expected": "invoke-codex"}
+{"intent": "ask both claude and codex to review the plan", "expected": "invoke-codex", "ambiguous_with": ["invoke-claude"]}
+{"intent": "get a second opinion on this plan", "expected": null, "note": "no peer named: no invoke skill's quoted triggers match; routing rests on the unquoted cross-model clause"}

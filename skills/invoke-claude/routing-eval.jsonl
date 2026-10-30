@@ -1,0 +1,9 @@
+{"intent": "have claude look at the change and review it before I merge", "expected": "invoke-claude"}
+{"intent": "ask the claude agent if this plan holds up", "expected": "invoke-claude"}
+{"intent": "invoke a fresh claude run on the diff", "expected": "invoke-claude"}
+{"intent": "I'd like a second opinion from a fresh claude on this design", "expected": "invoke-claude"}
+{"intent": "resume that review claude did this morning", "expected": "invoke-claude"}
+{"intent": "get claude code to review the tests headlessly", "expected": "invoke-claude"}
+{"intent": "ask a fresh claude to poke holes in this migration", "expected": "invoke-claude"}
+{"intent": "send the plan to claude for review", "expected": "invoke-claude"}
+{"intent": "let claude pick up and resume where the peer review stopped", "expected": "invoke-claude"}
