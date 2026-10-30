@@ -76,12 +76,17 @@ CANONICAL_ROW_RE: Final = re.compile(
     r" \| (?P<source>(?:[^|\\]|\\.)*) \|$"
 )
 CELL_RE: Final = re.compile(r"\s*((?:[^|\\]|\\.)*?)\s*\|")
-# The struck claim is any text without ``~~``; it may start or end with one ``~``.
+# The struck claim is any text without ``~~``; it may start or end with one ``~``
+# (``Store files in ~`` renders as ``~~Store files in ~~~``, a claim of exactly ``~``
+# as ``~~~~~``).
 STRUCK_RE: Final = re.compile(r"^~~(?P<claim>~?(?:[^~]~?)*)~~(?: (?P<marker>\S.*))?$")
 # Row numbers have at most nine digits, so ``int()`` never meets an oversized string.
 SUPERSEDED_RE: Final = re.compile(r"^superseded by #(?P<by>[1-9][0-9]{0,8})$")
 # ``withdrawn: <reason>`` as the whole marker or after ``, `` at its end.
-WITHDRAWN_RE: Final = re.compile(r"(?:^|, )withdrawn: (?P<reason>[a-z_]+)$")
+# Only the closed vocabulary: ``withdrawn: wrong`` written by hand is an ordinary marker.
+WITHDRAWN_RE: Final = re.compile(
+    rf"(?:^|, )withdrawn: (?P<reason>{'|'.join(withdrawals.REASONS)})$"
+)
 SOURCE_RE: Final = re.compile(
     r"^(?:supersedes #(?P<supersedes>[1-9][0-9]{0,8})(?![0-9]))?\s*(?P<rest>.*)$"
 )
@@ -672,9 +677,13 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
             raise MissingRow(target)
         if old.struck:
             raise DecisionError(f"row #{target} is already struck ({old.marker or 'no marker'})")
+        struck = replace(old, struck=True, suffix=f"superseded by #{number}")
+        if parse_row(render_row(struck), old.line) != struck:
+            raise DecisionError(
+                f"row #{target} cannot be struck in a form that reads back; edit it by hand"
+            )
         check(number)
         struck_number.append(target)
-        struck = replace(old, struck=True, suffix=f"superseded by #{number}")
         cell = f"supersedes #{target}" + (f" {cites}" if cites else "")
         new = DecisionRow(
             number,
@@ -709,9 +718,12 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
             for unwithdrawal in owed:
                 unwithdrawal.commit()
         except OSError as exc:
+            done = f"added #{written.rows[-1].number}"
+            if struck_number:
+                done = f"struck #{struck_number[0]} and {done}"
             print(
-                f"Error: added #{written.rows[-1].number} but could not record it as "
-                f"unwithdrawn: {exc}; the claim stays withdrawn",
+                f"Error: {done} but could not record it as unwithdrawn: {exc}; "
+                "the claim stays withdrawn",
                 file=sys.stderr,
             )
             return 1
@@ -732,6 +744,16 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
         prefix = f"Struck #{struck_number[0]}; added" if struck_number else "Added"
         print(f"{prefix} #{row.number} to {short}: {row.claim}")
     return 0
+
+
+def _numbers(rows: list[DecisionRow]) -> str:
+    """The row numbers: ``1-5`` when contiguous, else ``1, 3, 7``; ``1`` for one row."""
+    numbers = sorted(row.number for row in rows)
+    if len(numbers) == 1:
+        return str(numbers[0])
+    if numbers[-1] - numbers[0] == len(numbers) - 1:
+        return f"{numbers[0]}-{numbers[-1]}"
+    return ", ".join(map(str, numbers))
 
 
 def cmd_forget(source: ConversationSource, session_id: str, args: argparse.Namespace) -> int:
@@ -758,17 +780,24 @@ def cmd_forget(source: ConversationSource, session_id: str, args: argparse.Names
             raise DecisionError(f"no decisions table in {short()}")
         row = next((r for r in rows if r.number == number), None)
         if row is None:
-            numbers = sorted(r.number for r in rows)
-            raise DecisionError(
-                f"no decision row #{number} in {short()} (rows: {numbers[0]}-{numbers[-1]})"
-            )
+            raise DecisionError(f"no decision row #{number} in {short()} (rows: {_numbers(rows)})")
         try:
             fp: str | None = withdrawals.fingerprint(row.claim)
         except withdrawals.EmptyClaim:
             fp = None
         outcome["fingerprint"] = fp
         if row.withdrawn_reason is not None:
-            outcome.update(already=True, appended=False, reason=row.withdrawn_reason)
+            # The strike is there; make sure the ledger agrees (it can have been
+            # deleted, or lifted by a forced decide elsewhere).
+            appended = fp is not None and withdrawals.withdraw(
+                ledger,
+                fp,
+                source=source.source_name,
+                session_id=native[0],
+                row=number,
+                reason=row.withdrawn_reason,
+            )
+            outcome.update(already=True, appended=appended, reason=row.withdrawn_reason)
             return rows
         if fp is None:
             raise DecisionError(
@@ -1038,8 +1067,8 @@ def run_recall(args: argparse.Namespace, store: SessionStore) -> int:
     project = args.project or (None if args.all_projects else os.getcwd())
     if project:
         records = [r for r in records if r.matches_project(project)]
+    state = withdrawals.load(withdrawals.ledger_path(store.config))  # fail fast on a bad ledger
     found, problems = collect(records)
-    state = withdrawals.load(withdrawals.ledger_path(store.config))
     selected = []
     for record, row in found:
         withdrawn = withdrawal(row, state)

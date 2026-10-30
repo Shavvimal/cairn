@@ -263,9 +263,11 @@ def _append(path: Path, entry: dict) -> None:
         size = os.fstat(fd).st_size
         if size and os.pread(fd, 1, size - 1) != b"\n":
             content = os.pread(fd, size, 0)
-            os.ftruncate(fd, content.rfind(b"\n") + 1)
+            size = content.rfind(b"\n") + 1
+            os.ftruncate(fd, size)
         written = os.write(fd, payload)
         if written != len(payload):
+            os.ftruncate(fd, size)  # leave no partial line behind
             raise OSError(f"short write to {path}: {written} of {len(payload)} bytes")
         os.fsync(fd)
     finally:
@@ -378,6 +380,8 @@ def guard(
                 file=sys.stderr,
             )
             return False, None
+        # Fail before the document write if the record could never be appended.
+        os.close(os.open(path, os.O_WRONLY | os.O_APPEND))
         hold.enter_context(stack.pop_all())
     owed = record(
         "unwithdrawn", fingerprint=fp, source=source, session_id=session_id, row=row, reason=None

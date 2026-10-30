@@ -12,6 +12,7 @@ import importlib
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import unittest
@@ -265,6 +266,82 @@ class TestForget(WithdrawalFixture):
         self.assertEqual(path.read_bytes(), before)
         self.assertFalse(self.ledger.exists())
 
+    def test_unknown_withdrawn_marker_is_an_ordinary_strike(self):
+        rows = "| 2 | ~~Use the queue~~ withdrawn: wrong | decision | high | 2026-10-28 |  |  |"
+        path = self.write_doc("a.md", doc(rows=rows))
+        self.assertIsNone(decisions.parse(path.read_text())[0].withdrawn_reason)
+        code, out, _ = self.run_verb("forget", "2", "--reason", "wrong_source", "--session-id", SID)
+        self.assertEqual(
+            (code, out), (0, "Withdrew row #2 in claude:3f2a9c1e (reason: wrong_source)\n")
+        )
+        self.assertIn(
+            "~~Use the queue~~ withdrawn: wrong, withdrawn: wrong_source |", path.read_text()
+        )
+        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(self.run_verb("decide", "Use the queue", "--session-id", SID)[0], 3)
+
+    def test_forget_struck_row_restores_a_lost_ledger_record(self):
+        path = self.write_doc("a.md", doc(rows=ROWS))
+        self.run_verb("forget", "1", "--reason", "hallucination", "--session-id", SID)
+        after = path.read_bytes()
+        self.ledger.unlink()
+        code, out, _ = self.run_verb(
+            "forget", "1", "--reason", "stale", "--json", "--session-id", SID
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(
+            (data["already_withdrawn"], data["appended"], data["reason"]),
+            (True, True, "hallucination"),
+        )
+        self.assertEqual(path.read_bytes(), after)
+        self.assertEqual([r["reason"] for r in self.records()], ["hallucination"])
+        # A second run finds both the strike and the record: nothing to add.
+        code, out, _ = self.run_verb(
+            "forget", "1", "--reason", "stale", "--json", "--session-id", SID
+        )
+        self.assertEqual((json.loads(out)["appended"], len(self.records())), (False, 1))
+        self.assertEqual(
+            self.run_verb("decide", "Use Postgres 16 for the queue.", "--session-id", SID)[0], 3
+        )
+
+    def test_forget_quiet_prints_nothing(self):
+        self.write_doc("a.md", doc(rows=ROWS))
+        for _ in range(2):  # strike, then already withdrawn
+            self.assertEqual(
+                self.run_verb("forget", "1", "--reason", "stale", "-q", "--session-id", SID),
+                (0, "", ""),
+            )
+
+    def test_forget_crash_repair_json(self):
+        self.write_doc("a.md", doc(rows=ROWS))
+        self.seed(self.entry("Use Postgres 16 for the queue."))
+        code, out, _ = self.run_verb(
+            "forget", "1", "--reason", "stale", "--json", "--session-id", SID
+        )
+        data = json.loads(out)
+        self.assertEqual((code, data["already_withdrawn"], data["appended"]), (0, False, False))
+
+    def test_forget_missing_row_lists_numbers(self):
+        for rows, shown in (
+            ("| 1 | A | decision | high | 2026-10-28 |  |  |", "1"),
+            (
+                "| 1 | A | decision | high | 2026-10-28 |  |  |\n"
+                "| 3 | B | decision | high | 2026-10-28 |  |  |\n"
+                "| 7 | C | decision | high | 2026-10-28 |  |  |",
+                "1, 3, 7",
+            ),
+        ):
+            with self.subTest(shown=shown):
+                self.write_doc("a.md", doc(rows=rows))
+                code, _, err = self.run_verb(
+                    "forget", "2", "--reason", "stale", "--session-id", SID
+                )
+                self.assertEqual(
+                    (code, err),
+                    (1, f"Error: no decision row #2 in claude:3f2a9c1e (rows: {shown})\n"),
+                )
+
     def test_forget_unknown_row_exits_1(self):
         path = self.write_doc("a.md", doc(rows=ROWS))
         before = path.read_bytes()
@@ -342,18 +419,26 @@ class TestForget(WithdrawalFixture):
     def test_short_write_fails_and_leaves_document_unchanged(self):
         path = self.write_doc("a.md", doc(rows=ROWS))
         before = path.read_bytes()
-        with mock.patch.object(withdrawals.os, "write", return_value=3):
+        self.run_verb("forget", "2", "--reason", "stale", "--session-id", SID)
+        before, ledger = path.read_bytes(), self.ledger.read_bytes()
+        real_write = os.write
+
+        def short(fd: int, data: bytes) -> int:
+            return real_write(fd, data[:3])
+
+        with mock.patch.object(withdrawals.os, "write", side_effect=short):
             code, _, err = self.run_verb("forget", "1", "--reason", "stale", "--session-id", SID)
         self.assertEqual(code, 1)
         self.assertRegex(err, r"^Error: short write to .*withdrawn\.jsonl: 3 of [0-9]+ bytes\n$")
         self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.ledger.read_bytes(), ledger)  # no partial line left
 
     def test_append_fsyncs_file_then_directory_on_create(self):
         calls: list[str] = []
         real_fsync, real_write = os.fsync, os.write
 
         def fsync(fd: int) -> None:
-            calls.append("dir" if os.path.isdir(f"/dev/fd/{fd}") else "file")
+            calls.append("dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
             real_fsync(fd)
 
         def write(fd: int, data: bytes) -> int:
@@ -507,6 +592,72 @@ class TestGuard(WithdrawalFixture):
         self.assertEqual((code, seen), (0, [True]))
         self.assertEqual([r["event"] for r in self.records()], ["withdrawn", "unwithdrawn"])
 
+    def test_forced_add_with_read_only_ledger_writes_nothing(self):
+        path = self.forget_first_row()
+        before, ledger = path.read_bytes(), self.ledger.read_bytes()
+        self.ledger.chmod(0o400)
+        self.addCleanup(self.ledger.chmod, 0o600)
+        for argv in (
+            ("decide", "Use Postgres 16 for the queue"),
+            ("supersede", "2", "Use Postgres 16 for the queue"),
+        ):
+            with self.subTest(verb=argv[0]):
+                code, out, err = self.run_verb(*argv, "--force", "--session-id", SID)
+                self.assertEqual((code, out), (1, ""))
+                self.assertTrue(err.startswith("Error: [Errno 13]"), err)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(self.ledger.read_bytes(), ledger)
+
+    def test_supersede_force_strikes_and_records_new_row(self):
+        path = self.forget_first_row()
+        code, out, err = self.run_verb(
+            "supersede", "2", "Use Postgres 16 for the queue", "--force", "--session-id", SID
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            out, "Struck #2; added #6 to claude:3f2a9c1e: Use Postgres 16 for the queue\n"
+        )
+        rows = decisions.parse(path.read_text())
+        self.assertEqual((rows[1].superseded_by, rows[-1].number), (6, 6))
+        last = self.records()[-1]
+        self.assertEqual((last["event"], last["row"]), ("unwithdrawn", 6))
+
+    def test_failed_append_after_supersede_names_struck_row(self):
+        self.forget_first_row()
+        with mock.patch.object(withdrawals, "_append", side_effect=PermissionError("denied")):
+            code, _, err = self.run_verb(
+                "supersede", "2", "Use Postgres 16 for the queue", "--force", "--session-id", SID
+            )
+        self.assertEqual(
+            (code, err),
+            (
+                1,
+                "Error: struck #2 and added #6 but could not record it as unwithdrawn: "
+                "denied; the claim stays withdrawn\n",
+            ),
+        )
+
+    def test_supersede_of_a_tilde_claim_reads_back(self):
+        path = self.write_doc("a.md", doc(rows=ROWS))
+        self.assertEqual(self.run_verb("decide", "~", "--session-id", SID)[0], 0)
+        self.assertEqual(self.run_verb("supersede", "6", "Home", "--session-id", SID)[0], 0)
+        rows = decisions.parse(path.read_text())
+        self.assertEqual((rows[5].claim, rows[5].superseded_by), ("~", 7))
+        self.assertEqual(
+            self.run_verb("forget", "7", "--reason", "stale", "--session-id", SID)[0], 0
+        )
+
+    def test_supersede_refuses_a_strike_that_does_not_read_back(self):
+        path = self.write_doc("a.md", doc(rows=ROWS))
+        before = path.read_bytes()
+        with mock.patch.object(decisions, "render_row", return_value="| 2 | x~~y | fact |"):
+            code, _, err = self.run_verb("supersede", "2", "New", "--session-id", SID)
+        self.assertEqual(
+            (code, err),
+            (1, "Error: row #2 cannot be struck in a form that reads back; edit it by hand\n"),
+        )
+        self.assertEqual(path.read_bytes(), before)
+
     def test_withdraw_after_unwithdraw_refuses_again(self):
         self.forget_first_row()
         self.run_verb("decide", "Use Postgres 16 for the queue", "--force", "--session-id", SID)
@@ -625,6 +776,48 @@ class TestReading(WithdrawalFixture):
                 code, _, err = self.decisions("--json")
                 self.assertEqual(code, 1)
                 self.assertIn(f"line 2 is not a valid withdrawal record: {problem}", err)
+
+    def test_bad_ledger_fails_digest_and_forget_and_before_table_warnings(self):
+        self.write_doc("bad.md", doc("ffffffff-0006", rows="| x | broken |"))
+        with self.ledger.open("a") as handle:
+            handle.write("not json\n")
+        code, _, err = self.decisions("--json")
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith(f"Error: {self.ledger} line 2 "), err)
+        self.assertNotIn("Warning", err)
+        code, _, err = self.recall(
+            "digest", "2026-10-30", "--all-projects", "--json", "--out", str(self.root / "out")
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("line 2 is not a valid withdrawal record", err)
+        before = self.path.read_bytes()
+        code, _, err = self.run_verb("forget", "1", "--reason", "stale", "--session-id", SID)
+        self.assertEqual(code, 1)
+        self.assertIn("line 2 is not a valid withdrawal record", err)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_bad_identity_fields_fail_loud(self):
+        good = json.dumps(self.records()[0])
+        for changes, problem in (
+            ({"source": ""}, "source must be a non-empty string"),
+            ({"session_id": 7}, "session_id must be a non-empty string"),
+            ({"row": 0}, "row must be an integer of 1 or greater, got 0"),
+            ({"row": -1}, "row must be an integer of 1 or greater, got -1"),
+            ({"row": True}, "row must be an integer of 1 or greater, got True"),
+            ({"row": "1"}, "row must be an integer of 1 or greater, got '1'"),
+        ):
+            with self.subTest(changes=changes):
+                self.ledger.write_text(good + "\n" + _with(good, **changes) + "\n")
+                code, _, err = self.decisions("--json")
+                self.assertEqual(code, 1)
+                self.assertIn(f"line 2 is not a valid withdrawal record: {problem}", err)
+
+    def test_torn_first_line_is_truncated_to_empty(self):
+        self.ledger.write_bytes(b'{"v": 1, "ts"')
+        code, _, err = self.run_verb("forget", "3", "--reason", "stale", "--session-id", SID)
+        self.assertEqual(code, 0)
+        self.assertIn("unterminated line", err)
+        self.assertEqual([r["row"] for r in self.records()], [3])
 
     def test_torn_tail_is_ignored_then_truncated_on_append(self):
         whole = self.ledger.read_bytes()
