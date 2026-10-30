@@ -20,11 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows across sessions; struck rows are hidden by default and a bad row is skipped with a
   warning.
 - `cairn recall digest --json` adds an `overdue` list: active rows whose `revisit_by` is on
-  or before the digest day. Exit codes are unchanged.
+  or before the digest day. Routine-owned sessions and their subagents give no rows unless
+  `--include-routine-sessions` is given, and `--provenance` filters the rows. Exit codes
+  are unchanged.
 
 ### Changed
-- Re-export preserves a `## Decisions` section that directly follows `## My Notes`, byte
-  for byte, in session and peer-exchange documents. An older cairn drops the section on
+- Re-export preserves a `## Decisions` section that directly follows `## My Notes`, in
+  session and peer-exchange documents. A table cairn wrote stays byte for byte; a hand
+  edit keeps its text, with LF line endings, as for My Notes. An older cairn drops the section on
   its next export, so this version cannot be downgraded without losing the table.
 
 ## [2.15.0]
