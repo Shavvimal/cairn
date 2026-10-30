@@ -27,6 +27,7 @@ import argparse
 import contextlib
 import json
 import os
+import posixpath
 import shutil
 import signal
 import subprocess
@@ -48,6 +49,27 @@ EXIT_VACUOUS = 3
 EXIT_FIX_FAILS = 4
 EXIT_INTERRUPTED = 130
 
+# `git rev-parse --local-env-vars`: variables that point git at one repository. They are
+# dropped from every git call in the copy and from both test runs, so a run started from
+# a git hook (which sets GIT_INDEX_FILE) cannot write the copy's files into the real index.
+GIT_LOCAL_VARS = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+)
+
 VERDICTS = {
     EXIT_DISCRIMINATES: "discriminates",
     EXIT_DOES_NOT: "does_not_discriminate",
@@ -62,6 +84,51 @@ import sys
 import unittest
 
 target, out = sys.argv[1], sys.argv[2]
+
+
+# Records, per test method, whether any part of it ran and whether any part skipped.
+# result.skipped counts skipped subtests and testsRun counts methods, so the two cannot be
+# compared. A method counts as skipped only when nothing in it ran.
+class Result(unittest.TextTestResult):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ran_ids = set()
+        self.skip_ids = set()
+
+    @staticmethod
+    def method_id(test):
+        return getattr(test, "test_case", test).id()
+
+    def addSkip(self, test, reason):
+        super().addSkip(test, reason)
+        self.skip_ids.add(self.method_id(test))
+
+    def addSubTest(self, test, subtest, err):
+        super().addSubTest(test, subtest, err)
+        self.ran_ids.add(test.id())
+
+    def addSuccess(self, test):
+        super().addSuccess(test)
+        self.ran_ids.add(test.id())
+
+    def addFailure(self, test, err):
+        super().addFailure(test, err)
+        self.ran_ids.add(test.id())
+
+    def addError(self, test, err):
+        super().addError(test, err)
+        self.ran_ids.add(test.id())
+
+    def addExpectedFailure(self, test, err):
+        super().addExpectedFailure(test, err)
+        self.ran_ids.add(test.id())
+
+    def addUnexpectedSuccess(self, test):
+        super().addUnexpectedSuccess(test)
+        self.ran_ids.add(test.id())
+
+
 loader = unittest.TestLoader()
 load_errors = []
 try:
@@ -83,14 +150,15 @@ def walk(node):
 failed = [t for t in walk(suite) if type(t).__name__ == "_FailedTest"]
 if failed and not load_errors:
     load_errors.extend(f"failed to load {t.id()}" for t in failed)
-result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2).run(suite)
+runner = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, resultclass=Result)
+result = runner.run(suite)
 with open(out, "w", encoding="utf-8") as handle:
     json.dump(
         {
             "run": result.testsRun,
             "failures": len(result.failures) + len(result.unexpectedSuccesses),
             "errors": len(result.errors),
-            "skipped": len(result.skipped),
+            "skipped": len(result.skip_ids - result.ran_ids),
             "load_errors": load_errors,
         },
         handle,
@@ -135,7 +203,7 @@ class RunResult:
             return f"load error: {first_exception_line(self.load_errors[0])}"
         if self.run == 0:
             return "0 tests ran"
-        if self.run == self.skipped:
+        if self.run <= self.skipped:
             return f"all {self.run} tests skipped"
         return None
 
@@ -172,6 +240,14 @@ def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
         detail = proc.stderr.decode(errors="replace").strip()
         raise SetupError(f"error: git {' '.join(args)} failed: {detail}")
     return proc
+
+
+def isolated_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """BASE (default os.environ) without the variables that tie git to one repository."""
+    env = dict(os.environ if base is None else base)
+    for name in GIT_LOCAL_VARS:
+        env.pop(name, None)
+    return env
 
 
 def git_text(root: Path, *args: str) -> str:
@@ -279,13 +355,39 @@ def describe_change(root: Path, ref: str, path: str, tracked: set[str]) -> FileC
 
 
 def normalise(root: Path, raw: str) -> str:
+    """RAW as a canonical repo-relative path (no ``.`` or ``..``), checked for escapes.
+
+    A relative RAW is taken from the repository root. A path whose parent directory is a
+    symlink is refused: reverting it in the copy would follow the link, and the link can
+    point back into the real tree.
+    """
     candidate = Path(raw)
     if candidate.is_absolute():
         try:
-            candidate = candidate.resolve().relative_to(root.resolve())
+            parent = candidate.parent.resolve().relative_to(root.resolve())
         except ValueError:
             raise SetupError(f"error: {raw} is outside the repository") from None
-    return PurePosixPath(*candidate.parts).as_posix()
+        candidate = parent / candidate.name
+    path = posixpath.normpath(PurePosixPath(*candidate.parts).as_posix())
+    if path == ".." or path.startswith("../"):
+        raise SetupError(f"error: {raw} is outside the repository")
+    parts = PurePosixPath(path).parts
+    for depth in range(1, len(parts)):
+        prefix = "/".join(parts[:depth])
+        if (root / prefix).is_symlink():
+            raise SetupError(
+                f"error: {path} has a symlinked parent directory ({prefix}); pass the real path"
+            )
+    return path
+
+
+def inside(dest: Path, target: Path) -> Path:
+    """TARGET, after a check that its parent directory resolves inside DEST."""
+    real_dest = os.path.realpath(dest)
+    real_parent = os.path.realpath(target.parent)
+    if not (real_parent == real_dest or real_parent.startswith(real_dest + os.sep)):
+        raise SetupError(f"error: {target} resolves outside the copy; nothing was written there")
+    return target
 
 
 def collect_changes(
@@ -325,7 +427,7 @@ def snapshot(root: Path, dest: Path) -> None:
     listing = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").stdout
     for name in sorted({n for n in listing.decode(errors="replace").split("\0") if n}):
         source = root / name
-        target = dest / name
+        target = inside(dest, dest / name)
         if source.is_symlink():
             target.parent.mkdir(parents=True, exist_ok=True)
             os.symlink(os.readlink(source), target)
@@ -337,7 +439,7 @@ def snapshot(root: Path, dest: Path) -> None:
 def revert(root: Path, ref: str, dest: Path, changes: list[FileChange]) -> None:
     """Give each changed path its REF content and mode inside DEST, or delete it there."""
     for change in changes:
-        target = dest / change.path
+        target = inside(dest, dest / change.path)
         if target.is_symlink() or target.exists():
             target.unlink()
         entry = ref_entry(root, ref, change.path)
@@ -354,7 +456,7 @@ def revert(root: Path, ref: str, dest: Path, changes: list[FileChange]) -> None:
 
 def init_copy(dest: Path) -> None:
     """A fresh repository in the copy, so tests that call ``git ls-files`` see the same set."""
-    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"}
+    env = {**isolated_env(), "GIT_CONFIG_NOSYSTEM": "1"}
     for args in (["init", "-q"], ["add", "-A"]):
         proc = subprocess.run(["git", *args], cwd=dest, capture_output=True, env=env)
         if proc.returncode != 0:
@@ -363,7 +465,7 @@ def init_copy(dest: Path) -> None:
 
 
 def run_env(tree: Path) -> dict[str, str]:
-    env = dict(os.environ)
+    env = isolated_env()
     parts = [str(tree / "src"), str(tree)]
     if env.get("PYTHONPATH"):
         parts.append(env["PYTHONPATH"])
@@ -383,7 +485,7 @@ def top_packages(changes: list[FileChange]) -> list[str]:
     return sorted(names)
 
 
-def guard_imports(tree: Path, changes: list[FileChange]) -> None:
+def guard_imports(tree: Path, changes: list[FileChange], timeout: float) -> None:
     """Exit 2 when a reverted package would import from anywhere but the copy."""
     src = os.path.realpath(tree / "src")
     probe = (
@@ -392,16 +494,28 @@ def guard_imports(tree: Path, changes: list[FileChange]) -> None:
         "print(getattr(m, '__file__', None) or list(getattr(m, '__path__', []))[0])\n"
     )
     for pkg in top_packages(changes):
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "-c", probe, pkg],
             cwd=tree,
             env=run_env(tree),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
+            start_new_session=True,
         )
-        if proc.returncode != 0:
+        try:
+            stdout, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            kill_group(proc)
+            raise SetupError(
+                f"error: import of '{pkg}' timed out after {timeout:g} s on the reverted tree"
+            ) from None
+        except BaseException:
+            kill_group(proc)
+            raise
+        if proc.returncode != 0 or not stdout.strip():
             continue  # the package does not import at REF; the run reports the load error
-        where = os.path.realpath(proc.stdout.strip().splitlines()[-1])
+        where = os.path.realpath(stdout.strip().splitlines()[-1])
         if not (where == src or where.startswith(src + os.sep)):
             raise SetupError(
                 f"error: package '{pkg}' imports from {where}, not from the reverted copy; "
@@ -449,7 +563,7 @@ def run_target(
     return result
 
 
-def kill_group(proc: subprocess.Popen[bytes]) -> None:
+def kill_group(proc: subprocess.Popen[Any]) -> None:
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(proc.pid, signal.SIGKILL)
     proc.wait()
@@ -531,7 +645,8 @@ def check(args: argparse.Namespace) -> int:
     name, full, short = resolve_ref(root, args.since)
     changes = collect_changes(root, full, name, short, args.files)
     if args.log_dir:
-        log_dir = Path(args.log_dir)
+        # Absolute, because the reverted run's working directory is the copy.
+        log_dir = Path(os.path.abspath(args.log_dir))
         log_dir.mkdir(parents=True, exist_ok=True)
     else:
         log_dir = Path(tempfile.mkdtemp(prefix="cairn-discriminate-logs-"))
@@ -542,7 +657,7 @@ def check(args: argparse.Namespace) -> int:
         snapshot(root, tree)
         revert(root, full, tree, changes)
         init_copy(tree)
-        guard_imports(tree, changes)
+        guard_imports(tree, changes, args.timeout)
         scrub = sorted(
             {str(tree), os.path.realpath(tree), str(root), os.path.realpath(root)},
             key=len,

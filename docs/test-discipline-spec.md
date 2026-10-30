@@ -82,9 +82,9 @@ uv run python scripts/check-test-discriminates.py TARGET
 |---|---|---|
 | `TARGET` | a unittest name: module `tests.test_x`, class `tests.test_x.TestY` or method `tests.test_x.TestY.test_z` | required |
 | `--since REF` | the pre-fix commit. Every reverted file takes its content at REF | `git merge-base HEAD main`, else `git merge-base HEAD origin/main` |
-| `--files PATH...` | the files to revert, repo-relative. Any path outside `tests/` | every path under `src/` that differs between REF and the working tree, plus untracked files under `src/` |
+| `--files PATH...` | the files to revert, repo-relative (`..` is resolved first; an absolute path must lie in the repository). Any path outside `tests/` whose parent directories are not symlinks | every path under `src/` that differs between REF and the working tree, plus untracked files under `src/` |
 | `--timeout` | seconds per test run | 600 |
-| `--log-dir` | where the two run logs go; created if absent; never deleted | a new `cairn-discriminate-logs-*` directory under the system temp dir |
+| `--log-dir` | where the two run logs go, relative to the invocation directory; created if absent; never deleted | a new `cairn-discriminate-logs-*` directory under the system temp dir |
 | `--keep` | keep the reverted copy for inspection; its path goes to stderr | off |
 | `--json` | print the JSON object of section 5.1 instead of the evidence line | off |
 
@@ -125,8 +125,12 @@ Exit-2 messages, exact:
 - `error: unknown ref 'REF'`
 - `error: nothing to revert: no file under src/ differs from REF (SHORT)`
 - `error: PATH is under tests/; --files takes source files only`
+- `error: PATH is outside the repository`
+- `error: PATH has a symlinked parent directory (PREFIX); pass the real path`
+- `error: PATH resolves outside the copy; nothing was written there`
 - `error: PATH is identical at REF (SHORT); nothing to revert`
 - `error: package 'PKG' imports from PATH, not from the reverted copy; the run would test the fix`
+- `error: import of 'PKG' timed out after N s on the reverted tree`
 - `error: test run timed out after N s on the PHASE tree; log: LOG`
 
 REASON in exit 3 is `load error: <first line of the loader exception>`, `0 tests ran`, or
@@ -179,6 +183,8 @@ real tree never changed, and the second run happens there.
    `<log-dir>/reverted.log`. RUNNER is a module constant. It loads TARGET with
    `unittest.defaultTestLoader.loadTestsFromName`, runs it with `TextTestRunner(verbosity=2)`,
    and writes `{"run", "failures", "errors", "skipped", "load_errors"}` to OUT.json.
+   `run` counts test methods. `skipped` counts test methods in which nothing ran (every
+   part skipped), so a method with one skipped subtest and one run subtest is not skipped.
    `load_errors` holds `loader.errors` plus any `unittest.loader._FailedTest` ids.
 9. Current-tree run: the same command with `cwd=<repo root>`, `PYTHONPATH=<repo>/src`,
    output to `<log-dir>/restored.log`.
@@ -287,9 +293,8 @@ complete.
 
 ## 7. Tests
 
-`tests/test_check_test_discriminates.py` loads the script with
-`importlib.util.spec_from_file_location` and runs it as a subprocess against a temp git
-repo. The repo holds `src/demo/__init__.py`, `tests/__init__.py` and `tests/test_demo.py`,
+`tests/test_check_test_discriminates.py` runs the script as a subprocess, with the same
+interpreter, against a temp git repo. The repo holds `src/demo/__init__.py`, `tests/__init__.py` and `tests/test_demo.py`,
 uses invented identity `x@y.z`, and sets `HOME` to a temp dir. Skip if `git` is absent.
 
 | Test | Asserts |
@@ -311,6 +316,16 @@ uses invented identity `x@y.z`, and sets `HOME` to a temp dir. Skip if `git` is 
 | `test_json_shape` | keys and types of section 5.1 |
 | `test_temp_copy_removed_and_logs_kept` | copy path gone, both logs exist |
 | `test_multiple_files_in_line` | two files, space-separated, in path order |
+| `test_symlinked_parent_rejected_and_target_kept` | `--files` through a symlinked directory: exit 2, exact message, the link target survives |
+| `test_git_env_does_not_touch_real_index` | with `GIT_INDEX_FILE` or `GIT_DIR` pointing at the real repo, its index is byte-identical after a run |
+| `test_dotdot_paths_normalised` | `src/demo/../demo/x.py` reverts `src/demo/x.py`; `src/../tests/...` and `../x` are refused |
+| `test_relative_log_dir_is_taken_from_the_invocation_dir` | `--log-dir ../rel-logs` writes both logs there |
+| `test_timeout_kills_the_test_process_group` | exit 2, exact message, a grandchild process is gone, the real tree and temp dir are clean |
+| `test_hanging_import_probe_times_out` | an import that hangs at REF gives exit 2 within `--timeout` |
+| `test_skipped_subtests_on_current_tree_exit_3` | every subtest skipped on the current tree: `restored -> NOT RUN (all 1 tests skipped)` |
+| `test_one_skipped_subtest_beside_a_run_one_counts_as_run` | a skipped subtest next to a failing one: exit 0, `skipped` 0 |
+| `test_zero_tests_exit_3` | an empty test class: `NOT RUN (0 tests ran)` |
+| `test_unexpected_success_counts_as_failure` | an `expectedFailure` test that passes on the current tree: exit 4 |
 
 `tests/test_test_discipline.py`:
 
@@ -322,7 +337,7 @@ uses invented identity `x@y.z`, and sets `HOME` to a temp dir. Skip if `git` is 
 | `test_pr_template_asks_for_discrimination_evidence` | `.github/PULL_REQUEST_TEMPLATE.md` holds `Discrimination evidence:` |
 | `test_claude_md_states_both_rules` | `CLAUDE.md` holds "never pipe" and "discrimination evidence" |
 | `test_makefile_has_discriminates_target` | `discriminates:` exists and is in `.PHONY` |
-| `test_acceptance_docs_open_with_evidence_table` | each `docs/*-acceptance.md` has both column headers of section 5.2 |
+| `test_acceptance_docs_open_with_evidence_table` | in each `docs/*-acceptance.md` the first `##` section is the dated evidence heading with the three-column header and the manual log; every automated cell is `none` or a test id, a date and a commit, and the test id loads as one test |
 
 The script's own tests cannot be checked by the script: reverting a new file gives exit 3.
 Their evidence in the PR body is one mutation probe: make the verdict function always
@@ -411,12 +426,22 @@ does not check the PR line. The code differs from the sections above in these po
    `error: PATH is outside the repository`.
 8. **Lint scope.** `make lint`, `make format` and CI name `scripts/check-test-discriminates.py`
    alone; `scripts/sync_plugin_manifest.py` stays outside the linter.
-9. **Tests.** `tests/test_check_test_discriminates.py` has 19 tests: the 17 of section 7
+9. **Tests.** `tests/test_check_test_discriminates.py` has 29 tests: the 27 of section 7
    plus `test_identical_file_exits_2` and `test_not_a_git_tree_exits_2`.
    `test_shadowed_import_exits_2` uses a `sitecustomize.py` on `PYTHONPATH` that puts the
    real `src` first, in place of an installed `.pth`. `tests/test_test_discipline.py`
    adds `test_contributing_has_the_section` to the seven of section 7, and its evidence
    table test also requires the dated heading and the manual log.
 10. **Mutation probes for the script's own tests.** With `decide()` forced to return 0,
-    4 of the 19 tests failed. With `revert()` made a no-op, 9 of 19 failed. Both edits were
+    4 of the first 19 tests failed. With `revert()` made a no-op, 9 of 19 failed. Both edits were
     undone.
+11. **Review fixes (PR review, round 1).** `--files` resolves `..` before any check, so
+    `src/../tests/x.py` is refused as a test path and `../x.py` as outside the repository.
+    A path whose parent directory is a symlink is refused, and every write in the copy
+    first checks that its parent resolves inside the copy, so a link into the real tree
+    cannot be followed. The copy's `git init`/`git add`, the import probe and both runs drop
+    the variables `git rev-parse --local-env-vars` lists (`GIT_DIR`, `GIT_INDEX_FILE` and
+    the rest), so a run started from a git hook cannot write into the real index. The
+    import probe runs under `--timeout` in its own process group. `--log-dir` is made
+    absolute before the reverted run changes directory. `skipped` counts methods in which
+    nothing ran, not skipped subtests.

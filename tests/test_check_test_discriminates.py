@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -294,6 +295,159 @@ class DiscriminationScriptTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, proc.stderr)
         self.assertIn("error: package 'demo' imports from ", proc.stderr)
         self.assertIn("not from the reverted copy; the run would test the fix", proc.stderr)
+
+    def test_symlinked_parent_rejected_and_target_kept(self):
+        self.fix_and_test()
+        self.write("src/demo/module.py", "X = 1\n")
+        os.symlink(self.repo / "src" / "demo", self.repo / "linked")
+        proc = self.run_script("--files", "linked/module.py")
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(
+            proc.stderr.strip(),
+            "check-test-discriminates: error: linked/module.py has a symlinked parent "
+            "directory (linked); pass the real path",
+        )
+        self.assertTrue((self.repo / "src/demo/module.py").is_file())
+
+    def test_git_env_does_not_touch_real_index(self):
+        self.fix_and_test()
+        self.write("src/demo/extra.py", "X = 1\n")
+        index = self.repo / ".git" / "index"
+        before = index.read_bytes()
+        for name, value in (
+            ("GIT_INDEX_FILE", str(index)),
+            ("GIT_DIR", str(self.repo / ".git")),
+        ):
+            with self.subTest(var=name):
+                self.env[name] = value
+                try:
+                    proc = self.run_script()
+                finally:
+                    del self.env[name]
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(index.read_bytes(), before)
+
+    def test_dotdot_paths_normalised(self):
+        self.fix_and_test()
+        proc = self.run_script("--files", "src/demo/../demo/__init__.py")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), self.line("src/demo/__init__.py (+1 -1)", "FAIL (1)"))
+        proc = self.run_script("--files", "src/../tests/test_demo.py")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(
+            proc.stderr.strip(),
+            "check-test-discriminates: error: tests/test_demo.py is under tests/; "
+            "--files takes source files only",
+        )
+        proc = self.run_script("--files", "../outside.py")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(
+            proc.stderr.strip(),
+            "check-test-discriminates: error: ../outside.py is outside the repository",
+        )
+
+    def test_relative_log_dir_is_taken_from_the_invocation_dir(self):
+        self.fix_and_test()
+        proc = self.run_script("--log-dir", "../rel-logs")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        logs = (self.tmp / "rel-logs").resolve()
+        self.assertIn("FAILED", (logs / "reverted.log").read_text())
+        self.assertIn(f"logs: {logs}", proc.stderr)
+
+    def test_timeout_kills_the_test_process_group(self):
+        pidfile = self.tmp / "grandchild.pid"
+        hang = TEST_CODE.replace(
+            "        self.assertEqual(value(), 2)",
+            "        import subprocess, sys, time\n"
+            "        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            f"        open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+            "        time.sleep(60)",
+        )
+        self.fix_and_test(test=hang)
+        before = self.tree_digest()
+        proc = self.run_script("--timeout", "3")
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn(
+            "error: test run timed out after 3 s on the reverted tree; log: ", proc.stderr
+        )
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(self.tree_digest(), before)
+        self.assertEqual(list(self.scratch.iterdir()), [])
+        pid = int(pidfile.read_text())
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail(f"grandchild {pid} survived the timeout")
+
+    def test_hanging_import_probe_times_out(self):
+        self.write("src/demo/__init__.py", "import time\ntime.sleep(60)\n" + BASE_CODE)
+        self.commit("slow import")
+        slow = self.git("rev-parse", "HEAD")
+        self.fix_and_test()
+        proc = self.run_script("--since", slow, "--timeout", "3")
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(
+            proc.stderr.strip(),
+            "check-test-discriminates: error: import of 'demo' timed out after 3 s "
+            "on the reverted tree",
+        )
+
+    # -- skips -----------------------------------------------------------------
+
+    def test_skipped_subtests_on_current_tree_exit_3(self):
+        test = TEST_CODE.replace(
+            "        self.assertEqual(value(), 2)",
+            "        if value() != 2:\n"
+            "            self.fail('no fix')\n"
+            "        for i in range(2):\n"
+            "            with self.subTest(i=i):\n"
+            "                self.skipTest('x')",
+        )
+        self.fix_and_test(test=test)
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertTrue(
+            proc.stdout.strip().endswith("restored -> NOT RUN (all 1 tests skipped)"), proc.stdout
+        )
+
+    def test_one_skipped_subtest_beside_a_run_one_counts_as_run(self):
+        test = TEST_CODE.replace(
+            "        self.assertEqual(value(), 2)",
+            "        with self.subTest(i=0):\n"
+            "            self.skipTest('x')\n"
+            "        with self.subTest(i=1):\n"
+            "            self.assertEqual(value(), 2)",
+        )
+        self.fix_and_test(test=test)
+        proc = self.run_script("--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["reverted"]["skipped"], 0)
+        self.assertEqual(data["evidence"], self.line("src/demo/__init__.py (+1 -1)", "FAIL (1)"))
+
+    def test_zero_tests_exit_3(self):
+        self.fix_and_test()
+        self.write(
+            "tests/test_empty.py",
+            "import unittest\n\n\nclass Empty(unittest.TestCase):\n    pass\n",
+        )
+        self.commit("empty")
+        proc = self.run_script(target="tests.test_empty")
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertIn("NOT RUN (0 tests ran)", proc.stdout)
+
+    def test_unexpected_success_counts_as_failure(self):
+        test = TEST_CODE.replace(
+            "    def test_value", "    @unittest.expectedFailure\n    def test_value"
+        )
+        self.fix_and_test(test=test)
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 4, proc.stderr)
+        self.assertTrue(proc.stdout.strip().endswith("restored -> FAIL (1)"), proc.stdout)
 
     # -- output ----------------------------------------------------------------
 
