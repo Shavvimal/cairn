@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.20.0]
+
+### Added
+- `cairn claude memory import` adds Claude Code auto-memory notes as `## Decisions`
+  rows: into the session that wrote them when cairn exported it, else into
+  `<data_root>/decisions/<project>.md`. The source cell is `memory:<project>/<file>`.
+  Re-runs add only new memories, warn on changed ones, and skip withdrawn claims.
+  `--dry-run`, `--json`, `--all-projects`, `--memory-dir`, `--include-reference`.
+- `recall decisions` lists project decisions documents (`--source memory`), shows their
+  refs as `memory:<project>#N` and marks imported rows `[memory]`. `decide`,
+  `supersede` and `forget` take `--session-id memory:<project>`.
+- Error codes `MEMORY_DIR_MISSING` and `MEMORY_IMPORT_WRITE_FAILED`.
+- `config.example.json` gains the store-less `decisions` collection.
+
 ## [2.19.3]
 
 ### Added
