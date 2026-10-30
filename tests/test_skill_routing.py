@@ -30,7 +30,8 @@ MARKER = "Use when the user says"
 _QUOTED = re.compile(r'"([^"]+)"')
 _NON_WORD = re.compile(r"[\W_]+")
 MIN_ROWS = 8
-MAX_ROWS = 15
+# The umbrella cairn skill carries about 26 quoted phrases, one row each.
+MAX_ROWS = 30
 ROW_KEYS = frozenset({"intent", "expected", "ambiguous_with", "note"})
 
 # Words dropped from a trigger before matching (58 words). An intent keeps every word.
@@ -46,6 +47,7 @@ STOPWORDS = frozenset(
 DECLARED_OVERLAPS: frozenset[tuple[str, str]] = frozenset(
     {
         ("cairn", "invoke-codex"),
+        ("cairn", "recall"),
         ("invoke-claude", "invoke-codex"),
         ("invoke-antigravity", "invoke-codex"),
         ("recall", "search"),
@@ -379,7 +381,7 @@ class TestTriggerExtraction(_RepoCase):
     def test_quoted_phrases_after_marker_only(self) -> None:
         recall = self.skills["recall"].triggers
         self.assertNotIn("one thing", recall)
-        self.assertEqual(len(recall), 10, recall)
+        self.assertEqual(len(recall), 15, recall)
         self.assertIn("what was i doing", recall)
 
     def test_every_routable_skill_has_triggers(self) -> None:

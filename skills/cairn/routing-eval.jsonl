@@ -13,3 +13,15 @@
 {"intent": "resume my last codex session", "expected": "cairn", "ambiguous_with": ["invoke-codex"]}
 {"intent": "sync the docs listed in my config", "expected": "cairn"}
 {"intent": "import the auto memories that claude saved for this repo", "expected": "cairn"}
+{"intent": "export my antigravity conversations from today", "expected": "cairn"}
+{"intent": "please record the decision to ship one PR per layer", "expected": "cairn"}
+{"intent": "log that we decided to keep BM25", "expected": "cairn"}
+{"intent": "replace the old cache decision with the new rule", "expected": "cairn"}
+{"intent": "forget the second decision in this session, it was wrong", "expected": "cairn"}
+{"intent": "withdraw the claim about the cache, it is stale", "expected": "cairn"}
+{"intent": "pause the journal routine until monday", "expected": "cairn"}
+{"intent": "resume the daily routine now that I am back", "expected": "cairn"}
+{"intent": "check whether my journal routine is healthy", "expected": "cairn"}
+{"intent": "do the daily check on cairn before standup", "expected": "cairn"}
+{"intent": "remove the block of cairn instructions from AGENTS.md", "expected": "cairn"}
+{"intent": "cairn printed error code ROUTINE_HELD, what does it mean", "expected": "cairn"}
