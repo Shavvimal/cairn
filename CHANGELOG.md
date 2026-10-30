@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.16.0]
+
+### Added
+- A `## Decisions` table in session documents, directly after `## My Notes`, with the
+  columns `# | claim | kind | confidence | since | revisit_by | source`. `kind` is one of
+  `decision`, `fact`, `commitment`, `hunch`; `confidence` is `high`, `medium` or `low`;
+  `source` holds frame citations like `[claude:3f2a9c1e f12]`.
+- `cairn <source> decide CLAIM` adds a row; `cairn <source> supersede N CLAIM` strikes row N
+  as `~~claim~~ superseded by #M` and adds row M. Rows are never renumbered; a row's id is
+  `<source>:<native_id>#<n>`. Both verbs change only table lines: everything from
+  `## Conversation` on stays byte-identical, so frame offsets and digest sidecars stay valid.
+- `cairn recall decisions [DATE] [--overdue] [--include-struck] [--as-of D] [--json]` lists
+  rows across sessions; struck rows are hidden by default and a bad row is skipped with a
+  warning.
+- `cairn recall digest --json` adds an `overdue` list: active rows whose `revisit_by` is on
+  or before the digest day. Exit codes are unchanged.
+
+### Changed
+- Re-export preserves a `## Decisions` section that directly follows `## My Notes`, byte
+  for byte, in session and peer-exchange documents. An older cairn drops the section on
+  its next export, so this version cannot be downgraded without losing the table.
+
 ## [2.15.0]
 
 ### Added
