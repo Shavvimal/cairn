@@ -1927,6 +1927,25 @@ class TestExchangeCollisions(InvokeFixture):
                 self.assertEqual(write_exchange(cfg, one, describe_folder=False), first)
                 self.assertEqual(write_exchange(cfg, two, describe_folder=False), second)
 
+    def test_exchange_rerender_preserves_decisions(self):
+        cfg = config.get_config()
+        state = self.state("019a0000-1111-7000-8000-abcd00000001")
+        path = write_exchange(cfg, state, describe_folder=False)
+        assert path is not None
+        table = (
+            "## Decisions\n\n| # | claim | kind | confidence | since | revisit_by | source |\n"
+            "|---|-------|------|------------|-------|------------|--------|\n"
+            "| 1 | Keep the peer read-only | decision | high | 2026-10-30 |  |  |\n\n"
+        )
+        text = path.read_text().replace("\n## Rounds\n", "\n" + table + "## Rounds\n", 1)
+        path.write_text(text)
+        state.rounds.append({"round": 2, "prompt": "second prompt"})
+        self.assertEqual(write_exchange(cfg, state, describe_folder=False), path)
+        content = path.read_text()
+        self.assertIn(table + "## Rounds\n", content)
+        self.assertEqual(content.count("## Decisions"), 1)
+        self.assertIn("second prompt", content)
+
     def test_refuses_to_overwrite_another_threads_document(self):
         cfg = config.get_config()
         one = self.state("019a0000-1111-7000-8000-abcd00000001")

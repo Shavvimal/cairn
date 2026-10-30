@@ -374,7 +374,8 @@ class ConversationSource(ABC):
             else:
                 self._unparseable_document(source_id, output_file, e)
             return None, None, False
-        my_notes = fm_mod.extract_my_notes_section(
+        # My Notes plus a ## Decisions section that follows it, preserved as one block.
+        my_notes = fm_mod.extract_annotations(
             content, conversation_heading=self.conversation_heading
         )
         return existing_fm, my_notes, True
