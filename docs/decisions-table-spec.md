@@ -137,6 +137,7 @@ filter.
 - `cannot parse ## Decisions in <file name>: line <n>: <reason>`
 - `no row #<n> in ## Decisions of <file name>`
 - `row #<n> is already struck (<marker or 'no marker'>)`
+- `no row number is left after #999999999`
 - The existing messages from section 2 for a missing session, a missing file and an
   ambiguous id.
 
@@ -156,7 +157,8 @@ the body mutation and the reader.
 1. Resolve the session with `_require_session_id(args.session_id)`, the path `note` uses
    (`src/cairn/sources/base.py:476-479`). This gives the same environment variable, the
    same harness detection and the same refusal when more than one session is active.
-2. Validate the claim: join the words, turn each CR and LF into a space, collapse runs of
+2. Validate the claim: join the words, turn each line break that `str.splitlines` knows
+   (CR, LF, VT, FF, U+001C to U+001E, U+0085, U+2028, U+2029) into a space, collapse runs of
    spaces, strip. Then check the length and `~~` rules (exit 2). Validate `--revisit-by`
    against `since`, the UTC date now. Validate `--source` against `^CIT( CIT)*$`.
 3. Find the file with `find_file`, as `_mutate_file` does (`src/cairn/mutations.py:79-86`).
@@ -259,7 +261,7 @@ HEADER = "| # | claim | kind | confidence | since | revisit_by | source |"
 SEPARATOR = "|---|-------|------|------------|-------|------------|--------|"
 SEPARATOR_RE = re.compile(r"^\|(?:\s*:?-+:?\s*\|){7}$")          # reader
 CANONICAL_ROW_RE = re.compile(                                     # writer output
-    r"^\| (?P<n>[1-9][0-9]*)"
+    r"^\| (?P<n>[1-9][0-9]{0,8})"
     r" \| (?P<claim>(?:[^|\\]|\\.)+)"
     r" \| (?P<kind>decision|fact|commitment|hunch)"
     r" \| (?P<confidence>high|medium|low)"
@@ -268,9 +270,11 @@ CANONICAL_ROW_RE = re.compile(                                     # writer outp
     r" \| (?P<source>(?:[^|\\]|\\.)*) \|$"
 )
 CELL_RE = re.compile(r"\s*((?:[^|\\]|\\.)*?)\s*\|")                # reader, after the leading "|"
-STRUCK_RE = re.compile(r"^~~(?P<claim>(?:(?!~~).)+)~~(?: (?P<marker>\S.*))?$")
-SUPERSEDED_RE = re.compile(r"^superseded by #(?P<by>[1-9][0-9]*)$")
-SOURCE_RE = re.compile(r"^(?:supersedes #(?P<supersedes>[1-9][0-9]*))?\s*(?P<rest>.*)$")
+STRUCK_RE = re.compile(r"^~~(?P<claim>~?(?:[^~]~?)*)~~(?: (?P<marker>\S.*))?$")
+SUPERSEDED_RE = re.compile(r"^superseded by #(?P<by>[1-9][0-9]{0,8})$")
+SOURCE_RE = re.compile(
+    r"^(?:supersedes #(?P<supersedes>[1-9][0-9]{0,8})(?![0-9]))?\s*(?P<rest>.*)$"
+)
 CITATION_RE = re.compile(
     r"\[(?:claude|codex|antigravity|cursor|granola):[A-Za-z0-9][A-Za-z0-9._-]* f(?:0|[1-9][0-9]*)\]"
 )
@@ -284,8 +288,12 @@ Reader rules:
   spaces are stripped. The next line must match `SEPARATOR_RE`.
 - Each following non-blank line must start and end with `|` and hold exactly seven cells
   under `CELL_RE`. The reader is lenient about whitespace and strict about values.
-- `#`: a positive integer, unique in the table. Numbers need not be contiguous.
-- The claim cell matches `STRUCK_RE`, or else contains no `~~`.
+- `#`: a positive integer of at most nine digits (`row number must be at most 999999999`
+  otherwise), unique in the table. Numbers need not be contiguous. A `superseded by #M`
+  marker or a `supersedes #N` prefix with more digits is not read as a number: the marker
+  makes the row `struck`, and the prefix stays plain source text.
+- The claim cell matches `STRUCK_RE`, or else contains no `~~`. A struck claim is any text
+  without `~~`, so it may start or end with one `~` (`~~ends with~~~ superseded by #2`).
 - `kind` and `confidence` must be in their closed sets. `since` and `revisit_by` must be
   real dates.
 - A `superseded by #M` marker must name a row that exists.

@@ -61,7 +61,7 @@ HEADER: Final = "| # | claim | kind | confidence | since | revisit_by | source |
 SEPARATOR: Final = "|---|-------|------|------------|-------|------------|--------|"
 SEPARATOR_RE: Final = re.compile(r"^\|(?:\s*:?-+:?\s*\|){7}$")
 CANONICAL_ROW_RE: Final = re.compile(
-    r"^\| (?P<n>[1-9][0-9]*)"
+    r"^\| (?P<n>[1-9][0-9]{0,8})"
     r" \| (?P<claim>(?:[^|\\]|\\.)+)"
     r" \| (?P<kind>decision|fact|commitment|hunch)"
     r" \| (?P<confidence>high|medium|low)"
@@ -70,9 +70,13 @@ CANONICAL_ROW_RE: Final = re.compile(
     r" \| (?P<source>(?:[^|\\]|\\.)*) \|$"
 )
 CELL_RE: Final = re.compile(r"\s*((?:[^|\\]|\\.)*?)\s*\|")
-STRUCK_RE: Final = re.compile(r"^~~(?P<claim>(?:(?!~~).)+)~~(?: (?P<marker>\S.*))?$")
-SUPERSEDED_RE: Final = re.compile(r"^superseded by #(?P<by>[1-9][0-9]*)$")
-SOURCE_RE: Final = re.compile(r"^(?:supersedes #(?P<supersedes>[1-9][0-9]*))?\s*(?P<rest>.*)$")
+# The struck claim is any text without ``~~``; it may start or end with one ``~``.
+STRUCK_RE: Final = re.compile(r"^~~(?P<claim>~?(?:[^~]~?)*)~~(?: (?P<marker>\S.*))?$")
+# Row numbers have at most nine digits, so ``int()`` never meets an oversized string.
+SUPERSEDED_RE: Final = re.compile(r"^superseded by #(?P<by>[1-9][0-9]{0,8})$")
+SOURCE_RE: Final = re.compile(
+    r"^(?:supersedes #(?P<supersedes>[1-9][0-9]{0,8})(?![0-9]))?\s*(?P<rest>.*)$"
+)
 # A frame citation, ``[<source>:<shortid> f<N>]`` with N a 0-based frame ordinal. The
 # one definition of this grammar in the decisions code; every check below uses it.
 CITATION_RE: Final = re.compile(
@@ -80,7 +84,10 @@ CITATION_RE: Final = re.compile(
 )
 _CITATIONS_RE: Final = re.compile(rf"^{CITATION_RE.pattern}(?: {CITATION_RE.pattern})*$")
 _DATE_RE: Final = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
-_NUMBER_RE: Final = re.compile(r"^[1-9][0-9]*$")
+_NUMBER_RE: Final = re.compile(r"^[1-9][0-9]{0,8}$")
+MAX_ROW_NUMBER: Final = 999_999_999
+# Every character str.splitlines() breaks a line at; a claim turns each into a space.
+_LINE_BREAKS_RE: Final = re.compile("[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
 _TURN_PREFIX: Final = "<!-- cairn:turn "
 
 KINDS: Final = ("decision", "fact", "commitment", "hunch")
@@ -249,6 +256,8 @@ def parse_row(text: str, line: int = 0) -> DecisionRow | Problem:
         return Problem(line, f"expected 7 cells, got {len(cells)}")
     number, claim_cell, kind, confidence, since, revisit_by, source = cells
     if not _NUMBER_RE.match(number):
+        if number.isdigit() and len(number) > 9:
+            return Problem(line, f"row number must be at most {MAX_ROW_NUMBER}")
         return Problem(line, f"row number must be a positive integer, got {number!r}")
     claim_text = unescape_cell(claim_cell)
     struck_match = STRUCK_RE.match(claim_text)
@@ -514,8 +523,9 @@ def today() -> date:
 
 
 def normalise_claim(words: list[str]) -> str:
-    """Words joined by one space; every CR and LF becomes a space; runs collapse."""
-    text = " ".join(words).replace("\r", " ").replace("\n", " ")
+    """Words joined by one space; every line break ``str.splitlines`` knows (CR, LF,
+    VT, FF, U+001C-U+001E, U+0085, U+2028, U+2029) becomes a space; runs collapse."""
+    text = _LINE_BREAKS_RE.sub(" ", " ".join(words))
     return re.sub(r" {2,}", " ", text).strip()
 
 
@@ -561,6 +571,8 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
 
     def edit(rows: list[DecisionRow]) -> list[DecisionRow]:
         number = max((row.number for row in rows), default=0) + 1
+        if number > MAX_ROW_NUMBER:
+            raise DecisionError(f"no row number is left after #{MAX_ROW_NUMBER}")
         if target is None:
             new = DecisionRow(
                 number,

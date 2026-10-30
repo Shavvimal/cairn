@@ -399,6 +399,18 @@ class TestDecide(DecisionsFixture):
         self.assertEqual((code, out), (0, ""))
         self.assertIn("| 4 | a b c | decision |", path.read_text())
 
+    def test_every_splitlines_break_in_a_claim_becomes_a_space(self):
+        path = self.write_doc("a.md", doc())
+        breaks = ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+        for number, mark in enumerate(breaks, start=4):
+            with self.subTest(mark=repr(mark)):
+                code, _, err = self.run_verb(
+                    "decide", f"first{mark}second", "-q", "--session-id", SID
+                )
+                self.assertEqual((code, err), (0, ""))
+                rows = decisions.parse(path.read_bytes().decode("utf-8"))
+                self.assertEqual((rows[-1].number, rows[-1].claim), (number, "first second"))
+
     def test_granola_section_lands_before_transcript(self):
         meeting = (
             "---\ntype: granola-meeting\nmeeting_id: m1\n---\n\n# Sync\n\n"
@@ -449,6 +461,28 @@ class TestSupersede(DecisionsFixture):
         self.assertEqual([r.state for r in rows], ["active", "active", "superseded", "active"])
         self.assertEqual((rows[2].superseded_by, rows[3].supersedes), (4, 3))
         self.assertFalse(rows[2].overdue(date(2027, 6, 1)))
+
+    def test_claim_starting_or_ending_with_a_tilde_survives_a_strike(self):
+        for claim in ("ends with~", "~starts with", "~"):
+            with self.subTest(claim=claim):
+                path = self.write_doc("a.md", doc(rows=None))
+                self.assertEqual(self.run_verb("decide", claim, "-q", "--session-id", SID)[0], 0)
+                code, _, err = self.run_verb("supersede", "1", "next", "-q", "--session-id", SID)
+                self.assertEqual((code, err), (0, ""))
+                rows = decisions.parse(path.read_text())
+                self.assertEqual(
+                    [(r.claim, r.state) for r in rows], [(claim, "superseded"), ("next", "active")]
+                )
+                self.assertEqual(self.recall("--json", "--include-struck")[2], "")
+
+    def test_hand_formatted_rows_keep_their_bytes_during_a_supersede(self):
+        loose = "|  1|One PR per layer|decision|high|2026-10-28|| [claude:3f2a9c1e f12]  |"
+        rows = WORKED_ROWS.replace(WORKED_ROWS.splitlines()[0], loose)
+        path = self.write_doc("a.md", doc(rows=rows))
+        self.assertEqual(self.run_verb("supersede", "3", "x", "-q", "--session-id", SID)[0], 0)
+        lines = path.read_text().splitlines()
+        self.assertIn(loose, lines)
+        self.assertIn(WORKED_ROWS.splitlines()[1], lines)
 
     def test_missing_row_exit_1(self):
         path = self.write_doc("a.md", doc())
@@ -586,6 +620,29 @@ class TestRecallDecisions(DecisionsFixture):
         )
         self.assertIn("claude:bbbbbbbb-0002#1", [r["ref"] for r in data["decisions"]])
 
+    def test_oversized_numbers_are_problems_not_crashes(self):
+        big = "9" * 4301
+        rows = (
+            f"| {big} | Huge | fact | high | 2026-10-05 |  |  |\n"
+            f"| 1 | ~~Odd~~ superseded by #{big} | fact | high | 2026-10-05 |  |  |\n"
+            f"| 2 | Fine | fact | high | 2026-10-05 |  | supersedes #{big} |"
+        )
+        bad = self.write_doc("b.md", doc("bbbbbbbb-0002", rows=rows))
+        code, data, err = self.recall("--json", "--include-struck", "--as-of", "2026-10-30")
+        self.assertEqual(code, 0)
+        found = {r["ref"]: r for r in data["decisions"] if r["session"].startswith("claude:bbbb")}
+        self.assertEqual(sorted(found), ["claude:bbbbbbbb-0002#1", "claude:bbbbbbbb-0002#2"])
+        self.assertEqual(found["claude:bbbbbbbb-0002#1"]["state"], "struck")
+        self.assertIsNone(found["claude:bbbbbbbb-0002#2"]["supersedes"])
+        line = bad.read_text().splitlines().index(rows.splitlines()[0]) + 1
+        reason = "row number must be at most 999999999"
+        self.assertEqual(data["problems"], [{"path": str(bad), "line": line, "reason": reason}])
+        self.assertEqual(err, f"Warning: {bad}: line {line}: {reason}\n")
+        code, _, err = self.run_verb("decide", "x", "--session-id", "bbbbbbbb")
+        self.assertEqual(
+            (code, err), (1, f"Error: cannot parse ## Decisions in b.md: line {line}: {reason}\n")
+        )
+
     def test_reader_stops_at_frame_anchor(self):
         text = self.path.read_text()
         prefix = decisions._read_prefix(self.path, "## Conversation")
@@ -620,7 +677,7 @@ class TestRecallDecisions(DecisionsFixture):
         code, data, _ = self.recall("--json", "--overdue", "--as-of", "2026-10-30")
         elapsed = time.perf_counter() - started
         self.assertEqual(code, 0)
-        self.assertEqual(len(data["decisions"]), 1000 + 1)  # plus row 3 of setUp's document
+        self.assertEqual(len(data["decisions"]), 1000 + 1)  # plus row 1 of setUp's document
         self.assertLess(
             elapsed, 10.0, f"recall decisions over 2,000 documents took {elapsed:.2f} s"
         )
