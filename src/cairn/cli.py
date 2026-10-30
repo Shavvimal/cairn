@@ -7,7 +7,7 @@ in two parent parsers so they are declared once and attached everywhere:
 * ``window`` - ``--since`` / ``--all`` (the time filter for ``export``).
 
 Verbs are stable across sources: ``export``, ``list``, ``context``, ``note``,
-``close``, ``log``, ``decide``, ``supersede``, plus any source-specific extras (Claude adds ``sync`` / ``resume``).
+``close``, ``log``, ``decide``, ``supersede``, ``forget``, plus any source-specific extras (Claude adds ``sync`` / ``resume``).
 The source supplies only its native ``run_export`` driver and, optionally, extra
 positionals on ``export`` (via :meth:`ConversationSource.extend_export_parser`).
 """
@@ -117,7 +117,7 @@ def build_parser(source: ConversationSource) -> argparse.ArgumentParser:
     p_log.add_argument("--session-id", help="target item id (defaults to the current one)")
     p_log.set_defaults(func=source.cmd_log)
 
-    # decide / supersede - rows of the ## Decisions table in the document body
+    # decide / supersede / forget - rows of the ## Decisions table in the document body
     _add_decision_parsers(sub, common, source)
 
     # source-specific extras (e.g. Claude sync / resume) share the common flags too
@@ -179,8 +179,27 @@ def _add_decision_parsers(sub, common: argparse.ArgumentParser, source: Conversa
             metavar="CITE",
             help="frame citations like '[claude:3f2a9c1e f12]', separated by spaces",
         )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="add the claim even if it was withdrawn with forget (recorded as unwithdrawn)",
+        )
         parser.add_argument("--session-id", help="target item id (defaults to the current one)")
         parser.set_defaults(func=source.cmd_decide)
+
+    from .withdrawals import REASONS
+
+    p_forget = sub.add_parser(
+        "forget",
+        parents=[common],
+        help="withdraw row N of ## Decisions: strike it and record its fingerprint",
+    )
+    p_forget.add_argument("number", type=int, metavar="N", help="the row to withdraw")
+    p_forget.add_argument(
+        "--reason", required=True, choices=REASONS, help="why the claim is withdrawn"
+    )
+    p_forget.add_argument("--session-id", help="target item id (defaults to the current one)")
+    p_forget.set_defaults(func=source.cmd_forget)
 
 
 def run(source: ConversationSource, argv: list[str] | None = None) -> None:

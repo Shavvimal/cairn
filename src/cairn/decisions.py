@@ -11,10 +11,12 @@ Notes``::
 
 A row's ``#`` is its stable local id: cairn never renumbers a row and never reuses a
 number. Its global id is ``<source>:<native_id>#<n>``. A corrected row is kept and
-struck in place, ``~~<claim>~~[ <marker>]``. This module writes the marker
-``superseded by #M`` only. The reader keeps any other marker exactly as written and
-classifies such a row as ``struck``, so a later writer can add its own marker without a
-change to the format. Readers hide struck rows by default.
+struck in place, ``~~<claim>~~[ <marker>]``. This module writes two markers:
+``superseded by #M`` (``supersede``) and ``withdrawn: <reason>`` (``forget``, appended
+as ``, withdrawn: <reason>`` to a marker the row already has). The reader keeps any
+other marker exactly as written and classifies such a row as ``struck``. Readers hide
+struck rows by default, and also an unstruck row whose claim the withdrawal ledger
+(:mod:`cairn.withdrawals`) lists as withdrawn.
 
 Writes go through :func:`mutate_table`: under the document lock it parses the table,
 applies an edit to the rows, rewrites only the lines of changed rows, inserts new rows
@@ -37,6 +39,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from . import withdrawals
+from .config import get_config
 from .frontmatter import (
     _LINE_BREAKS,
     DECISIONS_SECTION,
@@ -75,6 +79,8 @@ CELL_RE: Final = re.compile(r"\s*((?:[^|\\]|\\.)*?)\s*\|")
 STRUCK_RE: Final = re.compile(r"^~~(?P<claim>~?(?:[^~]~?)*)~~(?: (?P<marker>\S.*))?$")
 # Row numbers have at most nine digits, so ``int()`` never meets an oversized string.
 SUPERSEDED_RE: Final = re.compile(r"^superseded by #(?P<by>[1-9][0-9]{0,8})$")
+# ``withdrawn: <reason>`` as the whole marker or after ``, `` at its end.
+WITHDRAWN_RE: Final = re.compile(r"(?:^|, )withdrawn: (?P<reason>[a-z_]+)$")
 SOURCE_RE: Final = re.compile(
     r"^(?:supersedes #(?P<supersedes>[1-9][0-9]{0,8})(?![0-9]))?\s*(?P<rest>.*)$"
 )
@@ -168,6 +174,12 @@ class DecisionRow:
         return "superseded" if self.superseded_by is not None else "struck"
 
     @property
+    def withdrawn_reason(self) -> str | None:
+        """The reason of a ``withdrawn: <reason>`` marker, or ``None``."""
+        match = WITHDRAWN_RE.search(self.suffix) if self.struck else None
+        return match["reason"] if match else None
+
+    @property
     def supersedes(self) -> int | None:
         match = SOURCE_RE.match(self.source)
         return int(match["supersedes"]) if match and match["supersedes"] else None
@@ -208,6 +220,14 @@ def escape_cell(text: str) -> str:
 
 def unescape_cell(text: str) -> str:
     return re.sub(r"\\(.)", r"\1", text)
+
+
+def strike_withdrawn(row: DecisionRow, reason: str) -> DecisionRow:
+    """``row`` struck as withdrawn. A marker the row already has is kept in front:
+    ``superseded by #4, withdrawn: stale``."""
+    marker = f"withdrawn: {reason}"
+    suffix = f"{row.suffix}, {marker}" if row.struck and row.suffix else marker
+    return replace(row, struck=True, suffix=suffix)
 
 
 def render_row(row: DecisionRow) -> str:
@@ -463,12 +483,15 @@ def apply(
     source: str,
     conversation_heading: str | None = _CONVERSATION,
     id_field: str = "session_id",
+    on_read: Callable[[str], None] | None = None,
 ) -> Written | None:
     """Locate the session file and rewrite its table under the document lock.
 
     Returns ``None`` (with the reason on stderr) when the file is missing or
     ambiguous, has no My Notes, has a table that does not parse, or ``edit`` refuses.
-    Nothing is written in those cases.
+    Nothing is written in those cases. ``on_read``, when given, gets the document's
+    native id under the lock, before ``edit`` runs. Any exception that is not a
+    :class:`DecisionError` propagates, and nothing is written.
     """
     path = locate(find_file, session_id)
     if path is None:
@@ -477,6 +500,9 @@ def apply(
         # Keep CRLF and every other byte exactly: frame lengths count them.
         with path.open(encoding="utf-8", newline="") as handle:
             text = handle.read()
+        native_id, title, project = _identity(text, id_field, session_id)
+        if on_read is not None:
+            on_read(native_id)
         try:
             new_text, rows = rewrite(text, edit, conversation_heading=conversation_heading)
         except MissingNotes:
@@ -497,13 +523,17 @@ def apply(
             return None
         if new_text != text:
             atomic_write(path, new_text)
+    return Written(path, native_id, title, project, rows)
+
+
+def _identity(text: str, id_field: str, session_id: str) -> tuple[str, str | None, str | None]:
+    """The native id, title and project from the document's front matter."""
     try:
         fm = parse_frontmatter(text)
     except FrontmatterParseError:
         fm = {}
     native_id = fm.get("native_id") or fm.get(id_field) or session_id.split(":", 1)[-1]
-    project = fm.get("project") or None
-    return Written(path, str(native_id), fm.get("title") or None, project, rows)
+    return str(native_id), fm.get("title") or None, fm.get("project") or None
 
 
 def mutate_table(
@@ -514,6 +544,7 @@ def mutate_table(
     source: str,
     conversation_heading: str | None = _CONVERSATION,
     id_field: str = "session_id",
+    on_read: Callable[[str], None] | None = None,
 ) -> bool:
     """:func:`apply`, reduced to whether the write happened."""
     return (
@@ -524,6 +555,7 @@ def mutate_table(
             source=source,
             conversation_heading=conversation_heading,
             id_field=id_field,
+            on_read=on_read,
         )
         is not None
     )
@@ -573,8 +605,17 @@ def citations_error(value: str) -> str | None:
     )
 
 
+class ClaimWithdrawn(Exception):
+    """The withdrawal guard refused the claim; the refusal is already on stderr."""
+
+
 def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Namespace) -> int:
-    """``decide`` (``args.number`` absent) and ``supersede N``; the session is resolved."""
+    """``decide`` (``args.number`` absent) and ``supersede N``; the session is resolved.
+
+    The new claim passes the withdrawal guard under the document lock, before the
+    write: a withdrawn claim exits 3 unless ``--force``, which records it as
+    unwithdrawn in the ledger first.
+    """
     target: int | None = getattr(args, "number", None)
     claim = normalise_claim(args.claim)
     since = today()
@@ -585,12 +626,30 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
         print(f"Error: {error}", file=sys.stderr)
         return 2
     struck_number: list[int] = []
+    native: list[str] = []
+    guarded = bool(withdrawals.normalise_claim(claim))  # no fingerprint for "!!!"
+    config = get_config() if guarded else None
+
+    def check(number: int) -> None:
+        if config is None:
+            return
+        allowed = withdrawals.guard(
+            config,
+            claim,
+            force=bool(getattr(args, "force", False)),
+            source=source.source_name,
+            session_id=native[0],
+            row=number,
+        )
+        if not allowed:
+            raise ClaimWithdrawn
 
     def edit(rows: list[DecisionRow]) -> list[DecisionRow]:
         number = max((row.number for row in rows), default=0) + 1
         if number > MAX_ROW_NUMBER:
             raise DecisionError(f"no row number is left after #{MAX_ROW_NUMBER}")
         if target is None:
+            check(number)
             new = DecisionRow(
                 number,
                 claim,
@@ -606,6 +665,7 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
             raise MissingRow(target)
         if old.struck:
             raise DecisionError(f"row #{target} is already struck ({old.marker or 'no marker'})")
+        check(number)
         struck_number.append(target)
         struck = replace(old, struck=True, suffix=f"superseded by #{number}")
         cell = f"supersedes #{target}" + (f" {cites}" if cites else "")
@@ -620,14 +680,21 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
         )
         return [struck if row.number == target else row for row in rows] + [new]
 
-    written = apply(
-        source.find_file,
-        session_id,
-        edit,
-        source=source.source_name,
-        conversation_heading=source.conversation_heading,
-        id_field=source.id_field,
-    )
+    try:
+        written = apply(
+            source.find_file,
+            session_id,
+            edit,
+            source=source.source_name,
+            conversation_heading=source.conversation_heading,
+            id_field=source.id_field,
+            on_read=native.append,
+        )
+    except ClaimWithdrawn:
+        return 3
+    except (withdrawals.LedgerError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     if written is None:
         return 1
     row = written.rows[-1]
@@ -646,6 +713,96 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
         short = f"{source.source_name}:{written.native_id[:8]}"
         prefix = f"Struck #{struck_number[0]}; added" if struck_number else "Added"
         print(f"{prefix} #{row.number} to {short}: {row.claim}")
+    return 0
+
+
+def cmd_forget(source: ConversationSource, session_id: str, args: argparse.Namespace) -> int:
+    """``forget N --reason R``: withdraw row N; the session is resolved, N >= 1.
+
+    Under the document lock: find row N, append a ``withdrawn`` record of its
+    fingerprint to the ledger (unless the fingerprint is already withdrawn), then
+    strike the row as ``withdrawn: R``. The ledger goes first, so a crash between the
+    two leaves the claim withdrawn and a second run strikes the row with no second
+    record. A row already struck as withdrawn is reported and left alone (exit 0).
+    """
+    number: int = args.number
+    reason: str = args.reason
+    config = get_config()
+    ledger = withdrawals.ledger_path(config)
+    native: list[str] = []
+    outcome: dict = {}
+
+    def short() -> str:
+        return f"{source.source_name}:{native[0][:8]}"
+
+    def edit(rows: list[DecisionRow]) -> list[DecisionRow]:
+        if not rows:
+            raise DecisionError(f"no decisions table in {short()}")
+        row = next((r for r in rows if r.number == number), None)
+        if row is None:
+            numbers = sorted(r.number for r in rows)
+            raise DecisionError(
+                f"no decision row #{number} in {short()} (rows: {numbers[0]}-{numbers[-1]})"
+            )
+        try:
+            fp: str | None = withdrawals.fingerprint(row.claim)
+        except withdrawals.EmptyClaim:
+            fp = None
+        outcome["fingerprint"] = fp
+        if row.withdrawn_reason is not None:
+            outcome.update(already=True, appended=False, reason=row.withdrawn_reason)
+            return rows
+        if fp is None:
+            raise DecisionError(
+                f"row #{number} has an empty claim after normalisation; edit it by hand"
+            )
+        appended = withdrawals.withdraw(
+            ledger, fp, source=source.source_name, session_id=native[0], row=number, reason=reason
+        )
+        outcome.update(already=False, appended=appended, reason=reason)
+        struck = strike_withdrawn(row, reason)
+        return [struck if r.number == number else r for r in rows]
+
+    try:
+        written = apply(
+            source.find_file,
+            session_id,
+            edit,
+            source=source.source_name,
+            conversation_heading=source.conversation_heading,
+            id_field=source.id_field,
+            on_read=native.append,
+        )
+    except (withdrawals.LedgerError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if written is None:
+        return 1
+    ref = f"{source.source_name}:{written.native_id}"
+    shown = f"{source.source_name}:{written.native_id[:8]}"
+    if outcome["reason"] == "private" and not outcome["already"]:
+        print(
+            f"Note: withdrawn, not erased: the claim text stays in {written.path} "
+            "and in the QMD index until you edit the file.",
+            file=sys.stderr,
+        )
+    if getattr(args, "json", False):
+        data = {
+            "ref": ref,
+            "row": number,
+            "reason": outcome["reason"],
+            "fingerprint": outcome["fingerprint"],
+            "path": str(written.path),
+            "ledger": str(ledger),
+            "already_withdrawn": outcome["already"],
+            "appended": outcome["appended"],
+        }
+        print(json.dumps(data, indent=2))
+    elif not getattr(args, "quiet", False):
+        if outcome["already"]:
+            print(f"Row #{number} in {shown} is already withdrawn (reason: {outcome['reason']})")
+        else:
+            print(f"Withdrew row #{number} in {shown} (reason: {reason})")
     return 0
 
 
@@ -699,6 +856,28 @@ def read_table(path: Path, heading: str | None) -> tuple[list[DecisionRow], list
     return parse_table(lines, section)
 
 
+def withdrawal(
+    row: DecisionRow, state: dict[str, withdrawals.Withdrawal]
+) -> tuple[str | None, str] | None:
+    """``(reason, via)`` when the row counts as withdrawn, else ``None``.
+
+    ``via`` is ``row`` when the claim cell is struck with a ``withdrawn: <reason>``
+    marker, and ``ledger`` when the row is not struck but the ledger ``state`` lists
+    its claim's fingerprint as withdrawn (the claim was written elsewhere, or the
+    strike was edited away by hand). A superseded or otherwise struck row is never
+    withdrawn through the ledger.
+    """
+    if row.withdrawn_reason is not None:
+        return row.withdrawn_reason, "row"
+    if row.struck or not state:
+        return None
+    try:
+        entry = withdrawals.is_withdrawn(state, withdrawals.fingerprint(row.claim))
+    except withdrawals.EmptyClaim:
+        return None
+    return (entry.reason, "ledger") if entry is not None else None
+
+
 def row_json(
     row: DecisionRow,
     *,
@@ -707,6 +886,7 @@ def row_json(
     title: str | None,
     project: str | None,
     path: Path,
+    withdrawn: tuple[str | None, str] | None = None,
 ) -> dict:
     return {
         "ref": f"{session}#{row.number}",
@@ -723,7 +903,10 @@ def row_json(
         "state": row.state,
         "marker": row.marker,
         "superseded_by": row.superseded_by,
-        "overdue": row.overdue(as_of),
+        "overdue": row.overdue(as_of) and withdrawn is None,
+        "withdrawn": withdrawn is not None,
+        "withdrawn_reason": withdrawn[0] if withdrawn else None,
+        "withdrawn_via": withdrawn[1] if withdrawn else None,
         "title": title,
         "project": project,
         "path": str(path),
@@ -751,7 +934,12 @@ def collect(
     return found, problems
 
 
-def _json(record: SessionRecord, row: DecisionRow, as_of: date) -> dict:
+def _json(
+    record: SessionRecord,
+    row: DecisionRow,
+    as_of: date,
+    withdrawn: tuple[str | None, str] | None = None,
+) -> dict:
     return row_json(
         row,
         session=record.reference,
@@ -759,13 +947,25 @@ def _json(record: SessionRecord, row: DecisionRow, as_of: date) -> dict:
         title=record.title,
         project=record.project,
         path=record.path,
+        withdrawn=withdrawn,
     )
 
 
-def overdue_rows(records: list[SessionRecord], as_of: date) -> list[dict]:
-    """The JSON rows of every active row whose ``revisit_by`` is before ``as_of``."""
+def overdue_rows(
+    records: list[SessionRecord],
+    as_of: date,
+    state: dict[str, withdrawals.Withdrawal] | None = None,
+) -> list[dict]:
+    """The JSON rows of every active row whose ``revisit_by`` is before ``as_of``.
+
+    A row withdrawn through the ledger ``state`` is left out, as a struck row is.
+    """
     found, _problems = collect(records)
-    return [_json(record, row, as_of) for record, row in found if row.overdue(as_of)]
+    return [
+        _json(record, row, as_of)
+        for record, row in found
+        if row.overdue(as_of) and withdrawal(row, state or {}) is None
+    ]
 
 
 def _as_of(value: str | None) -> date:
@@ -783,14 +983,19 @@ def add_recall_parser(sub: argparse._SubParsersAction, session_sources: list[str
         help="list ## Decisions rows across sessions; --overdue for rows due for review",
         description=(
             "List the rows of every session's ## Decisions table. DATE filters on the "
-            "row's since date. Struck rows are hidden unless --include-struck."
+            "row's since date. Struck rows, and rows whose claim was withdrawn with "
+            "forget, are hidden unless --include-struck."
         ),
     )
     cmd.add_argument("date_expr", nargs="*", metavar="DATE")
     cmd.add_argument(
         "--overdue", action="store_true", help="only active rows with revisit_by before --as-of"
     )
-    cmd.add_argument("--include-struck", action="store_true", help="also list struck rows")
+    cmd.add_argument(
+        "--include-struck",
+        action="store_true",
+        help="also list struck rows and rows whose claim is withdrawn",
+    )
     cmd.add_argument("--as-of", metavar="YYYY-MM-DD", help="the date --overdue uses (UTC today)")
     projects = cmd.add_mutually_exclusive_group()
     projects.add_argument("--project", help="exact project/repo label or working directory")
@@ -810,31 +1015,35 @@ def run_recall(args: argparse.Namespace, store: SessionStore) -> int:
     if project:
         records = [r for r in records if r.matches_project(project)]
     found, problems = collect(records)
+    state = withdrawals.load(withdrawals.ledger_path(store.config))
     selected = []
     for record, row in found:
-        if not args.include_struck and row.struck:
+        withdrawn = withdrawal(row, state)
+        if not args.include_struck and (row.struck or withdrawn is not None):
             continue
-        if args.overdue and not row.overdue(as_of):
+        if args.overdue and (withdrawn is not None or not row.overdue(as_of)):
             continue
         if window is not None:
             since = datetime.fromisoformat(row.since).replace(tzinfo=UTC)
             if not window[0] <= since < window[1]:
                 continue
-        selected.append((record, row))
+        selected.append((record, row, withdrawn))
     if args.json:
         data = {
             "as_of": as_of.isoformat(),
-            "decisions": [_json(record, row, as_of) for record, row in selected],
+            "decisions": [_json(record, row, as_of, w) for record, row, w in selected],
             "problems": problems,
         }
         print(json.dumps(data, indent=2))
         return 0
-    for record, row in selected:
+    for record, row, withdrawn in selected:
         ref = f"{record.source}:{record.session_id[:8]}#{row.number}"
         revisit = f"revisit {row.revisit_by}" if row.revisit_by else "revisit -"
         claim = row.claim if not row.struck else f"~~{row.claim}~~ [{row.marker or 'struck'}]"
         line = f"{ref}  {row.kind}  {row.confidence}  {row.since}  {revisit}  {claim}"
-        print(line + ("  OVERDUE" if row.overdue(as_of) else ""))
+        if withdrawn is not None and withdrawn[1] == "ledger":
+            line += f"  [withdrawn: {withdrawn[0]}]"
+        print(line + ("  OVERDUE" if withdrawn is None and row.overdue(as_of) else ""))
     print(f"{len(selected)} decisions")
     return 0
 
@@ -849,6 +1058,8 @@ __all__ = [
     "SEPARATOR",
     "STRUCK_RE",
     "SUPERSEDED_RE",
+    "WITHDRAWN_RE",
+    "ClaimWithdrawn",
     "DecisionError",
     "DecisionRow",
     "Problem",
@@ -856,6 +1067,7 @@ __all__ = [
     "add_recall_parser",
     "apply",
     "cmd_decide",
+    "cmd_forget",
     "mutate_table",
     "overdue_rows",
     "parse",
@@ -867,4 +1079,6 @@ __all__ = [
     "rewrite",
     "row_json",
     "run_recall",
+    "strike_withdrawn",
+    "withdrawal",
 ]
