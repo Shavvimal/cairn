@@ -317,7 +317,8 @@ holds an earlier `trusted_hash` that cairn replaced. `commands` keeps v1 compati
 | hooks.json does not parse | `ValueError` as today, nothing written |
 | config.toml does not parse | error, hooks.json not written either (checked at step 5) |
 | config.toml absent | create it with the one table, mode 0600 |
-| `codex` not on PATH or version unreadable | group written, trust skipped, manual message |
+| `codex` not on PATH | `inspect_hooks` fails first, as in 2.9.0; nothing written |
+| Version unreadable (timeout, non-zero exit, unknown output) | group written, trust skipped, manual message |
 | Version outside range | as above, with the range |
 | Table at the key has extra keys | left unchanged, warning, manual step |
 | config.toml changed mid-run | error, nothing changed by this step; receipt keeps pending entries |
@@ -436,3 +437,25 @@ the sections above in these points:
 13. `atomic_write` gained the `mode` argument only. The callers resolve symlinks, so other
     writers keep their behaviour. Trust-state precedence is `disabled`, `trusted`,
     `manual`, `stale`, `missing`.
+14. Review fixes. Step 6 holds for receipt v2: a group with only cairn's command whose
+    sha256 is neither in the receipt nor the group cairn would write is user-edited.
+    Install raises `SessionEnd group {i} in {hooks_path} changed since cairn wrote it;
+    cairn changed nothing. Restore or remove that group, then run the command again.`
+    (exit 1). Command ownership alone applies to the v1 file and to a receipt with no
+    group entry.
+15. The prepared receipt (step 10) also keeps every entry of the earlier receipt, marked
+    pending, so after a crash either version of a replaced group or table is cairn's.
+    Several entries can share one table key; any of their sha256 values marks it owned.
+16. `write_config` stages and fsyncs the backup and the new file first, then runs the race
+    check, then renames both. A Codex save between that check and the rename is still lost:
+    a writer that does not share cairn's lock cannot be excluded.
+17. `--dry-run` takes no lock and writes no file. It lists every launcher copy
+    (`launcher_paths()`) with its sha256. The receipt line gives the entry count, not a
+    sha256: the receipt carries a timestamp. Install still runs `hooks/list`, and Codex can
+    create its own state files in `$CODEX_HOME` while it answers.
+18. Uninstall warns `no SessionEnd group in {hooks_path} runs cairn's command any more
+    (cairn wrote group {i}); left as it is, and its receipt entry dropped.` when no group
+    matches the receipt, for example after the user changed the command.
+19. A receipt that is not a JSON object, has another `receipt_version`, or has an entry
+    without a known `kind`, a `sha256` or (for a table) a `key` is a `ValueError` that
+    names the receipt and asks to move it aside (exit 1).

@@ -430,8 +430,9 @@ hooks are preserved. On the Codex versions where cairn verified Codex's trust-ha
 (0.165.x), the installer also writes the `[hooks.state."<key>"]` trust table for its own
 SessionEnd group in `$CODEX_HOME/config.toml`, keeps a byte backup in
 `config.toml.cairn-bak`, and records a sha256 per entry in
-`$CODEX_HOME/cairn-hook-receipt.json`. `--dry-run` prints every planned write and writes
-nothing; `--no-trust` leaves trust to you. On another Codex version cairn writes no trust:
+`$CODEX_HOME/cairn-hook-receipt.json`. `--dry-run` prints every planned write and cairn
+writes nothing (Codex's own `hooks/list` answer can still create Codex state files);
+`--no-trust` leaves trust to you. On another Codex version cairn writes no trust:
 review/trust the hook in `/hooks`. `cairn hook uninstall --harness codex` removes only the
 entries whose sha256 still matches the receipt.
 
