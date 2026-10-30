@@ -626,7 +626,8 @@ class TestFix(VerifyFixture):
         self.assertEqual(code, 1)
         self.assertEqual(
             stderr,
-            f"Error: {self.journal} changed while verify ran; nothing written, run it again\n",
+            f"Error: {self.journal} changed while verify ran; nothing written, run it again\n"
+            "code: RECALL_FAILED (run 'cairn errors RECALL_FAILED')\n",
         )
         self.assertEqual(self.journal.read_text(encoding="utf-8"), edited)
 
