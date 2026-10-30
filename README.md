@@ -208,6 +208,8 @@ cairn codex decide "Use one PR per layer" --kind decision --revisit-by 2026-12-0
 cairn codex forget 3 --reason hallucination
                                  # withdraw row 3; a later decide of the claim exits 3
 cairn recall decisions --overdue # active decision rows due for review
+cairn claude memory import --dry-run
+                                 # plan: Claude auto-memory notes as decision rows
 ```
 
 `forget` strikes the row as `~~claim~~ withdrawn: <reason>` and appends a SHA-256
@@ -215,6 +217,13 @@ fingerprint of the normalised claim to `withdrawn.jsonl` in the data root. The l
 holds no claim text. Withdrawal does not erase: the claim stays in the session document
 until you edit the file, in the QMD index until the next index update after that edit,
 and in any backup or copy of the file. Recall and the digest hide withdrawn rows.
+
+`cairn claude memory import` adds each Claude Code auto-memory note of the current
+project as a decision row: in the session that wrote it when cairn exported that
+session, else in `<data_root>/decisions/<project>.md`. A re-run adds only new notes.
+Notes hold whatever Claude saved, private names included. The import writes only under
+`data_root`, never into a repository; do not copy a decisions document into a tracked
+file.
 
 Service docs is a verbatim mirror with no `--since`/`--all`:
 `cairn service-docs export [--clean]`.

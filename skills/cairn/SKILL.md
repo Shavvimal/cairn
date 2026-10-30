@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: Exports, lists, annotates, and resumes local AI coding sessions (Claude Code, Codex, Cursor) plus Granola meetings and service docs to searchable markdown via the cairn CLI. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "resume session", "add session note", "close session", "log session", "sync docs", "sync service docs", "meeting transcripts", or "scheduled routine". Covers per-source export/list/context/note/close/log/decide/supersede/forget, Claude and Codex resume, the top-level sync/doctor/config/cron/routine commands, and the config-driven enablement model. Requires the cairn CLI - install via /cairn:setup.
+description: Exports, lists, annotates, and resumes local AI coding sessions (Claude Code, Codex, Cursor) plus Granola meetings and service docs to searchable markdown via the cairn CLI. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "resume session", "add session note", "close session", "log session", "sync docs", "sync service docs", "meeting transcripts", "scheduled routine", or "import claude memories". Covers per-source export/list/context/note/close/log/decide/supersede/forget, Claude and Codex resume, Claude memory import, the top-level sync/doctor/config/cron/routine commands, and the config-driven enablement model. Requires the cairn CLI - install via /cairn:setup.
 allowed-tools: Bash, Read
 ---
 
@@ -15,7 +15,7 @@ Cairn syncs local AI activity to markdown for observability and QMD search. One 
 
 | Source         | Collection              | What it captures                     |
 | -------------- | ----------------------- | ------------------------------------ |
-| `claude`       | `claude-code-sessions/` | Claude Code conversations (+ resume) |
+| `claude`       | `claude-code-sessions/` | Claude Code conversations (+ resume, memory import) |
 | `codex`        | `codex-sessions/`       | Codex CLI rollouts                   |
 | `cursor`       | `cursor-sessions/`      | Cursor IDE composer sessions         |
 | `granola`      | `granola-sessions/`     | Granola meeting notes + transcripts  |
@@ -207,13 +207,14 @@ Re-exporting never clobbers your annotations. Across all sources, exports preser
 `## My Notes` section, a `## Decisions` table directly after it (a table cairn wrote stays
 byte for byte; a hand edit keeps its text, with LF endings), and these
 frontmatter fields: `comments`, `status`, `tags`, `rating`, `title`, `projects`, `links`.
-`decide`, `supersede` and `forget` are described in `workflows/log-session.md`.
+`decide`, `supersede` and `forget` are described in `workflows/log-session.md`, and so is
+`cairn claude memory import`, which adds Claude Code auto-memory notes as decision rows.
 
 ## Per-source reference
 
 Each source's data location, frontmatter schema, and source-specific commands:
 
-- `reference/claude.md` - Claude Code sessions + the `resume` command
+- `reference/claude.md` - Claude Code sessions, the `resume` command and `memory import`
 - `reference/codex.md` - Codex CLI rollouts
 - `reference/cursor.md` - Cursor IDE sessions
 - `reference/granola.md` - Granola meetings (dual source: cache + API)
