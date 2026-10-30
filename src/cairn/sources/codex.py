@@ -891,6 +891,11 @@ class CodexSource(ConversationSource):
         return 0
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """The ``cairn codex`` parser, built without running a command."""
+    return cli.build_parser(CodexSource(), prog="cairn codex")
+
+
 def main() -> None:
     """Console entry point - drive the Codex source through the shared CLI."""
     cli.run(CodexSource())

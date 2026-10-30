@@ -57,13 +57,15 @@ def _window_parent() -> argparse.ArgumentParser:
     return p
 
 
-def build_parser(source: ConversationSource) -> argparse.ArgumentParser:
+def build_parser(source: ConversationSource, prog: str | None = None) -> argparse.ArgumentParser:
     common = _common_parent()
     window = _window_parent()
 
-    # prog is left to argparse: invoked via the dispatcher, sys.argv[0] is already
-    # "cairn <source>", so usage/help read naturally without hardcoding a name.
+    # prog defaults to argparse's: invoked via the dispatcher, sys.argv[0] is already
+    # "cairn <source>", so usage/help read naturally without hardcoding a name. A
+    # caller that builds the parser outside a run (a test) passes it explicitly.
     parser = argparse.ArgumentParser(
+        prog=prog,
         description=f"Export and annotate {source.name} to markdown.",
         formatter_class=_HelpFormatter,
     )

@@ -179,7 +179,7 @@ def cmd_context(args: argparse.Namespace) -> int:
 # =============================================================================
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="service-docs",
         description="Sync service documentation into a single QMD collection",
@@ -201,8 +201,11 @@ def main():
     # context
     p_context = subparsers.add_parser("context", help="Register QMD context descriptions")
     p_context.set_defaults(func=cmd_context)
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: list[str] | None = None):
+    args = build_parser().parse_args(argv)
     sys.exit(args.func(args))
 
 

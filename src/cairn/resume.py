@@ -53,8 +53,12 @@ def add_source_parser(
     parser.set_defaults(source=source)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cairn resume")
     _arguments(parser)
     parser.add_argument("--json", action="store_true")
-    return run(parser.parse_args(argv))
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(build_parser().parse_args(argv))

@@ -800,6 +800,11 @@ class AntigravitySource(ConversationSource):
         return 0
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """The ``cairn antigravity`` parser, built without running a command."""
+    return cli.build_parser(AntigravitySource(), prog="cairn antigravity")
+
+
 def main() -> None:
     """Console entry point - drive the Antigravity source through the shared CLI."""
     cli.run(AntigravitySource())
