@@ -10,7 +10,8 @@ hand-written notes survive every re-render.
 
 The document is deliberately not a session document: its ``type`` is
 ``agent-exchange`` and it carries no ``source:`` or ``native_id:`` key, so the
-catalog parses it but no source index, listing or recall ever returns it. The
+catalog parses it but no source index, listing or recall ever returns it. Its head
+carries ``provenance: agent``, because an agent wrote every prompt in it. The
 renderer validates its own head before anything is written (D18): a head key that
 collides with a preserved-tail key would make ``rewrite_preserved_tail`` cut the
 frontmatter in the wrong place, and a malformed block would be reported by the
@@ -336,6 +337,7 @@ def render_exchange(state: ThreadState, existing_fm: dict | None, my_notes: str 
     ]
     if state.forked_from:
         head.append(f"forked_from: {_plain(state.forked_from)}")
+    head.append("provenance: agent")  # an agent wrote every prompt in the thread
     head.append(title_line(title))
     head += head_close(last.get("finished_at") or last.get("heartbeat_at") or created)
     validate_head(head)

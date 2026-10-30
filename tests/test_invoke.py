@@ -1871,6 +1871,15 @@ class TestExchangeRenderer(unittest.TestCase):
         self.assertIn("``````text\nHas ``` fences ````` inside\n``````", text)
         self.assertIn('title: "codex round 1: Has ``` fences ````` inside"', text)
 
+    def test_exchange_head_carries_provenance_agent(self):
+        text = render_exchange(self.state(), None, None)
+        head = text.split("\n---\n", 1)[0].split("\n")
+        validate_head(head[: head.index("status: active")])
+        self.assertEqual(parse_frontmatter(text)["provenance"], "agent")
+        # In the head, before the title and the preserved tail.
+        self.assertLess(head.index("provenance: agent"), head.index("status: active"))
+        self.assertTrue(head[head.index("provenance: agent") + 1].startswith("title: "))
+
     def test_rejects_tail_and_source_keys(self):
         with self.assertRaisesRegex(ValueError, "preserved-tail"):
             validate_head(["---", "type: agent-exchange", "status_extra: x"])
