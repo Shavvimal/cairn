@@ -68,6 +68,10 @@ Then the shared metadata (`cairn_schema`, `source`, `native_id`, `source_revisio
   messages; `tests/test_parser_fixtures.py` scores message recall exactly.
 - **Drift.** agy files any step type it does not know as a tool result, so the guard counts only rendered user and assistant turns: a transcript of unknown step types is `zero-messages`, not a list of tool turns. Child conversations never warn `no-user-turns`.
 
+Content sections: My Notes, Decisions (once `decide` adds a row), Conversation.
+Preserved on export: `## My Notes`, the `## Decisions` table after it, and the
+frontmatter tail above.
+
 ## Hook
 
 agy has no SessionEnd; its `Stop` event fires at the end of every turn. `cairn hook install

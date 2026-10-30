@@ -190,7 +190,7 @@ Clone the repo and `uv pip install -e .`. The editable install finds `cairn.conf
 
 ### `/cairn` — drive the CLI (export, list, annotate, resume)
 
-Every windowed source (claude, codex, cursor, granola) shares the same verbs — `export`, `list`, `context`, `note`, `close`, `log` — with `export` defaulting to the last 24h:
+Every windowed source (claude, codex, cursor, granola) shares the same verbs — `export`, `list`, `context`, `note`, `close`, `log`, `decide`, `supersede` — with `export` defaulting to the last 24h:
 
 ```bash
 cairn claude export --since 7d   # export the last week of Claude sessions
@@ -200,6 +200,9 @@ cairn claude list --json         # list exported sessions as JSON
 cairn resume codex:FULL_ID        # print a native resume command (Claude or Codex)
 cairn claude resume --pick       # legacy interactive Claude picker
 cairn codex note "progress"      # add a timestamped note
+cairn codex decide "Use one PR per layer" --kind decision --revisit-by 2026-12-01
+                                 # add a row to the session's ## Decisions table
+cairn recall decisions --overdue # active decision rows due for review
 ```
 
 Service docs is a verbatim mirror with no `--since`/`--all`:

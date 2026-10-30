@@ -78,8 +78,9 @@ replay_unresolved: true           # only when the replay cut failed (see below)
 
 Its status defaults to `done` once it gave a final answer.
 
-Content sections: Subagents (parents only), Tool Calls, My Notes, Conversation.
-Preserved on export: `## My Notes` plus frontmatter `comments`, `projects`, `status`,
+Content sections: Subagents (parents only), Tool Calls, My Notes, Decisions (once
+`decide` adds a row), Conversation.
+Preserved on export: `## My Notes`, the `## Decisions` table after it, plus frontmatter `comments`, `projects`, `status`,
 `tags`, `rating`, `title`.
 
 ## Subagent rollouts

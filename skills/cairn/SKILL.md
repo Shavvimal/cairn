@@ -34,16 +34,18 @@ For the live set of configured integrations and their enabled state, run `cairn 
 
 The four conversation sources (claude, codex, cursor, granola) accept the same verbs.
 **service-docs is a file mirror - it supports only `export` / `list` / `context`** (no
-`note` / `close` / `log`, no time window; see `reference/service-docs.md`).
+`note` / `close` / `log` / `decide` / `supersede`, no time window; see `reference/service-docs.md`).
 
-| Verb      | Does                                    | Example                                                  |
-| --------- | --------------------------------------- | -------------------------------------------------------- |
-| `export`  | Render items to markdown                | `cairn codex export --since 7d`                          |
-| `list`    | List exported items (`--all`, `--json`) | `cairn claude list --json`                               |
-| `context` | Register QMD context descriptions       | `cairn cursor context`                                   |
-| `note`    | Add a timestamped comment               | `cairn claude note "got it working"`                     |
-| `close`   | Mark item done (+ optional note)        | `cairn codex close "shipped"`                            |
-| `log`     | Annotate status/tags/rating (+ comment) | `cairn cursor log --status done --tags "x,y" --rating 8` |
+| Verb        | Does                                    | Example                                                       |
+| ----------- | --------------------------------------- | ------------------------------------------------------------- |
+| `export`    | Render items to markdown                | `cairn codex export --since 7d`                               |
+| `list`      | List exported items (`--all`, `--json`) | `cairn claude list --json`                                    |
+| `context`   | Register QMD context descriptions       | `cairn cursor context`                                        |
+| `note`      | Add a timestamped comment               | `cairn claude note "got it working"`                          |
+| `close`     | Mark item done (+ optional note)        | `cairn codex close "shipped"`                                 |
+| `log`       | Annotate status/tags/rating (+ comment) | `cairn cursor log --status done --tags "x,y" --rating 8`      |
+| `decide`    | Add a row to the `## Decisions` table   | `cairn claude decide "Ship one PR per layer" --kind decision` |
+| `supersede` | Strike row N, add its replacement       | `cairn claude supersede 3 "Keep three words until grading"`   |
 
 Use `cairn resume SOURCE:ID` for either Claude or Codex: it prints the appropriate native
 command. Show that command for the user's terminal. Claude also retains its legacy picker.
@@ -174,8 +176,9 @@ filters on it.
 ## Preserved on export (shared)
 
 Re-exporting never clobbers your annotations. Across all sources, exports preserve the
-`## My Notes` section and these frontmatter fields: `comments`, `status`, `tags`,
-`rating`, `title`, `projects`, `links`.
+`## My Notes` section, a `## Decisions` table directly after it (byte for byte), and these
+frontmatter fields: `comments`, `status`, `tags`, `rating`, `title`, `projects`, `links`.
+`decide` and `supersede` are described in `workflows/log-session.md`.
 
 ## Per-source reference
 
