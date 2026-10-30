@@ -95,9 +95,25 @@ class Finding:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, raw: dict) -> Finding:
-        known = {f.name for f in fields(cls)}
+    def from_dict(cls, raw: object) -> Finding:
+        """Build a finding from its stored form; ``TypeError`` names a bad shape."""
+        if not isinstance(raw, dict):
+            raise TypeError(f"finding is a {type(raw).__name__}, not an object")
+        known = {f.name: f.type for f in fields(cls)}
+        for name, value in raw.items():
+            allowed = _FIELD_TYPES.get(str(known.get(name)))
+            if allowed is not None and (isinstance(value, bool) or not isinstance(value, allowed)):
+                raise TypeError(f"finding field {name!r} is a {type(value).__name__}")
         return cls(**{k: v for k, v in raw.items() if k in known})
+
+
+# Stored field types, by the annotation string ``fields()`` reports.
+_FIELD_TYPES: dict[str, tuple[type, ...]] = {
+    "str": (str,),
+    "int": (int,),
+    "dict[str, int]": (dict,),
+    "str | None": (str, type(None)),
+}
 
 
 def _tail(adapter_version: str, target: SpecTarget | None) -> str:
@@ -110,6 +126,27 @@ def _revision(path: Path) -> str | None:
         return file_revision(path)
     except OSError:
         return None
+
+
+def _unknown_kinds(
+    stats: JsonlStats, conversational: frozenset[str], ignored: frozenset[str]
+) -> list[str]:
+    """Finer kinds under a wrapper type that neither set names.
+
+    A wrapper is the top-level part of a conversational name with a slash (Codex
+    ``event_msg``, ``response_item``). Under a wrapper the finer kind decides, so a
+    renamed payload type (``response_item/message_v2``) is unknown like a renamed
+    top-level type. A wrapper record whose kind cannot be read counts as
+    ``<wrapper>/?``.
+    """
+    wrappers = sorted({t.split("/", 1)[0] for t in conversational if "/" in t})
+    unknown: list[str] = []
+    for wrapper in wrappers:
+        sub = {k: n for k, n in stats.kinds.items() if k.split("/", 1)[0] == wrapper}
+        unknown += sorted(k for k in sub if k not in conversational and k not in ignored)
+        if stats.types[wrapper] > sum(sub.values()):
+            unknown.append(f"{wrapper}/?")
+    return unknown
 
 
 def check_parse(
@@ -143,6 +180,7 @@ def check_parse(
     conv_records = sum(stats.types[t] + stats.kinds[t] for t in conversational)
     known = ignored | {t.split("/", 1)[0] for t in conversational}
     unknown = sorted(t for t in stats.types if t not in known)
+    unknown += _unknown_kinds(stats, conversational, ignored)
     tail = _tail(adapter_version, target)
     where = f"{source}:{native_id}"
 
@@ -283,7 +321,11 @@ class FindingsStore:
     def _read(self) -> dict[str, Finding]:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-            entries = raw["findings"]
+            if not isinstance(raw, dict):
+                raise TypeError("the file is not a JSON object")
+            if raw.get("schema_version") != FINDINGS_SCHEMA:
+                raise ValueError(f"schema_version is not {FINDINGS_SCHEMA}")
+            entries = raw.get("findings")
             if not isinstance(entries, dict):
                 raise TypeError("findings is not an object")
             return {key: Finding.from_dict(value) for key, value in entries.items()}

@@ -86,6 +86,9 @@ SPEC_TARGETS: dict[str, SpecTarget] = {
                 "response_item/custom_tool_call",
             }
         ),
+        # Under event_msg and response_item the finer kind decides: a payload type
+        # in neither set is unknown (drift when nothing renders), so the control
+        # and context kinds measured on the live store are listed here.
         ignored=frozenset(
             {
                 "compacted",
@@ -94,6 +97,32 @@ SPEC_TARGETS: dict[str, SpecTarget] = {
                 "token_usage_record",
                 "turn_context",
                 "world_state",
+                "event_msg/agent_message",
+                "event_msg/agent_reasoning",
+                "event_msg/collab_agent_spawn_end",
+                "event_msg/collab_waiting_end",
+                "event_msg/context_compacted",
+                "event_msg/error",
+                "event_msg/exec_command_end",
+                "event_msg/item_completed",
+                "event_msg/mcp_tool_call_end",
+                "event_msg/patch_apply_end",
+                "event_msg/rate_limits",
+                "event_msg/task_complete",
+                "event_msg/task_started",
+                "event_msg/thread_name_updated",
+                "event_msg/thread_settings_applied",
+                "event_msg/token_count",
+                "event_msg/turn_aborted",
+                "event_msg/web_search_end",
+                "response_item/additional_tools",
+                "response_item/agent_message",
+                "response_item/custom_tool_call_output",
+                "response_item/function_call_output",
+                "response_item/message/developer",
+                "response_item/message/user",
+                "response_item/reasoning",
+                "response_item/web_search_call",
             }
         ),
     ),

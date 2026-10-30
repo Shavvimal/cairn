@@ -158,6 +158,30 @@ class TestClassification(GuardFixture):
         stats.kinds["event_msg/user_message"] = 1
         self.assertEqual(_check("codex", stats, {"messages": []}).kind, "zero-messages")
 
+    def test_codex_renamed_payload_kind_is_zero_messages(self):
+        # The wrapper types stay known; the payload types under them changed.
+        stats = JsonlStats(bytes=100, lines=4, records=4)
+        stats.types.update({"session_meta": 1, "event_msg": 1, "response_item": 2})
+        stats.kinds.update(
+            {
+                "event_msg/task_started": 1,
+                "response_item/message_v2": 1,
+                "response_item/message/developer": 1,
+            }
+        )
+        finding = _check("codex", stats, {"messages": []})
+        assert finding is not None
+        self.assertEqual((finding.kind, finding.severity), ("zero-messages", "error"))
+        self.assertIn("unknown types: response_item/message_v2", finding.detail)
+        # A wrapper record whose payload type cannot be read is unknown too.
+        stats = JsonlStats(bytes=100, lines=2, records=2)
+        stats.types.update({"session_meta": 1, "response_item": 1})
+        finding = _check("codex", stats, {"messages": []})
+        self.assertEqual(
+            finding.detail if finding else None,
+            ("rendered 0 messages from 2 records (100 bytes); unknown types: response_item/?"),
+        )
+
     def test_all_lines_malformed_is_unreadable_lines(self):
         stats = JsonlStats(lines=3, malformed=3, bytes=42)
         finding = _check("antigravity", stats, {"messages": []})
@@ -263,6 +287,67 @@ class TestAdapterGuards(GuardFixture):
         self.assertEqual((finding.kind, finding.records), ("zero-messages", 2))
         self.assertEqual(list(self.output_dir("cursor-sessions").rglob("*.md")), [])
 
+    def _codex_turns(self, name: str, texts: list[str], sid: str = CODEX_ID) -> Path:
+        records: list = [{"type": "session_meta", "payload": {"id": sid, "cwd": "/tmp/demo"}}]
+        records += [
+            {
+                "type": "event_msg",
+                "timestamp": f"2026-10-0{index + 1}T09:00:00Z",
+                "payload": {"type": "user_message", "message": text},
+            }
+            for index, text in enumerate(texts)
+        ]
+        return _jsonl(self.codex / name, records)
+
+    def test_codex_drifted_fragment_holds_the_whole_session(self):
+        older = self._codex_turns(f"rollout-2026-10-01T09-00-00-{CODEX_ID}.jsonl", ["Old turn"])
+        newer = self._codex_turns(
+            f"rollout-2026-10-02T09-00-00-{CODEX_ID}.jsonl", ["New turn", "Newer turn"]
+        )
+        _age(older, 7200)
+        self.assertEqual(self.run_cli("codex", "export", "--all").returncode, 0)
+        [document] = sorted(self.output_dir().rglob("*.md"))
+        before = document.read_text()
+        self.assertIn("Newer turn", before)
+        _jsonl(
+            newer,
+            [
+                {"type": "session_meta", "payload": {"id": CODEX_ID, "cwd": "/tmp/demo"}},
+                {"type": "turn_item", "payload": {"role": "user", "text": "Newer turn"}},
+            ],
+        )
+        for order in ([older, newer], [newer, older]):
+            source = self.source("codex")
+            with redirect_stderr(io.StringIO()):
+                parsed, failed = source._parse_rollouts(order)
+                source.export_rollouts(quiet=True, parsed=parsed)
+            self.assertEqual(parsed, [])
+            self.assertEqual(sorted(failed), sorted(order))
+            self.assertEqual(document.read_text(), before)
+            self.assertEqual(self.findings()[f"codex:{CODEX_ID}"]["kind"], "zero-messages")
+
+    def test_codex_and_agy_unparseable_document_is_recorded_not_raised(self):
+        other = "019e0000-aaaa-7bbb-8ccc-000000000009"
+        self.native("codex", CODEX_ID)
+        self.native("antigravity", CODEX_ID)
+        for name, collection in (
+            ("codex", "codex-sessions"),
+            ("antigravity", "antigravity-sessions"),
+        ):
+            self.assertEqual(self.run_cli(name, "export", "--all").returncode, 0)
+            [document] = sorted(self.output_dir(collection).rglob("*.md"))
+            broken = document.read_text().replace("\nstatus:", "\ntags: [a, b]\nstatus:", 1)
+            document.write_text(broken)
+            self.native(name, CODEX_ID, text="A later turn")
+            self.native(name, other)
+            result = self.run_cli(name, "export", "--all", check=False)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(f"Error: refusing to re-export {name}:{CODEX_ID}", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(document.read_text(), broken)
+            self.assertEqual(self.findings()[f"{name}:{CODEX_ID}"]["kind"], "unparseable-document")
+            self.assertEqual(len(list(self.output_dir(collection).rglob("*.md"))), 2)
+
 
 class TestFindingsStore(GuardFixture):
     def test_finding_cleared_after_clean_parse(self):
@@ -296,6 +381,41 @@ class TestFindingsStore(GuardFixture):
         with redirect_stderr(io.StringIO()) as err:
             self.assertEqual(FindingsStore(self.root / "data").findings, {})
         self.assertIn("rewritten on the next change", err.getvalue())
+
+    def test_wrong_shape_findings_file_reads_as_empty_with_one_warning(self):
+        store = FindingsStore(self.root / "data")
+        store.path.parent.mkdir(parents=True)
+        entry = guards.Finding("codex", "demo", "/tmp/x", "empty", "info", "m").as_dict()
+        payloads: list[object] = [
+            [],
+            {"schema_version": 1, "findings": {"codex:demo": None}},
+            {"schema_version": 2, "findings": {}},
+            {"findings": {}},
+            {"schema_version": 1, "findings": {"codex:demo": {**entry, "records": "3"}}},
+            {"schema_version": 1, "findings": {"codex:demo": {**entry, "kind": None}}},
+            {"schema_version": 1, "findings": {"codex:demo": {"source": "codex"}}},
+        ]
+        for payload in payloads:
+            store.path.write_text(json.dumps(payload))
+            with redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(FindingsStore(self.root / "data").open_findings(), [])
+            self.assertEqual(err.getvalue().count("Warning: ignoring unreadable"), 1, payload)
+
+    def test_interleaved_writers_keep_each_others_findings(self):
+        first, second = FindingsStore(self.root / "data"), FindingsStore(self.root / "data")
+        made = []
+        for sid in ("demo-0001", "demo-0002"):
+            finding = _check("claude", _stats(turn_v2=1), {"messages_ordered": []})
+            assert finding is not None
+            finding.native_id = sid
+            finding.path = str(_jsonl(self.root / f"{sid}.jsonl", [{"type": "x"}]))
+            made.append(finding)
+        self.assertEqual(second.findings, {})  # second caches the empty file first
+        first.record(made[0])
+        second.record(made[1])  # its stale cache must not drop the first writer's entry
+        self.assertEqual(set(self.findings()), {"claude:demo-0001", "claude:demo-0002"})
+        first.clear("claude:demo-0001")
+        self.assertEqual(set(self.findings()), {"claude:demo-0002"})
 
     def test_export_json_prints_one_object_and_exits_1_on_error(self):
         self.native("codex", "good-0001")

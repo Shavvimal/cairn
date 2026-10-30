@@ -42,6 +42,7 @@ from ..timeutil import today_str
 from .base import ConversationSource
 from .codex_lineage import Lineage, rollout_id, rollout_lineage, spawn_fields
 from .codex_replay import LIVE_CHILD_WINDOW_S, REPLAY_HEURISTIC_VERSION, ReplayCut
+from .guards import DRIFT_KINDS, ERROR, INFO
 from .spec_targets import SPEC_TARGETS
 
 COLLECTION = "codex-sessions"
@@ -642,9 +643,17 @@ class CodexSource(ConversationSource):
         parser-drift guard refuses, is reported on stderr and listed in ``failed``
         so the others still export. A rollout without a ``session_meta`` id that is
         older than :data:`LIVE_CHILD_WINDOW_S` is checked under its filename id.
+
+        The guard verdict is per logical session, not per file: when any fragment of
+        a session is refused, its healthy fragments are held too (listed in
+        ``failed``), so an older fragment never replaces the document a newer one
+        wrote, and a session's finding clears only when no fragment raised one.
         """
         parsed = []
         failed = []
+        refused: set[str] = set()  # sessions with an error finding on a fragment
+        flagged: set[str] = set()  # sessions with an error or warn finding
+        clean: set[str] = set()
         for rollout in rollouts:
             stats = JsonlStats(kind_of=record_kind)
             try:
@@ -656,18 +665,29 @@ class CodexSource(ConversationSource):
                 failed.append(rollout)
                 continue
             if data:
+                sid = data["session_id"]
                 top_level = not data.get("parent_session_id")
-                if not self.guard_parse(
-                    data["session_id"], rollout, stats, data, top_level=top_level
-                ):
-                    failed.append(rollout)
-                    continue
+                finding = self.classify_parse(sid, rollout, stats, data, top_level=top_level)
+            elif age >= LIVE_CHILD_WINDOW_S:
+                sid = rollout_id(rollout)
+                finding = self.classify_parse(sid, rollout, stats, None)
+            else:
+                continue
+            if finding is None:
+                clean.add(sid)
+            elif finding.severity != INFO:
+                flagged.add(sid)
+            if finding is not None and finding.severity == ERROR:
+                refused.add(sid)
+                failed.append(rollout)
+                continue
+            if data:
                 data["source_revision"] = revision
                 parsed.append((rollout, data))
-            elif age >= LIVE_CHILD_WINDOW_S and not self.guard_parse(
-                rollout_id(rollout), rollout, stats, None
-            ):
-                failed.append(rollout)
+        failed += [rollout for rollout, data in parsed if data["session_id"] in refused]
+        parsed = [(rollout, data) for rollout, data in parsed if data["session_id"] not in refused]
+        for sid in sorted(clean - flagged):
+            self.findings.clear(f"{self.source_name}:{sid}", DRIFT_KINDS)
         return parsed, failed
 
     @staticmethod

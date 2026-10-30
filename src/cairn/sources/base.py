@@ -193,6 +193,27 @@ class ConversationSource(ABC):
         and the document is still written. An info finding (only ignored record
         types) is stored silently. A clean parse clears any open finding for the id.
         """
+        finding = self.classify_parse(native_id, source_file, stats, data, top_level=top_level)
+        if finding is None:
+            self.findings.clear(f"{self.source_name}:{native_id}", guards.DRIFT_KINDS)
+            return True
+        return finding.severity != guards.ERROR
+
+    def classify_parse(
+        self,
+        native_id: str,
+        source_file: Path,
+        stats: JsonlStats,
+        data: SessionData | dict | None,
+        *,
+        top_level: bool = True,
+    ) -> guards.Finding | None:
+        """Classify one parse and record its finding, but clear nothing.
+
+        For a source whose session spans several files (Codex fragments), the caller
+        decides per session when every file parsed cleanly; :meth:`guard_parse` is
+        the one-file form.
+        """
         finding = guards.check_parse(
             source=self.source_name,
             native_id=native_id,
@@ -203,14 +224,11 @@ class ConversationSource(ABC):
             adapter_version=self.version,
             top_level=top_level,
         )
-        if finding is None:
-            self.findings.clear(f"{self.source_name}:{native_id}", guards.DRIFT_KINDS)
-            return True
-        if finding.severity == guards.INFO:
+        if finding is not None and finding.severity == guards.INFO:
             self.findings.record(finding)
-            return True
-        self._raise_finding(finding)
-        return finding.severity != guards.ERROR
+        elif finding is not None:
+            self._raise_finding(finding)
+        return finding
 
     def drift_error(self, native_ids: set[str] | None = None) -> guards.ParserDrift | None:
         """The first error finding of this run (among ``native_ids``), as an exception."""
