@@ -26,7 +26,7 @@ from .storage import atomic_write
 ATTEMPT_CAP = 3
 EXIT_EMPTY = 3
 # Failure reasons that never consume one of the ATTEMPT_CAP attempts.
-UNCOUNTED_REASONS = ("incomplete-input", "render-error", "budget-exhausted")
+UNCOUNTED_REASONS = ("incomplete-input", "render-error", "budget-exhausted", "stale-source")
 _ATTEMPT_RE = re.compile(r"^attempt-(\d+)$")
 
 

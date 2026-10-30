@@ -3,8 +3,9 @@
 ``install`` writes a LaunchAgent that runs ``cairn routine run NAME`` daily at the
 routine's local ``at`` time; ``run`` is the engine in :mod:`cairn.routine_run`;
 ``list`` and ``status`` read the stamps and ``last-run.json``; ``uninstall`` and
-``kickstart`` drive ``launchctl``. Every ``launchctl`` call goes through
-:func:`launchctl`, which the tests replace.
+``kickstart`` drive ``launchctl``; ``pause`` and ``resume`` write and remove the
+markers of :mod:`cairn.routine_state` (docs/routine-hardening-spec.md). Every
+``launchctl`` call goes through :func:`launchctl`, which the tests replace.
 """
 
 from __future__ import annotations
@@ -20,10 +21,11 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import routine_plan
+from . import routine_plan, routine_state
 from .config import (
     NAME_RE,
     NAME_RULE,
+    ROUTINE_STALE_SOURCES,
     CairnConfig,
     ConfigError,
     RoutineSpec,
@@ -176,7 +178,24 @@ def install(config: CairnConfig, name: str) -> int:
         )
         return 1
     print(f"Installed {label}: daily at {spec.at} local, log {log}")
+    _marker_note(config, name)
     return 0
+
+
+def _marker_note(config: CairnConfig, name: str) -> None:
+    """The ``note:`` line of ``install`` and ``kickstart`` for a paused or disabled routine.
+
+    Neither command reads or writes the markers otherwise: ``resume`` is the way out.
+    """
+    state, _log, _plist, _label = _paths(config, name)
+    found = routine_state.blocking_marker(state)
+    if found is not None:
+        kind, marker = found
+        print(
+            f"note: routine {name} is {kind} ({marker.get('reason') or routine_state.UNREADABLE}); "
+            f"the job is installed but each run skips until 'cairn routine resume {name}'",
+            file=sys.stderr,
+        )
 
 
 def uninstall(config: CairnConfig, name: str) -> int:
@@ -216,6 +235,34 @@ def kickstart(config: CairnConfig, name: str, force_restart: bool) -> int:
         )
         return 1
     print(f"Started {label}; follow it with 'cairn routine status {name}'")
+    _marker_note(config, name)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# pause / resume (docs/routine-hardening-spec.md 4.2)
+# ---------------------------------------------------------------------------
+
+
+def pause(config: CairnConfig, name: str, reason: str) -> int:
+    _routine(config, name)
+    text = routine_state.check_reason(reason)
+    state, _log, _plist, _label = _paths(config, name)
+    if routine_state.pause(state, text):
+        print(f"{name} was already paused; reason updated: {text}")
+    else:
+        print(f"Paused {name}: {text} (runs skip until 'cairn routine resume {name}')")
+    return 0
+
+
+def resume(config: CairnConfig, name: str) -> int:
+    _check_name(name)  # a routine removed from config can still be resumed
+    state, _log, _plist, _label = _paths(config, name)
+    removed = routine_state.resume(state)
+    if removed:
+        print(f"Resumed {name} (removed: {', '.join(removed)})")
+    else:
+        print(f"{name} is not paused or disabled; nothing to resume")
     return 0
 
 
@@ -297,6 +344,7 @@ def summary(config: CairnConfig, spec: RoutineSpec) -> dict:
         "exit": last.get("exit"),
         "pending": pending,
         "failed": failed,
+        "state": routine_state.classify(config, spec, macos=is_macos()).state,
     }
 
 
@@ -313,7 +361,7 @@ def list_routines(config: CairnConfig, as_json: bool) -> int:
             f"{row['name']}  peer={row['peer']} profile={row['profile']} at={row['at']} "
             f"installed={row['installed']} last={row['last'] or 'never'} "
             f"exit={'-' if row['exit'] is None else row['exit']} "
-            f"pending={row['pending']} failed={row['failed']}"
+            f"pending={row['pending']} failed={row['failed']} state={row['state']}"
         )
     return 0
 
@@ -334,9 +382,11 @@ def status(config: CairnConfig, name: str, as_json: bool, lines: int) -> int:
         else config.invoke.for_peer(spec.peer).profiles[spec.profile].base
     )
     rows = day_rows(spec, state, routine_plan.utc_today())
+    verdict = routine_state.classify(config, spec, macos=is_macos())
     last_done = next((r for r in rows if r["state"] in ("done", "empty")), None)
     latest = next((r.get("attempt_dir") for r in rows if r.get("attempt_dir")), None)
     report: dict = {
+        **verdict.as_json(),
         "routine": name,
         "config": {
             "peer": spec.peer,
@@ -348,6 +398,8 @@ def status(config: CairnConfig, name: str, as_json: bool, lines: int) -> int:
             "catch_up_days": spec.catch_up_days,
             "timeout_s": spec.timeout_s,
             "budget_usd_per_day": spec.budget_usd_per_day,
+            "terminal_hook": list(spec.terminal_hook) if spec.terminal_hook else None,
+            "stale_sources": spec.stale_sources,
         },
         "paths": {
             "prompt_file": str(spec.prompt_file),
@@ -370,9 +422,17 @@ def status(config: CairnConfig, name: str, as_json: bool, lines: int) -> int:
     }
     if as_json:
         print(json.dumps(report, indent=2))
-        return 0
+        return verdict.exit
     cfg = report["config"]
     print(f"routine {name}")
+    print(
+        f"state: {verdict.state} (exit {verdict.exit})"
+        + (f", attention: {', '.join(verdict.attention)}" if verdict.attention else "")
+    )
+    for kind in ("disabled", "paused"):
+        marker = getattr(verdict, kind)
+        if marker is not None:
+            print(f"  {routine_state.skip_line(name, kind, marker)}")
     print(
         f"  peer {spec.peer}, profile {spec.profile} (base {base}), "
         f"model {spec.model or '(policy default)'}, at {spec.at} local"
@@ -408,7 +468,7 @@ def status(config: CairnConfig, name: str, as_json: bool, lines: int) -> int:
     print(f"log tail ({log}):")
     for line in report["log_tail"]:
         print(f"  {line}")
-    return 0
+    return verdict.exit
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +502,12 @@ def doctor_checks(config: CairnConfig) -> list[tuple[str, str, str]]:
             lines.append(
                 ("warn", f"{label} launchd", f"not installed; run 'cairn routine install {name}'")
             )
+
+        found = routine_state.blocking_marker(state)
+        if found is not None:
+            kind, marker = found
+            detail = routine_state.skip_line(name, kind, marker).split(": ", 1)[1]
+            lines.append(("warn", f"{label} {kind}", detail))
 
         last = read_json(state / "last-run.json")
         if last is None:
@@ -545,9 +611,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--day", type=_day, help="run only this UTC day (YYYY-MM-DD)")
     p.add_argument("--force", action="store_true", help="run even a done or capped day")
     p.add_argument("--dry-run", action="store_true", help="print what would run; run nothing")
+    p.add_argument(
+        "--json", action="store_true", help="print the run report as one JSON object on stdout"
+    )
+    p.add_argument(
+        "--stale-sources",
+        choices=ROUTINE_STALE_SOURCES,
+        help="override routines.<name>.stale_sources for this run",
+    )
+    p = sub.add_parser("pause", help="skip every run until 'resume'")
+    p.add_argument("name", metavar="NAME")
+    p.add_argument("--reason", required=True, help="one line, at most 200 characters")
+    p = sub.add_parser("resume", help="remove the pause or disabled marker and the breaker")
+    p.add_argument("name", metavar="NAME")
     p = sub.add_parser("list", help="every configured routine")
     p.add_argument("--json", action="store_true")
-    p = sub.add_parser("status", help="config, paths, stamps, last run, cost, log tail")
+    p = sub.add_parser(
+        "status",
+        help="state, config, paths, stamps, last run, cost, log tail; "
+        "exit 0 fresh, 1 needs attention, 2 paused or disabled",
+    )
     p.add_argument("name", metavar="NAME")
     p.add_argument("--json", action="store_true")
     p.add_argument("--lines", type=int, default=20, help="log tail lines (default 20)")
@@ -573,7 +656,19 @@ def main(argv: list[str] | None = None) -> int:
             from .routine_run import run_routine
 
             spec = _routine(config, args.name)
-            return run_routine(config, spec, day=args.day, force=args.force, dry_run=args.dry_run)
+            return run_routine(
+                config,
+                spec,
+                day=args.day,
+                force=args.force,
+                dry_run=args.dry_run,
+                as_json=args.json,
+                stale_sources=args.stale_sources,
+            )
+        if args.action == "pause":
+            return pause(config, args.name, args.reason)
+        if args.action == "resume":
+            return resume(config, args.name)
         if args.action == "list":
             return list_routines(config, args.json)
         if args.action == "status":
@@ -593,7 +688,9 @@ __all__ = [
     "kickstart",
     "launchctl",
     "main",
+    "pause",
     "render_plist",
+    "resume",
     "status",
     "uninstall",
 ]

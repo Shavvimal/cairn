@@ -6,6 +6,10 @@ each day (oldest first) renders the prompt, runs ``prepare``, ``cairn invoke`` a
 ``validate``. Only a ``validate`` exit 0 (done) or 3 (done, empty) writes the day's
 done stamp. The first failed day stops the run; the remaining days are deferred.
 
+docs/routine-hardening-spec.md adds the pause and disabled markers, ``running.json``,
+the stale-source check, the terminal hook after each stamp, the routine-level breaker
+and the run report (``last-run.json`` and ``--json``).
+
 Every child process goes through :func:`run_command`, which the tests replace.
 """
 
@@ -24,7 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from . import __version__, routine_plan
+from . import __version__, routine_plan, routine_state
 from .config import CairnConfig, RoutineSpec
 from .exchange import now_iso
 from .procs import run_capped
@@ -52,8 +56,10 @@ from .routine_plan import (
     state_dir,
     write_json,
 )
+from .routine_state import SCHEMA_VERSION, STALE_SOURCE_S, parse_time
 from .storage import atomic_write, lock_path, locked
 
+HOOK_TIMEOUT_S = 10
 PREPARE_TIMEOUT_S = 600
 VALIDATE_TIMEOUT_S = 900
 REFRESH_TIMEOUT_S = 600
@@ -95,6 +101,31 @@ def run_command(
         return subprocess.CompletedProcess(argv, 126, "", f"{exc}\n")
 
 
+def run_hook(
+    argv: list[str], *, stdin_text: str, env: dict[str, str], cwd: str | None
+) -> subprocess.CompletedProcess[str]:
+    """Run the terminal hook with :data:`HOOK_TIMEOUT_S` and ``stdin_text`` on stdin.
+
+    A missing executable is exit 127 and a refused one 126; a timeout kills the
+    process group and raises ``TimeoutExpired``. The tests replace this function.
+    """
+    try:
+        return run_capped(argv, timeout=HOOK_TIMEOUT_S, env=env, cwd=cwd, input=stdin_text)
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(argv, 127, "", f"{exc}\n")
+    except PermissionError as exc:
+        return subprocess.CompletedProcess(argv, 126, "", f"{exc}\n")
+
+
+def counted_attempts(history: list[dict]) -> int:
+    """The attempts in ``history`` that count toward :data:`ATTEMPT_CAP`."""
+    return sum(
+        1
+        for h in history
+        if h.get("counted", True) and h.get("reason") not in (*UNCOUNTED_REASONS, "done", "empty")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Log (6.2.4)
 # ---------------------------------------------------------------------------
@@ -114,11 +145,13 @@ def _format_value(value: object) -> str:
 class RunLog:
     """Appends ``<time> routine=<name> run=<id> event=<event> k=v ...`` lines.
 
-    Echoes to stdout only on a TTY: under launchd stdout is this same file.
+    Echoes to stdout only on a TTY (under launchd stdout is this same file), and
+    never with ``--json``, whose stdout holds the report alone.
     """
 
-    def __init__(self, path: Path, routine: str, run_id: str) -> None:
+    def __init__(self, path: Path, routine: str, run_id: str, *, echo: bool = True) -> None:
         self.path, self.routine, self.run_id = path, routine, run_id
+        self.echo = echo
 
     def rotate(self) -> None:
         try:
@@ -131,7 +164,7 @@ class RunLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
-        if sys.stdout.isatty():
+        if self.echo and sys.stdout.isatty():
             print(line)
 
     def event(self, event: str, **fields: object) -> None:
@@ -184,13 +217,28 @@ def run_id_now() -> str:
 class Run:
     """One ``cairn routine run NAME`` under the routine lock."""
 
-    def __init__(self, config: CairnConfig, spec: RoutineSpec) -> None:
+    def __init__(
+        self,
+        config: CairnConfig,
+        spec: RoutineSpec,
+        *,
+        as_json: bool = False,
+        stale_sources: str | None = None,
+    ) -> None:
         self.config, self.spec = config, spec
         self.sdir = state_dir(config, spec.name)
         self.run_id = run_id_now()
         self.started_at = now_iso()
-        self.log = RunLog(log_path(config, spec.name), spec.name, self.run_id)
+        self.as_json = as_json
+        self.stale_mode = stale_sources or spec.stale_sources
+        self.log = RunLog(log_path(config, spec.name), spec.name, self.run_id, echo=not as_json)
         self.days: list[date] = []
+        self.rows: dict[date, dict] = {}
+        self.stale: list[dict] = []
+        self.breaker = {
+            "consecutive_failed_runs": routine_state.breaker_count(self.sdir),
+            "disabled": (self.sdir / routine_state.DISABLED_FILE).exists(),
+        }
         self.counts = {"done": 0, "empty": 0, "failed": 0, "deferred": 0}
         self.failures: list[dict] = []
         self.costs: list[float] = []
@@ -233,12 +281,7 @@ class Run:
         if reason in UNCOUNTED_REASONS:
             entry["counted"] = False
         history.append(entry)
-        attempts = sum(
-            1
-            for h in history
-            if h.get("counted", True)
-            and h.get("reason") not in (*UNCOUNTED_REASONS, "done", "empty")
-        )
+        attempts = counted_attempts(history)
         previous = read_json(stamp_path(self.sdir, "failed", day)) or {}
         total = sum(float(h.get("cost_usd") or 0) for h in history)
         write_json(
@@ -272,6 +315,7 @@ class Run:
             attempts=attempts,
             cost_usd=cost,
         )
+        self.hook(self.row(day, "failed", reason, attempt, attempts, cost, where))
         return reason
 
     def done_day(
@@ -321,7 +365,70 @@ class Run:
         self.log.event(
             "day-done", day=day.isoformat(), status=status, attempt=attempt, cost_usd=cost
         )
+        self.hook(self.row(day, status, None, attempt, counted_attempts(history), cost, where))
         return status
+
+    # ---- report rows and the terminal hook (hardening spec 4.6, 5) -------
+
+    def row(
+        self,
+        day: date,
+        outcome: str,
+        reason: str | None,
+        attempt: int | None = None,
+        attempts: int | None = None,
+        cost: float | None = None,
+        where: Path | None = None,
+    ) -> dict:
+        """Record and return the report row of ``day``."""
+        row = {
+            "day": day.isoformat(),
+            "outcome": outcome,
+            "reason": reason,
+            "attempt": attempt,
+            "attempts": attempts,
+            "cost_usd": cost,
+            "attempt_dir": str(where) if where else None,
+            "hook": None,
+        }
+        self.rows[day] = row
+        return row
+
+    def hook(self, row: dict) -> None:
+        """Run ``terminal_hook`` once for a stamp just written; log it, never raise.
+
+        Its result lands in ``row["hook"]`` only: no stamp, count, exit code or
+        breaker strike depends on it.
+        """
+        argv = self.spec.terminal_hook
+        if not argv:
+            return
+        env = child_environment()
+        env.update(
+            CAIRN_ROUTINE=self.spec.name,
+            CAIRN_ROUTINE_DAY=row["day"],
+            CAIRN_ROUTINE_ATTEMPT_DIR=row["attempt_dir"] or "",
+            CAIRN_ROUTINE_OUTCOME=row["outcome"],
+            CAIRN_ROUTINE_REASON=row["reason"] or "",
+            CAIRN_ROUTINE_ATTEMPT="" if row["attempt"] is None else str(row["attempt"]),
+            CAIRN_ROUTINE_RUN_ID=self.run_id,
+        )
+        payload = json.dumps({**row, "routine": self.spec.name, "run_id": self.run_id})
+        start = time.monotonic()
+        code: int | str
+        try:
+            result = run_hook(list(argv), stdin_text=payload + "\n", env=env, cwd=str(self.spec.cd))
+            code = "missing" if result.returncode == 127 else result.returncode
+            stderr = result.stderr or ""
+        except subprocess.TimeoutExpired as exc:
+            code, stderr = "timeout", _as_text(exc.stderr)
+        except Exception as exc:  # a hook must never break the run
+            code, stderr = "error", f"{type(exc).__name__}: {exc}"
+        seconds = round(time.monotonic() - start, 1)
+        row["hook"] = {"exit": code, "seconds": seconds}
+        self.log.event("hook", day=row["day"], outcome=row["outcome"], exit=code, seconds=seconds)
+        if code != 0:
+            self.log.stderr(stderr)
 
     # ---- one day ----------------------------------------------------------
 
@@ -456,30 +563,143 @@ class Run:
                 return False
         return True
 
+    def stale_sources(self) -> list[dict]:
+        """Digest sources outside ``spec.sources`` last exported over 24 h ago (4.5)."""
+        from . import export_receipt
+        from .catalog import catalog_path
+        from .digest import DIGEST_SOURCES
+        from .registry import BY_NAME
+
+        now = datetime.now(UTC)
+        stale: list[dict] = []
+        for source in DIGEST_SOURCES:
+            collection = BY_NAME[source].collection
+            policy = self.config.collections.get(collection)
+            if source in self.spec.sources or policy is None or not policy.sync.enabled:
+                continue
+            last: datetime | None = None
+            basis = "none"
+            receipt = export_receipt.read(source)
+            if receipt is not None:
+                last, basis = parse_time(receipt.get("last_ok_at")), "receipt"
+            else:
+                try:
+                    mtime = catalog_path(self.config.output_dir(collection)).stat().st_mtime
+                except OSError:
+                    pass
+                else:
+                    last, basis = datetime.fromtimestamp(mtime, UTC), "catalog-mtime"
+            age_s = None if last is None else max((now - last).total_seconds(), 0.0)
+            if age_s is not None and age_s <= STALE_SOURCE_S:
+                continue
+            entry = {
+                "source": source,
+                "last_export_at": None if last is None else last.isoformat(timespec="seconds"),
+                "age_h": None if age_s is None else round(age_s / 3600, 1),
+                "basis": basis,
+            }
+            stale.append(entry)
+            where = f"routine {self.spec.name}: source {source}"
+            fix = f"add it to routines.{self.spec.name}.sources or run 'cairn sync'"
+            if last is None:
+                print(f"warning: {where} has no export record; {fix}", file=sys.stderr)
+            else:
+                print(
+                    f"warning: {where} was last exported {entry['last_export_at']} "
+                    f"({entry['age_h']} h ago); {fix}",
+                    file=sys.stderr,
+                )
+            self.log.event("stale-source", source=source, age_h=entry["age_h"], basis=basis)
+        return stale
+
+    def status(self, code: int) -> str:
+        """``failed``, ``partial``, ``ok`` or ``clean`` for a finished run (5)."""
+        good = self.counts["done"] + self.counts["empty"]
+        bad = self.counts["failed"] + self.counts["deferred"]
+        if code == 2:
+            return "failed"
+        if not self.days:
+            return "clean"
+        if good and bad:
+            return "partial"
+        return "failed" if bad else "ok"
+
+    def update_breaker(self, status: str, finished_at: str) -> None:
+        """Reset on a done or empty day; strike on a failed run with a counted failure."""
+        if self.counts["done"] + self.counts["empty"]:
+            routine_state.reset_breaker(self.sdir)
+        elif status == "failed":
+            counted = [f for f in self.failures if f["reason"] not in UNCOUNTED_REASONS]
+            if counted:
+                marker = routine_state.strike(
+                    self.sdir, self.run_id, finished_at, counted[0]["reason"]
+                )
+                if marker is not None:
+                    self.log.event("disabled", reason=marker["reason"])
+                    print(
+                        routine_state.skip_line(self.spec.name, "disabled", marker),
+                        file=sys.stderr,
+                    )
+        self.breaker = {
+            "consecutive_failed_runs": routine_state.breaker_count(self.sdir),
+            "disabled": (self.sdir / routine_state.DISABLED_FILE).exists(),
+        }
+
+    def report(
+        self,
+        code: int,
+        status: str,
+        finished_at: str,
+        *,
+        reason: str | None = None,
+        error: str | None = None,
+    ) -> dict:
+        """The run report: ``last-run.json`` and the ``--json`` output (5)."""
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "routine": self.spec.name,
+            "status": status,
+            "reason": reason,
+            "run_id": self.run_id,
+            "started_at": self.started_at,
+            "finished_at": finished_at,
+            "exit": code,
+            "days": [d.isoformat() for d in self.days],
+            **self.counts,
+            "cost_usd": round(sum(self.costs), 6) if self.costs else None,
+            "error": error,
+            "failures": self.failures,
+            "stale_sources": self.stale,
+            "breaker": self.breaker,
+            "rows": [self.rows[day] for day in sorted(self.rows)],
+        }
+
+    def emit(self, report: dict) -> None:
+        if self.as_json:
+            print(json.dumps(report, indent=2))
+
+    def skipped(self, reason: str) -> int:
+        """A run that did nothing (lock held, paused or disabled): exit 0, and
+        ``last-run.json`` keeps the last real run."""
+        self.emit(self.report(0, "skipped", now_iso(), reason=reason))
+        return 0
+
     def finish(self, code: int, error: str | None = None, *, end_line: bool = True) -> int:
-        cost = round(sum(self.costs), 6) if self.costs else None
-        write_json(
-            self.sdir / "last-run.json",
-            {
-                "run_id": self.run_id,
-                "started_at": self.started_at,
-                "finished_at": now_iso(),
-                "exit": code,
-                "days": [d.isoformat() for d in self.days],
-                **self.counts,
-                "cost_usd": cost,
-                "error": error,
-                "failures": self.failures,
-            },
-        )
+        finished = now_iso()
+        status = self.status(code)
+        self.update_breaker(status, finished)
+        report = self.report(code, status, finished, error=error)
+        write_json(self.sdir / routine_state.LAST_RUN_FILE, report)
         if end_line:
-            self.log.event("end", exit=code, **self.counts, cost_usd=cost)
+            self.log.event("end", exit=code, **self.counts, cost_usd=report["cost_usd"])
+        self.emit(report)
         return code
 
     def body(self, today: date, day: date | None, force: bool) -> int:
         days, skipped = compute_days(self.spec, self.sdir, today, day, force)
         for skipped_day, reason in skipped:
             self.log.event("day-skipped", day=skipped_day.isoformat(), reason=reason)
+            self.row(skipped_day, "skipped", reason)
         if not days:
             self.log.event("nothing-due")
             return self.finish(0, end_line=False)
@@ -509,6 +729,12 @@ class Run:
                 for pending in days:
                     self.fail_day(pending, None, None, "incomplete-input")
                 return self.finish(1)
+            if self.stale_mode != "ignore":
+                self.stale = self.stale_sources()
+                if self.stale and self.stale_mode == "refuse":
+                    for pending in days:
+                        self.fail_day(pending, None, None, "stale-source")
+                    return self.finish(1)
             for index, current in enumerate(days):
                 outcome = self.run_day(current)
                 if outcome in ("done", "empty", "budget-exhausted"):
@@ -516,6 +742,7 @@ class Run:
                 for rest in days[index + 1 :]:
                     self.counts["deferred"] += 1
                     self.log.event("day-deferred", day=rest.isoformat())
+                    self.row(rest, "deferred", None)
                 break
         except RoutineError as exc:
             self.log.event("error", message=str(exc))
@@ -538,12 +765,16 @@ def run_routine(
     day: date | None = None,
     force: bool = False,
     dry_run: bool = False,
+    as_json: bool = False,
+    stale_sources: str | None = None,
 ) -> int:
-    """``cairn routine run``: 0 all done/empty (or lock held, or nothing due),
-    1 a day failed or was deferred, 2 a usage, config or render error."""
+    """``cairn routine run``: 0 all done/empty (or lock held, paused, disabled, or
+    nothing due), 1 a day failed or was deferred, 2 a usage, config or render error."""
     today = routine_plan.utc_today()
     if day is not None and day >= today:
         raise RoutineError(f"day {day.isoformat()} has not ended in UTC")
+    if dry_run and as_json:
+        raise RoutineError("--json does not combine with --dry-run")
     if force and day is None:
         print("warning: --force without --day re-runs every day in the window", file=sys.stderr)
     if dry_run:
@@ -554,19 +785,30 @@ def run_routine(
             f"routine {spec.name}: refusing to run inside a peer ({DEPTH_ENV}={depth}); "
             f"start it from a shell or with 'cairn routine kickstart {spec.name}'"
         )
-    run = Run(config, spec)
+    run = Run(config, spec, as_json=as_json, stale_sources=stale_sources)
+    found = routine_state.blocking_marker(run.sdir)
+    if found is not None:
+        # --force does not bypass a marker: 'cairn routine resume' is the one way out.
+        kind, marker = found
+        run.log.event(f"skipped-{kind}", reason=marker.get("reason") or routine_state.UNREADABLE)
+        print(routine_state.skip_line(spec.name, kind, marker), file=sys.stderr)
+        return run.skipped(kind)
     run.sdir.mkdir(parents=True, exist_ok=True)
     with ExitStack() as stack:
         try:
             stack.enter_context(locked(lock_path(run.sdir, "routine"), blocking=False))
         except BlockingIOError:
             run.log.event("skipped-lock")
-            if sys.stdout.isatty():
+            if sys.stdout.isatty() and not as_json:
                 print(f"routine {spec.name}: skipped, another run holds the lock")
-            return 0
+            return run.skipped("lock-held")
         # Rotate under the lock, so a second start never renames the log mid-run.
         run.log.rotate()
-        return run.body(today, day, force)
+        running = routine_state.write_running(run.sdir, run.run_id, run.started_at)
+        try:
+            return run.body(today, day, force)
+        finally:
+            running.unlink(missing_ok=True)
 
 
 def dry_run_routine(
@@ -574,6 +816,9 @@ def dry_run_routine(
 ) -> int:
     """Print what a run would do. No lock, no directories, no stamps, no children."""
     sdir = state_dir(config, spec.name)
+    found = routine_state.blocking_marker(sdir)
+    if found is not None:
+        print(routine_state.skip_line(spec.name, *found))
     days, skipped = compute_days(spec, sdir, today, day, force)
     for skipped_day, reason in skipped:
         print(f"day {skipped_day.isoformat()} skipped ({reason})")
@@ -629,5 +874,6 @@ __all__ = [
     "refresh_since",
     "render_day",
     "run_command",
+    "run_hook",
     "run_routine",
 ]
