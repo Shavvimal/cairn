@@ -88,7 +88,8 @@ The digest JSON also has a `coverage` key, in the same shape as `list --coverage
 Sessions owned by a routine (`owner: routine:<name>`) and their subagents are left out and
 listed under `excluded`; `--include-routine-sessions` keeps them.
 The JSON also has `overdue`: the active `## Decisions` rows whose `revisit_by` is on or
-before the digest day. Mention them in the One Thing when they bear on the day's work.
+before the digest day, from any session outside a routine's (a routine's sessions and
+their subagents give none unless `--include-routine-sessions`). Mention them in the One Thing when they bear on the day's work.
 An overdue row never changes the exit code.
 
 ### Decisions ("what did we decide about X")

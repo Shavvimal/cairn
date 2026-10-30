@@ -224,9 +224,13 @@ point. A document without a Decisions section re-exports byte-identical to 2.9.0
 
 ### 4.5 Digest `overdue`
 
-In `run_digest`, after the subagent filter (`src/cairn/digest.py:376-377`) and before the
-window filter, collect the overdue rows from those records with
-`as_of = end.date()`. For the digest of day D, that is D + 1, so a row counts as overdue
+In `run_digest`, after the subagent filter (`src/cairn/digest.py:376-377`) and after the
+routine exclusion, collect the overdue rows from those records, in or out of the window,
+with `as_of = end.date()`. Unless `--include-routine-sessions` is given, a session owned by
+a routine (front matter `owner: routine:<name>`, or an owner-form preamble on a session of
+the day) and the subagents of such a session give no overdue rows. An out-of-window
+session whose only owner mark is a preamble is not read for it, because the overdue scan
+stops at the conversation anchor. For the digest of day D, that is D + 1, so a row counts as overdue
 when `revisit_by <= D`. The result depends only on the documents, so the output stays
 deterministic. Add `"overdue": [...]` to the JSON object. Human output adds one
 `Overdue: <ref>  revisit_by <date>  <claim>` line per row. The exit codes and the files

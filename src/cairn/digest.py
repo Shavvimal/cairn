@@ -400,6 +400,19 @@ def write(out: Path, digests: list[Digest]) -> None:
         digest.row["path"], digest.row["frames_path"] = str(markdown), str(frames)
 
 
+def _not_routine(records: list[SessionRecord], excluded: dict[str, str]) -> list[SessionRecord]:
+    """``records`` without routine-owned sessions and their subagents: front matter
+    ``owner`` for every record, plus the refs the digest loop already ``excluded`` (which
+    also holds the owner-form preambles of the day's sessions)."""
+    owned = {r.reference for r in records if _routine_owned(r.metadata.get("owner"))}
+    owned.update(excluded)
+    return [
+        r
+        for r in records
+        if r.reference not in owned and not (r.is_subagent and f"{r.source}:{r.parent_id}" in owned)
+    ]
+
+
 def _routine_owned(owner: object) -> bool:
     """Whether ``owner`` names a routine (``routine:<name>``): its session is a routine's
     own output and stays out of the next digest."""
@@ -449,9 +462,6 @@ def run_digest(
     check_out(out)
     if not args.include_subagents:
         records = [r for r in records if not r.is_subagent]
-    # Rows due for review: revisit_by before the day after the digest day. They depend
-    # on the documents only, so the output stays deterministic.
-    overdue = decisions.overdue_rows(records, end.date())
     selected = [
         r
         for r in records
@@ -503,6 +513,11 @@ def run_digest(
                     continue
             kept.append(digest)
         digests = kept
+    # Rows due for review: revisit_by before the day after the digest day. They depend
+    # on the documents only, so the output stays deterministic. A routine's sessions and
+    # their subagents give no rows, in or out of the window, unless they are kept.
+    scanned = records if keep_routine else _not_routine(records, excluded)
+    overdue = decisions.overdue_rows(scanned, end.date())
     if getattr(args, "provenance", None):
         digests = [d for d in digests if d.row["provenance"] in args.provenance]
     digests.sort(key=lambda d: (d.first_ts, d.record.reference))

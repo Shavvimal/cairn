@@ -496,6 +496,39 @@ class TestDigestOverdue(DigestFixture):
         self.assertEqual([r["number"] for r in data["overdue"]], [1])
         self.assertEqual(sorted(p.name for p in out.iterdir()), [".cairn-digest"])
 
+    def routine_family(self) -> None:
+        """A routine run outside the day and its subagent, each with an overdue row."""
+        earlier = [msg("user", "2026-03-20T10:00:00Z", "x"), msg("assistant", None, "y")]
+        tail = ('owner: "routine:daily"',)
+        self.write_doc(
+            "run.md", document("run-0001", earlier, notes=OVERDUE_NOTES, tail_extra=tail)
+        )
+        child = document(
+            "agent-0009",
+            earlier,
+            doc_type="claude-subagent",
+            notes=OVERDUE_NOTES,
+            head_extra=("parent_session_id: run-0001",),
+        )
+        self.write_doc("child.md", child)
+        today = [msg("user", "2026-03-28T10:00:00Z", "x"), msg("assistant", None, "y")]
+        self.write_doc("due.md", document("due-0001", today, notes=OVERDUE_NOTES))
+
+    def test_routine_sessions_and_subagents_give_no_overdue_rows(self):
+        self.routine_family()
+        code, data, _stderr, _out = self.digest("--include-subagents")
+        self.assertEqual(code, 0)
+        self.assertEqual([r["ref"] for r in data["overdue"]], ["claude:due-0001#1"])
+
+    def test_include_routine_sessions_keeps_their_overdue_rows(self):
+        self.routine_family()
+        code, data, _stderr, _out = self.digest("--include-subagents", "--include-routine-sessions")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            sorted(r["ref"] for r in data["overdue"]),
+            ["claude:agent-0009#1", "claude:due-0001#1", "claude:run-0001#1"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
