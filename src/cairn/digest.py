@@ -548,7 +548,7 @@ def load_sidecar(path: Path) -> dict[int, dict]:
         for line in handle:
             if line.strip() and isinstance(row := json.loads(line), dict):
                 ordinal = row.get("ordinal")
-                if isinstance(ordinal, int):
+                if type(ordinal) is int:  # not a bool
                     rows[ordinal] = row
     return rows
 
@@ -559,7 +559,7 @@ def frame_unchanged(text: str, anchor: int, frame: Frame, row: dict) -> bool:
     offset, and the body has the same ``sha1_8``."""
     offset = row.get("offset")
     found = None
-    if isinstance(offset, int) and offset >= 0:
+    if type(offset) is int and offset >= 0:  # not a bool
         found = MARKER.match(text, anchor + offset)
     return (
         found is not None

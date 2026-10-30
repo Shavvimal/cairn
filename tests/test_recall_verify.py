@@ -331,6 +331,104 @@ class TestChecks(VerifyFixture):
         self.assertEqual(failure["reason"], "export-unreadable")
         self.assertEqual(failure["detail"], f"{REF}: legacy export without frames")
 
+    def test_unclosed_fence_warns(self):
+        code, _, stderr = self.verify(journal(VERIFIED, "```", BAD_ORDINAL))
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            stderr,
+            f"Warning: {self.journal}:6: code fence never closes; the lines after it are not checked\n",
+        )
+
+    def test_quote_inside_list_item_takes_the_item_citation(self):
+        nested = journal(
+            "- The user reported:", f"  > {F8}", "  Fixed in the retry module [claude:3f2a9c1e f8]."
+        )
+        data = self.report(nested)
+        self.assertEqual((data["exit"], data["quotes"]["verified"]), (0, 1))
+        deep = journal(
+            "- Work [claude:3f2a9c1e f8]",
+            "  - nested",
+            "      > an invented quote that is not in the frame",
+        )
+        data = self.report(deep)
+        self.assertEqual(
+            [(f["line"], f["reason"]) for f in data["failures"]], [(7, "quote-uncited")]
+        )
+
+    def test_unclosed_bracket_does_not_swallow_a_citation(self):
+        data = self.report(journal("- A claim [f1 and more", "  then [claude:3f2a9c1e f11]"))
+        self.assertEqual(data["citations"], {"total": 1, "verified": 1, "failed": 0})
+
+    def test_failures_in_line_order(self):
+        text = journal(
+            '- "fix the retry test before the release" [claude:3f2a9c1e f8]',
+            "  more [claude:3f2a9c1e f42]",
+            "  and [f7]",
+        )
+        failures = self.report(text)["failures"]
+        self.assertEqual(
+            [(f["line"], f["reason"]) for f in failures],
+            [(5, "quote-not-found"), (6, "bad-ordinal"), (7, "malformed-citation")],
+        )
+
+    def test_quote_against_several_frames(self):
+        both = "[claude:3f2a9c1e f8] [claude:3f2a9c1e f11]"
+        data = self.report(journal(f'- "I moved the cap after the jitter" {both}'))
+        self.assertEqual((data["exit"], data["quotes"]["verified"]), (0, 1))
+        failure = self.report(journal(f'- "fix the retry test before the release" {both}'))[
+            "failures"
+        ][0]
+        self.assertEqual(
+            failure["detail"],
+            f'"fix the retry test before the release" is not in f8 of {REF} or f11 of {REF}',
+        )
+        self.assertEqual((failure["ref"], failure["ordinal"]), (None, None))
+        twice = "[claude:3f2a9c1e f8] again [claude:3f2a9c1e f8]"
+        failure = self.report(journal(f'- "fix the retry test before the release" {twice}'))[
+            "failures"
+        ][0]
+        self.assertEqual(
+            failure["detail"], f'"fix the retry test before the release" is not in f8 of {REF}'
+        )
+        self.assertEqual((failure["ref"], failure["ordinal"]), (REF, 8))
+
+    def test_citation_inside_quote_is_removed_before_matching(self):
+        data = self.report(journal('- "I moved the cap [claude:3f2a9c1e f11] after the jitter"'))
+        self.assertEqual((data["exit"], data["quotes"]["verified"]), (0, 1))
+
+    def test_form_feed_keeps_line_numbers(self):
+        failure = self.report(journal("Text\fwith a form feed.", BAD_ORDINAL))["failures"][0]
+        self.assertEqual(failure["line"], 6)
+
+    def test_digest_file_without_ref_warns(self):
+        broken = self.out / "claude-broken0000.md"
+        broken.write_text("---\ntitle: x\n---\n", encoding="utf-8")
+        code, _, stderr = self.verify(journal(VERIFIED))
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, f"Warning: skipping {broken}: no ref in its front matter\n")
+
+    def test_long_quote_is_clipped_in_detail(self):
+        quote = "an invented quotation " * 8
+        failure = self.report(journal(f'- "{quote.strip()}" [claude:3f2a9c1e f8]'))["failures"][0]
+        self.assertTrue(failure["detail"].startswith(f'"{normalise(quote)[:117]}..." is not in'))
+
+    def test_table_row_heading_and_tilde_fence(self):
+        text = journal(
+            "## Day [claude:3f2a9c1e f42]",
+            '| "I moved the cap after the jitter" | [claude:3f2a9c1e f11] |',
+            "~~~",
+            "- [claude:3f2a9c1e f99]",
+            "~~~",
+        )
+        data = self.report(text)
+        self.assertEqual([(f["line"], f["reason"]) for f in data["failures"]], [(5, "bad-ordinal")])
+        self.assertEqual(data["quotes"]["verified"], 1)
+
+    def test_bool_ordinal_in_sidecar_is_ignored(self):
+        path = self.root / "bool.frames.jsonl"
+        path.write_text('{"ordinal": true, "kept": true}\n', encoding="utf-8")
+        self.assertEqual(digest.load_sidecar(path), {})
+
     def test_unverified_section_ignored(self):
         data = self.report(journal(VERIFIED, "", "## Unverified", "", BAD_ORDINAL))
         self.assertEqual((data["exit"], data["citations"]["total"]), (0, 1))
@@ -522,6 +620,34 @@ class TestFix(VerifyFixture):
         self.assertTrue(self.journal.is_symlink())
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
         self.assertIn("## Unverified", target.read_text(encoding="utf-8"))
+
+    def test_fix_adds_one_blank_line_before_the_heading(self):
+        self.verify(journal(VERIFIED, "", BAD_ORDINAL), "--fix")
+        self.assertEqual(
+            self.journal.read_text(encoding="utf-8"),
+            journal(
+                VERIFIED,
+                "",
+                "## Unverified",
+                "",
+                "<!-- cairn:unverified line=7 reason=bad-ordinal -->",
+                BAD_ORDINAL,
+                "",
+            ),
+        )
+        self.journal.write_text(BAD_ORDINAL + "\n", encoding="utf-8")
+        self.verify(None, "--fix")
+        self.assertTrue(self.journal.read_text(encoding="utf-8").startswith("## Unverified\n"))
+
+    def test_fix_comment_lists_every_reason(self):
+        line = (
+            '- "fix the retry test before the release" [claude:3f2a9c1e f8] [claude:3f2a9c1e f42]'
+        )
+        self.verify(journal(line), "--fix")
+        self.assertIn(
+            "<!-- cairn:unverified line=5 reason=bad-ordinal,quote-not-found -->",
+            self.journal.read_text(encoding="utf-8"),
+        )
 
     def test_fix_on_read_only_file_exits_1(self):
         original = journal(BAD_ORDINAL)

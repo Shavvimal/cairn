@@ -36,7 +36,7 @@ CITATION_RE = re.compile(
 )
 # Anything shaped like an attempt at a citation; where CITATION_RE does not match at
 # the same position it is a ``malformed-citation``.
-NEAR_CITATION_RE = re.compile(r"\[(?:[a-z][a-z0-9-]*:[^\]\s]*\s+)?f[0-9]+[^\]]*\]")
+NEAR_CITATION_RE = re.compile(r"\[(?:[a-z][a-z0-9-]*:[^\][\s]*[ \t]+)?f[0-9]+[^\][\r\n]*\](?!\()")
 QUOTE_MIN_CHARS = 15
 UNVERIFIED_HEADING = "## Unverified"
 REASONS = (
@@ -66,6 +66,10 @@ _BLOCKQUOTE = re.compile(r"^ {0,3}>")
 _BLOCKQUOTE_PREFIX = re.compile(r"^ {0,3}> ?")
 _LIST_ITEM = re.compile(r"^[ \t]*(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
 _BACKTICKS = re.compile(r"`+")
+# Lines end at ``\n`` only (``\r\n`` stays on its line), the same rule ``line_of``
+# counts by; ``str.splitlines`` would also split at form feeds and U+2028.
+_LINE = re.compile(r"[^\n]*\n|[^\n]+")
+_NESTED_QUOTE = re.compile(r"^[ \t]*> ?")
 # Curly double quotes (U+201C, U+201D, U+201E) and single quotes (U+2018, U+2019).
 _PUNCTUATION = {0x201C: '"', 0x201D: '"', 0x201E: '"', 0x2018: "'", 0x2019: "'"}
 _QUOTE_PAIRS = {'"': '"', chr(0x201C): chr(0x201D)}  # straight, and curly open/close
@@ -153,6 +157,17 @@ def body_range(lines: list[str]) -> tuple[int, int, list[bool]]:
     ``start`` skips a leading ``---`` front matter block; ``end`` is the last line that
     is exactly ``## Unverified`` outside a fence, so text moved there is not checked.
     """
+    start, end, fenced, _ = _scan(lines)
+    return start, end, fenced
+
+
+def unclosed_fence(lines: list[str]) -> int | None:
+    """The 0-based line of a code fence that never closes (CommonMark runs it to the end
+    of the file, so nothing after it is checked), or ``None``."""
+    return _scan(lines)[3]
+
+
+def _scan(lines: list[str]) -> tuple[int, int, list[bool], int | None]:
     start = 0
     if lines and _bare(lines[0]) == "---":
         for index in range(1, len(lines)):
@@ -161,6 +176,7 @@ def body_range(lines: list[str]) -> tuple[int, int, list[bool]]:
                 break
     fenced = [False] * len(lines)
     fence: str | None = None
+    opened = 0
     end = len(lines)
     for index in range(start, len(lines)):
         line = _bare(lines[index])
@@ -179,11 +195,11 @@ def body_range(lines: list[str]) -> tuple[int, int, list[bool]]:
         # that starts with ```code``` is inline code, not a fence that never closes.
         if opening and not (opening[1][0] == "`" and "`" in line[opening.end() :]):
             fenced[index] = True
-            fence = opening[1]
+            fence, opened = opening[1], index
             continue
         if line == UNVERIFIED_HEADING:
             end = index
-    return start, end, fenced
+    return start, end, fenced, (opened if fence is not None else None)
 
 
 def _table_lines(lines: list[str], start: int, end: int, fenced: list[bool]) -> set[int]:
@@ -229,9 +245,14 @@ def split_blocks(lines: list[str]) -> list[Block]:
             kind = "item"
         else:
             kind = "continuation"
-        joins = current is not None and (
-            (kind == "quote" and current.kind == "quote")
-            or (kind == "continuation" and current.kind in ("item", "paragraph"))
+        joins = (
+            current is not None
+            and (
+                (kind == "quote" and current.kind == "quote")
+                or (kind == "continuation" and current.kind in ("item", "paragraph"))
+                # An indented ``>`` under a list item is part of the item (its own quote).
+                or (kind == "quote" and current.kind == "item" and line[:1] in (" ", "\t"))
+            )
         )
         if joins and current is not None:
             current.last = index
@@ -287,6 +308,31 @@ def _opens(masked: str, position: int) -> bool:
     before = masked[position - 1] if position else " "
     after = masked[position + 1] if position + 1 < len(masked) else " "
     return (before.isspace() or before in "([{-/") and not after.isspace()
+
+
+def nested_quotes(block: Block) -> list[tuple[int, int, int, str]]:
+    """The ``>`` runs inside a list item: ``(start, end, line, text)`` per run, with
+    character positions in the block, the 1-based file line, and the text with the
+    marker and one following space removed per line."""
+    if block.kind != "item":
+        return []
+    runs: list[tuple[int, int, int, str]] = []
+    position = 0
+    run: list[tuple[int, int, int, str]] = []
+    for offset, line in enumerate(block.text.splitlines(True)):
+        if offset and _NESTED_QUOTE.match(block.masked[position : position + len(line)]):
+            run.append((position, position + len(line), offset, _NESTED_QUOTE.sub("", line, 1)))
+        elif run:
+            runs.append(
+                (run[0][0], run[-1][1], block.first + 1 + run[0][2], "".join(r[3] for r in run))
+            )
+            run = []
+        position += len(line)
+    if run:
+        runs.append(
+            (run[0][0], run[-1][1], block.first + 1 + run[0][2], "".join(r[3] for r in run))
+        )
+    return runs
 
 
 def blockquote_text(block: Block) -> str:
@@ -487,7 +533,7 @@ def _check_quote(
             block, line, "quote", "quote-uncited", raw, f"{shown} has no citation in its block"
         )
         return
-    good = [c for c in cited if c.reason is None]
+    good = list({(c.ref, c.ordinal): c for c in cited if c.reason is None}.values())
     if not good:
         report.quotes["unchecked"] += 1
         return
@@ -563,11 +609,17 @@ def check_blocks(blocks: list[Block], verifier: Verifier) -> Report:
             raw = blockquote_text(block)
             _check_quote(report, block, block.first + 1, raw, own, tries)
             continue
+        nested = nested_quotes(block)
+        for _, _, line, raw in nested:
+            _check_quote(report, block, line, raw, resolved, attempts[index])
         for position, raw in inline_quotes(block):
+            if any(first <= position < last for first, last, _, _ in nested):
+                continue  # inside a nested block quote, checked whole above
             if len(normalise(CITATION_RE.sub("", raw))) < QUOTE_MIN_CHARS:
                 report.quotes["skipped_short"] += 1
                 continue
             _check_quote(report, block, block.line_of(position), raw, resolved, attempts[index])
+    report.failures.sort(key=lambda failure: failure["line"])  # stable: file order
     return report
 
 
@@ -591,7 +643,8 @@ def fix_text(lines: list[str], blocks: list[Block]) -> tuple[str, int]:
     if text and not text.endswith("\n"):
         text += newline
     if end == len(lines):
-        text += f"{newline}{UNVERIFIED_HEADING}{newline}{newline}"
+        blank = not text.strip() or text.endswith(f"{newline}{newline}")
+        text += f"{'' if blank else newline}{UNVERIFIED_HEADING}{newline}{newline}"
     elif not text.endswith(f"{newline}{newline}"):
         text += newline
     for block in moving:
@@ -639,7 +692,13 @@ def run_verify(args: argparse.Namespace, store: SessionStore) -> int:
     directory = Path(args.digest).expanduser()
     verifier = Verifier(directory, store)
     snapshot = _read(path)
-    lines = snapshot.splitlines(keepends=True)
+    lines = _LINE.findall(snapshot)
+    if (opened := unclosed_fence(lines)) is not None:
+        print(
+            f"Warning: {args.file}:{opened + 1}: code fence never closes; "
+            "the lines after it are not checked",
+            file=sys.stderr,
+        )
     blocks = split_blocks(lines)
     report = check_blocks(blocks, verifier)
     moved = 0
