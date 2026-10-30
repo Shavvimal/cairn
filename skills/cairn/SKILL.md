@@ -116,6 +116,7 @@ cairn doctor [--strict-index]          # check install, config, qmd + index, cro
 cairn config show [--json]             # print resolved config + integrations
 cairn config init [--enable ...] | set KEY VALUE | unset KEY | path
 cairn cron install | uninstall         # manage the hourly sync crontab entry
+cairn instructions install | remove | show | status --harness claude|codex   # recall-first block in the user instruction file
 cairn routine install | uninstall NAME # add / remove a routine's launchd job (macOS)
 cairn routine run NAME [--day D] [--force] [--dry-run] [--json]   # run the due days now
 cairn routine list | status NAME [--json]   # state, stamps, last run; status exits 0/1/2

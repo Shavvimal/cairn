@@ -52,6 +52,13 @@ Use `/skills` or the `$` picker to select the installed `setup`, `cairn`, `recal
 `search` skill. Run setup only on explicit request or explicit onboarding. The setup
 policy `allow_implicit_invocation: false` is packaged in `agents/openai.yaml`.
 
+The recall-first block (`cairn instructions install --harness codex`) goes into the Codex
+home (`$CODEX_HOME`, else `~/.codex`). Codex loads `AGENTS.override.md` there in place of
+`AGENTS.md` when the override is not empty (checked on CLI 0.165.0), so cairn writes to
+the override when it holds text and to `AGENTS.md` otherwise. If an override appears after
+an install, the next install writes the override and names the old copy in `AGENTS.md`;
+`cairn instructions remove --harness codex` clears both and records the opt-out.
+
 Prefer the current thread ID provided by the host. `CODEX_THREAD_ID`/`CODEX_SESSION_ID`
 can be inherited from a parent client: do not use them if they conflict with the selected
 thread. `CLAUDE_PLUGIN_ROOT` is also supplied by Codex for compatibility and does not

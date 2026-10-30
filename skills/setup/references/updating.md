@@ -59,7 +59,11 @@ From the verified environment in step 1, run this for each already-installed hos
 
 ```bash
 cairn hook install --harness HOST  # replace HOST with claude or codex
+cairn instructions install --harness HOST  # upgrades a stale recall-first block; keeps an opt-out
 ```
+
+`cairn instructions install` prints `unchanged:` when the block is current and `skipped:`
+when the user opted out; neither writes the file. Do not pass `--force` unless the user asks.
 
 If the user already uses Cairn cron, refresh its entry with `cairn cron install` and
 check that its configured schedule is retained. Leave cron absent if it was absent;
