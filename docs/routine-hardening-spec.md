@@ -136,8 +136,9 @@ class. `validate` keeps its looser rule because its failure is visible as a fail
 | `running.json` | `run`, after it takes the lock | `run`, when `body` returns. A raising run rewrites it as interrupted |
 | `last-run.json` | `run` | never (extended, section 5) |
 
-Export receipts: `<state_home>/cairn/exports/<source>.json`, written by `cli.run` after every
-`export` or `sync` subcommand, inside the operation lock.
+Export receipts: `<state_home>/cairn/exports/<source>-<key>.json`, where `<key>` is the first
+16 hex digits of the sha256 of the resolved output directory. `cli.run` writes one after a
+collection-wide `export` (no FILE argument), inside the operation lock.
 
 ### Exact messages
 
@@ -254,8 +255,9 @@ stops, instead of one round per day.
 2. The check runs once per run, after the refresh succeeds and before the first day
    (between `routine_run.py:508` and `:512`). Mode: `--stale-sources` if given, else
    `spec.stale_sources`. `ignore` skips the check.
-3. For each source, the last export is `last_ok_at` from `exports/<source>.json`. When that
-   file is missing (a store exported before this version), the fallback is the mtime of
+3. For each source, the last export is `last_ok_at` from `exports/<source>-<key>.json`, for the
+   output directory of the current config. When that file is missing, or records another
+   output directory, (a store exported before this version), the fallback is the mtime of
    `catalog_path(output_dir)`, with `basis: "catalog-mtime"`. With neither, the basis is
    `none` and the source is stale.
 4. A source whose last export is older than `STALE_SOURCE_S` = 24 h is stale. Each stale
@@ -265,10 +267,16 @@ stops, instead of one round per day.
    reason joins the uncounted reasons, so it costs no attempt and no breaker strike. No
    `prepare` or invoke runs, and the run exits 1, as `incomplete-input` does.
 
-Export receipt: `src/cairn/export_receipt.py`, `write(source, command, exit_code)`.
+Export receipt: `src/cairn/export_receipt.py`, `write(source, output_dir, command, exit_code)`.
 `cli.run` calls it (through `record`) inside the operation lock at `cli.py:134-140`
-(section 11 gives the exact place).
-The shape is `{source, last_command, last_finished_at, last_exit, last_ok_at, cairn_version}`.
+(section 11 gives the exact place), for a collection-wide `export` only. A targeted
+`export FILE` and a `sync` (a hook payload with no session id is a no-op that exits 0)
+write no receipt, because neither shows the rest of the collection is current.
+The receipt is keyed by the resolved output directory, as the catalog and the operation
+lock are, so two configs with different data roots never read each other's receipt, and
+the lock that serialises its writers has the same scope as the file.
+The shape is `{source, output_dir, last_command, last_finished_at, last_exit, last_ok_at, cairn_version}`.
+`read` ignores a receipt whose `output_dir` differs from the one asked for.
 `last_ok_at` changes only when the exit code is 0. An `OSError` is caught and printed as a
 warning, because a receipt must never fail an export.
 
@@ -447,6 +455,8 @@ Each follows the format of `routine_run.py:137-139` and passes `LOG_LINE` in
 
 - `test_receipt_written_after_export_ok_and_failed`: `last_ok_at` moves only on exit 0.
 - `test_receipt_write_error_is_warning`.
+- `test_noop_sync_and_targeted_export_write_no_receipt`: `claude sync` with `{}` on stdin and `claude export FILE` write none; `export --all` does.
+- `test_receipt_of_another_output_dir_is_not_read`: two output directories, two paths; a copied receipt is ignored.
 
 `tests/test_procs.py`:
 
@@ -500,7 +510,7 @@ Commit order follows the steps. Each commit passes `make check`.
   right after the export returns and before `flush_catalog`, still inside the operation
   lock. One added line keeps the diff small. An export that raises writes no receipt,
   which reads the same as "did not finish". The receipt also records `last_command`
-  (`export` or `sync`).
+  (always `export`).
 - A hook that fails in a way other than a timeout or a missing binary (for example a
   process that cannot be reaped) is logged with `exit=error`. The run is unaffected.
 - `run --json --dry-run` is refused with exit 2 and

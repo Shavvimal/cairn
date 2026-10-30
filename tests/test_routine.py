@@ -1177,9 +1177,14 @@ class TestStaleSources(HardeningFixture):
         from cairn import export_receipt
 
         when = (datetime.now(UTC) - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
-        path = export_receipt.receipt_path(source)
+        output_dir = self.cfg.output_dir(f"{source}-sessions")
+        path = export_receipt.receipt_path(source, output_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"source": source, "last_ok_at": when}))
+        path.write_text(
+            json.dumps(
+                {"source": source, "output_dir": str(output_dir.resolve()), "last_ok_at": when}
+            )
+        )
         return when
 
     def test_stale_source_warns_and_reports(self):

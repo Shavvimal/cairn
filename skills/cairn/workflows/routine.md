@@ -191,8 +191,9 @@ warning: routine daily: source cursor was last exported 2026-10-27T10:00:00+00:0
 
 `stale_sources: "refuse"` (or `run --stale-sources refuse`) fails the days with
 `stale-source` instead, before any peer round; `ignore` skips the check. Each
-`cairn <source> export` writes `<state_home>/cairn/exports/<source>.json`; a store
-exported before this version falls back to its catalog's modification time.
+collection-wide `cairn <source> export` (not `export FILE`, not `sync`) writes
+`<state_home>/cairn/exports/<source>-<key>.json`, keyed by the output directory; a store
+with no receipt falls back to its catalog's modification time.
 
 ## Pause and resume
 

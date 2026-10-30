@@ -579,12 +579,13 @@ class Run:
                 continue
             last: datetime | None = None
             basis = "none"
-            receipt = export_receipt.read(source)
+            output_dir = self.config.output_dir(collection)
+            receipt = export_receipt.read(source, output_dir)
             if receipt is not None:
                 last, basis = parse_time(receipt.get("last_ok_at")), "receipt"
             else:
                 try:
-                    mtime = catalog_path(self.config.output_dir(collection)).stat().st_mtime
+                    mtime = catalog_path(output_dir).stat().st_mtime
                 except OSError:
                     pass
                 else:
