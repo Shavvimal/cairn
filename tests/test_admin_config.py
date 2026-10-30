@@ -78,6 +78,18 @@ class TestConfigShow(_ConfigFixture):
         self.assertEqual(data["error"], lines[0].removeprefix("No config loaded: "))
         self.assertEqual(data["fix"]["verify"], ["cairn", "config", "show", "--json"])
 
+    def test_config_path_failure_names_its_code(self):
+        os.environ["CAIRN_CONFIG"] = str(Path(self.cfg_path).parent / "none.json")
+        config.get_config.cache_clear()
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            code = admin._config_show_path()
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            err.getvalue().splitlines()[-1],
+            "code: CONFIG_NOT_FOUND (run 'cairn errors CONFIG_NOT_FOUND')",
+        )
+
     def test_show_json_shape_and_enabled_state(self):
         data = self._show_json()
         self.assertEqual(data["data_root"], "/tmp/ctx")

@@ -97,6 +97,14 @@ class TestConfigPrecedence(unittest.TestCase):
                     self.assertIn("zzunknown", str(caught.exception))
                     self.assertEqual(caught.exception.code, "CONFIG_UNKNOWN_KEY")
 
+    def test_missing_override_file_carries_not_found_code(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["CAIRN_CONFIG"] = str(Path(d) / "none.json")
+            with self.assertRaises(config.ConfigError) as caught:
+                config._config_path()
+        self.assertEqual(caught.exception.code, "CONFIG_NOT_FOUND")
+        self.assertIn("is set but no such file exists", str(caught.exception))
+
     def test_invalid_json_carries_default_code(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "my.json"

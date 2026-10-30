@@ -185,6 +185,8 @@ class TestHelpers(unittest.TestCase):
             lambda: errors.tag({}, "NOPE"),
             lambda: errors.code_line("NOPE"),
             lambda: errors.finding("NOPE"),
+            lambda: errors.failure("NOPE", "x", exit=1),
+            lambda: errors.fail("NOPE", "x", exit=1),
         ):
             with self.assertRaises(KeyError):
                 call()
