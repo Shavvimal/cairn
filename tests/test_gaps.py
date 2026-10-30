@@ -105,7 +105,8 @@ class TestGapHeal(GapFixture):
             + "\n"
         )
         _age(path, 2 * DAY)
-        self.sync_cron()
+        # Outside the 1d sync window the drift is reported, but fails no step.
+        self.assertEqual(self.sync_cron().returncode, 0, self.log_text)
         log = self.log_text
         self.assertIn("[gap-check] codex-sessions: 1 on disk in 30d, 0 missing, 1 held", log)
         self.assertNotIn("[gap-heal:codex-sessions]", log)

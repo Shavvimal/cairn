@@ -42,7 +42,7 @@ from ..timeutil import today_str
 from .base import ConversationSource
 from .codex_lineage import Lineage, rollout_id, rollout_lineage, spawn_fields
 from .codex_replay import LIVE_CHILD_WINDOW_S, REPLAY_HEURISTIC_VERSION, ReplayCut
-from .guards import DRIFT_KINDS, ERROR, INFO
+from .guards import DRIFT_KINDS, ERROR, INFO, Finding
 from .spec_targets import SPEC_TARGETS
 
 COLLECTION = "codex-sessions"
@@ -636,7 +636,9 @@ class CodexSource(ConversationSource):
         )
 
     # ---- export driver ----
-    def _parse_rollouts(self, rollouts: list[Path]) -> tuple[list[tuple[Path, dict]], list[Path]]:
+    def _parse_rollouts(
+        self, rollouts: list[Path], since: float | None = None
+    ) -> tuple[list[tuple[Path, dict]], list[Path]]:
         """Parse each rollout exactly once, stamping its native revision.
 
         Returns ``(parsed, failed)``: a file that cannot be decoded, or that the
@@ -647,47 +649,63 @@ class CodexSource(ConversationSource):
         The guard verdict is per logical session, not per file: when any fragment of
         a session is refused, its healthy fragments are held too (listed in
         ``failed``), so an older fragment never replaces the document a newer one
-        wrote, and a session's finding clears only when no fragment raised one.
+        wrote, and a session's finding clears only when no fragment raised one. An
+        info finding is stored only for a session with no clean fragment, so a
+        control-only resume beside a real fragment costs no write per run.
+
+        ``since`` (the export's ``--since`` cutoff) makes the guard quiet for a file
+        last changed before it: its finding is stored but not printed and does not
+        fail the run, and a refused session is held without counting as failed.
         """
         parsed = []
         failed = []
-        refused: set[str] = set()  # sessions with an error finding on a fragment
+        refused: dict[str, bool] = {}  # session -> refused by a file inside the window
         flagged: set[str] = set()  # sessions with an error or warn finding
         clean: set[str] = set()
+        infos: dict[str, Finding] = {}
         for rollout in rollouts:
             stats = JsonlStats(kind_of=record_kind)
             try:
                 revision = file_revision(rollout)
                 data = parse_rollout(rollout, stats)
-                age = time.time() - rollout.stat().st_mtime
+                mtime = rollout.stat().st_mtime
             except (OSError, ValueError) as exc:
                 print(f"Error parsing {rollout}: {exc}", file=sys.stderr)
                 failed.append(rollout)
                 continue
+            loud = since is None or mtime >= since
             if data:
                 sid = data["session_id"]
                 top_level = not data.get("parent_session_id")
-                finding = self.classify_parse(sid, rollout, stats, data, top_level=top_level)
-            elif age >= LIVE_CHILD_WINDOW_S:
+                finding = self.classify_parse(
+                    sid, rollout, stats, data, top_level=top_level, loud=loud, record_info=False
+                )
+            elif time.time() - mtime >= LIVE_CHILD_WINDOW_S:
                 sid = rollout_id(rollout)
-                finding = self.classify_parse(sid, rollout, stats, None)
+                finding = self.classify_parse(sid, rollout, stats, None, loud=loud)
             else:
                 continue
             if finding is None:
                 clean.add(sid)
-            elif finding.severity != INFO:
+            elif finding.severity == INFO:
+                infos.setdefault(sid, finding)
+            else:
                 flagged.add(sid)
             if finding is not None and finding.severity == ERROR:
-                refused.add(sid)
-                failed.append(rollout)
+                refused[sid] = refused.get(sid, False) or loud
+                if loud:
+                    failed.append(rollout)
                 continue
             if data:
                 data["source_revision"] = revision
                 parsed.append((rollout, data))
-        failed += [rollout for rollout, data in parsed if data["session_id"] in refused]
+        failed += [rollout for rollout, data in parsed if refused.get(data["session_id"])]
         parsed = [(rollout, data) for rollout, data in parsed if data["session_id"] not in refused]
         for sid in sorted(clean - flagged):
             self.findings.clear(f"{self.source_name}:{sid}", DRIFT_KINDS)
+        for sid, finding in sorted(infos.items()):
+            if sid not in clean and sid not in flagged:
+                self.findings.record(finding)
         return parsed, failed
 
     @staticmethod
@@ -864,7 +882,7 @@ class CodexSource(ConversationSource):
             else "Exporting sessions in the selected window..."
         )
 
-        parsed, failed = self._parse_rollouts(_get_all_rollout_files())
+        parsed, failed = self._parse_rollouts(_get_all_rollout_files(), date_filter)
         exported = self.export_rollouts(date_filter, quiet=args.quiet, parsed=parsed)
         print(f"\nExported {exported} sessions to {OUTPUT_DIR}")
         if failed:

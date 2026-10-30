@@ -59,6 +59,7 @@ from ..schema import SessionData, SubagentRef
 from ..store import file_revision, is_current
 from ..timeutil import today_str
 from .base import ConversationSource
+from .guards import DRIFT_KINDS, ERROR
 from .spec_targets import SPEC_TARGETS
 
 COLLECTION = "antigravity-sessions"
@@ -576,11 +577,16 @@ class AntigravitySource(ConversationSource):
         return found
 
     def _parse(
-        self, transcripts: dict[str, Path], summaries: dict[str, Summary]
+        self,
+        transcripts: dict[str, Path],
+        summaries: dict[str, Summary],
+        since: float | None = None,
     ) -> tuple[dict[str, dict], list[str]]:
         """Parse each transcript once, stamping its native revision. A transcript
         that cannot be read, or that the parser-drift guard refuses, is reported
-        and listed in ``failed``."""
+        and listed in ``failed``. With ``since`` (the ``--since`` cutoff), a refused
+        conversation whose activity time is before it is held quietly: its finding
+        is stored, not printed, and it does not fail the run."""
         parsed: dict[str, dict] = {}
         failed: list[str] = []
         for conversation_id, transcript in transcripts.items():
@@ -594,13 +600,21 @@ class AntigravitySource(ConversationSource):
                 failed.append(conversation_id)
                 continue
             top_level = not data.get("parent_session_id")
-            if not self.guard_parse(conversation_id, transcript, stats, data, top_level=top_level):
-                failed.append(conversation_id)
-                continue
-            data["source_revision"] = revision
-            data["_mtime"] = (
+            activity = (
                 summary.last_modified if summary and summary.last_modified else None
             ) or transcript.stat().st_mtime
+            loud = since is None or activity >= since
+            finding = self.classify_parse(
+                conversation_id, transcript, stats, data, top_level=top_level, loud=loud
+            )
+            if finding is None:
+                self.findings.clear(f"{self.source_name}:{conversation_id}", DRIFT_KINDS)
+            elif finding.severity == ERROR:
+                if loud:
+                    failed.append(conversation_id)
+                continue
+            data["source_revision"] = revision
+            data["_mtime"] = activity
             parsed[conversation_id] = data
         return parsed, failed
 
@@ -777,7 +791,7 @@ class AntigravitySource(ConversationSource):
             if args.all
             else "Exporting conversations in the selected window..."
         )
-        parsed, failed = self._parse(self.conversations(), read_summaries())
+        parsed, failed = self._parse(self.conversations(), read_summaries(), date_filter)
         exported = self.export_conversations(date_filter, quiet=args.quiet, parsed=parsed)
         print(f"\nExported {exported} conversations to {OUTPUT_DIR}")
         if failed:

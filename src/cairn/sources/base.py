@@ -207,12 +207,18 @@ class ConversationSource(ABC):
         data: SessionData | dict | None,
         *,
         top_level: bool = True,
+        loud: bool = True,
+        record_info: bool = True,
     ) -> guards.Finding | None:
         """Classify one parse and record its finding, but clear nothing.
 
         For a source whose session spans several files (Codex fragments), the caller
         decides per session when every file parsed cleanly; :meth:`guard_parse` is
-        the one-file form.
+        the one-file form. ``loud=False`` (a file outside the export's ``--since``
+        window) stores an error or warn finding without printing or reporting it, so
+        an old drift stays visible in doctor and the sync log but does not fail
+        every windowed run. ``record_info=False`` leaves an info finding to the
+        caller.
         """
         finding = guards.check_parse(
             source=self.source_name,
@@ -224,10 +230,15 @@ class ConversationSource(ABC):
             adapter_version=self.version,
             top_level=top_level,
         )
-        if finding is not None and finding.severity == guards.INFO:
-            self.findings.record(finding)
-        elif finding is not None:
+        if finding is None:
+            return None
+        if finding.severity == guards.INFO:
+            if record_info:
+                self.findings.record(finding)
+        elif loud:
             self._raise_finding(finding)
+        else:
+            self.findings.record(finding)
         return finding
 
     def drift_error(self, native_ids: set[str] | None = None) -> guards.ParserDrift | None:
