@@ -14,14 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and removes the table if Codex does not report the hook as trusted. Other Codex versions
   keep the manual `/hooks` step.
 - `--dry-run` for `cairn hook install|uninstall --harness codex` prints every planned write
-  with its file, key or index and sha256; `--no-trust` registers without trust.
+  with its file, key or index and sha256, and writes no cairn file; install still asks
+  Codex for its loaded hooks, and the Codex app-server can write its own state in
+  `$CODEX_HOME` while it answers. `--no-trust` registers without trust.
 - `$CODEX_HOME/cairn-hook-receipt.json` records a sha256 per entry cairn wrote.
 - `cairn hook status --harness codex` reports `codex_trust`; `cairn doctor --harness codex`
   prints a `Codex hook trust` line (trusted, stale, missing, disabled or manual).
 
 ### Changed
 - Reinstalling the Codex fallback replaces cairn's group in place, so later SessionEnd
-  groups keep their index and their trust.
+  groups keep their index and their trust. If a person edited cairn's group since cairn
+  wrote it, reinstall exits 1 and changes nothing.
 - `cairn hook uninstall --harness codex` removes a group or trust table only while its
   sha256 equals the receipt, warns about changed entries and about index shifts.
 - The XDG `codex-hook-registration.json` ownership file is migrated into the receipt and deleted.
