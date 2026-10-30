@@ -73,8 +73,12 @@ def run_capped(
     timeout: float,
     env: Mapping[str, str] | None = None,
     cwd: str | None = None,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``command`` with captured text output; kill its process group on timeout.
+
+    ``input`` is written to the child's stdin, which is then closed; without it the
+    child's stdin is ``/dev/null``.
 
     Raises :class:`subprocess.TimeoutExpired` (carrying the partial stdout and
     stderr) after the group is killed. Any other interruption of the wait
@@ -84,7 +88,7 @@ def run_capped(
     """
     process = subprocess.Popen(
         list(command),
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -94,7 +98,7 @@ def run_capped(
         start_new_session=True,
     )
     try:
-        out, err = process.communicate(timeout=timeout)
+        out, err = process.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired as first:
         out, err = _text(first.stdout), _text(first.stderr)
         kill_group(process)
