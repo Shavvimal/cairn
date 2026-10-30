@@ -22,7 +22,7 @@ CONVERSATION_SOURCES = {
     "cursor": "CursorSource",
     "granola": "GranolaSource",
 }
-CANONICAL_VERBS = {"export", "list", "context", "note", "close", "log"}
+CANONICAL_VERBS = {"export", "list", "context", "note", "close", "log", "decide", "supersede"}
 
 
 def _source(mod: str, cls: str) -> ConversationSource:

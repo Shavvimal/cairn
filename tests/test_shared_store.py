@@ -365,6 +365,34 @@ class TestSharedStore(StoreFixture):
         self.assertIn("Keep this note", content)
         self.assertIn("My handwritten note", content)
 
+    def reexport(self, path: Path) -> bytes:
+        """Force a full re-render of ``path`` (a schema upgrade), return its bytes."""
+        path.write_bytes(path.read_bytes().replace(b'cairn_schema: "2"', b'cairn_schema: "0"'))
+        self.run_cli("codex", "export", "--all")
+        return path.read_bytes()
+
+    def test_reexport_preserves_decisions_byte_identical(self):
+        self.native("codex", "decided")
+        self.run_cli("codex", "export", "--all")
+        path = self.records()[0].path
+        self.run_cli("codex", "note", "Keep this note", "--session-id", "decided")
+        self.run_cli("codex", "decide", "Use", "a | pipe", "--session-id", "decided")
+        self.run_cli("codex", "supersede", "1", "Use a plain word", "--session-id", "decided")
+        decided = path.read_bytes()
+        self.assertIn(b"| 1 | ~~Use a \\| pipe~~ superseded by #2 |", decided)
+        self.assertEqual(self.reexport(path), decided)
+        self.assertEqual(self.reexport(path), decided)
+        self.assertEqual(decided.count(b"## Decisions"), 1)
+
+    def test_document_without_decisions_is_unchanged(self):
+        self.native("codex", "plain")
+        self.run_cli("codex", "export", "--all")
+        path = self.records()[0].path
+        self.run_cli("codex", "note", "Keep this note", "--session-id", "plain")
+        plain = path.read_bytes()
+        self.assertNotIn(b"## Decisions", plain)
+        self.assertEqual(self.reexport(path), plain)
+
     def test_notes_fences_and_unknown_activity_are_not_invented(self):
         notes = "## My Notes\n```md\n## Conversation\n```\nKeep this"
         self.assertEqual(extract_my_notes_section(notes + "\n## Conversation\ntext"), notes)

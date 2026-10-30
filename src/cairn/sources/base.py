@@ -626,6 +626,15 @@ class ConversationSource(ABC):
             return 2
         return 0 if mutations.add_comment(self.find_file, session_id, text) else 1
 
+    def cmd_decide(self, args: argparse.Namespace) -> int:
+        """``decide`` and ``supersede N``: write a row of the ``## Decisions`` table."""
+        from .. import decisions
+
+        session_id = self._require_session_id(getattr(args, "session_id", None))
+        if not session_id:
+            return 1
+        return decisions.cmd_decide(self, session_id, args)
+
     def cmd_close(self, args: argparse.Namespace) -> int:
         session_id = self._require_session_id(getattr(args, "session_id", None))
         if not session_id:

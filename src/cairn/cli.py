@@ -7,7 +7,7 @@ in two parent parsers so they are declared once and attached everywhere:
 * ``window`` - ``--since`` / ``--all`` (the time filter for ``export``).
 
 Verbs are stable across sources: ``export``, ``list``, ``context``, ``note``,
-``close``, ``log``, plus any source-specific extras (Claude adds ``sync`` / ``resume``).
+``close``, ``log``, ``decide``, ``supersede``, plus any source-specific extras (Claude adds ``sync`` / ``resume``).
 The source supplies only its native ``run_export`` driver and, optionally, extra
 positionals on ``export`` (via :meth:`ConversationSource.extend_export_parser`).
 """
@@ -117,6 +117,9 @@ def build_parser(source: ConversationSource) -> argparse.ArgumentParser:
     p_log.add_argument("--session-id", help="target item id (defaults to the current one)")
     p_log.set_defaults(func=source.cmd_log)
 
+    # decide / supersede - rows of the ## Decisions table in the document body
+    _add_decision_parsers(sub, common, source)
+
     # source-specific extras (e.g. Claude sync / resume) share the common flags too
     source.add_extra_parsers(sub, common)
 
@@ -142,6 +145,42 @@ def _run_export(source: ConversationSource, args: argparse.Namespace) -> int:
         )
         print(json.dumps(report, indent=2))
     return result
+
+
+def _add_decision_parsers(sub, common: argparse.ArgumentParser, source: ConversationSource) -> None:
+    from .decisions import CONFIDENCES, DEFAULT_CONFIDENCE, KINDS
+
+    p_decide = sub.add_parser(
+        "decide", parents=[common], help="add a row to the ## Decisions table"
+    )
+    p_decide.add_argument("claim", nargs="+", help="the claim (one line, at most 500 characters)")
+    p_supersede = sub.add_parser(
+        "supersede", parents=[common], help="strike row N of ## Decisions and add its replacement"
+    )
+    p_supersede.add_argument("number", type=int, metavar="N", help="the row to strike")
+    p_supersede.add_argument("claim", nargs="+", help="the replacement claim")
+    for parser, kind_help in (
+        (p_decide, "kind of claim (default: decision)"),
+        (p_supersede, "kind of the new row (default: the kind of row N)"),
+    ):
+        parser.add_argument("--kind", choices=KINDS, help=kind_help)
+        parser.add_argument(
+            "--confidence",
+            choices=CONFIDENCES,
+            default=DEFAULT_CONFIDENCE,
+            help=f"confidence (default: {DEFAULT_CONFIDENCE})",
+        )
+        parser.add_argument(
+            "--revisit-by", default="", metavar="YYYY-MM-DD", help="date to review the row"
+        )
+        parser.add_argument(
+            "--source",
+            default="",
+            metavar="CITE",
+            help="frame citations like '[claude:3f2a9c1e f12]', separated by spaces",
+        )
+        parser.add_argument("--session-id", help="target item id (defaults to the current one)")
+        parser.set_defaults(func=source.cmd_decide)
 
 
 def run(source: ConversationSource, argv: list[str] | None = None) -> None:
