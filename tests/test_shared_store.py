@@ -14,7 +14,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from cairn import config, recall
+from cairn import config, decisions, recall
 from cairn.frontmatter import extract_my_notes_section, parse_frontmatter
 from cairn.harnesses import get_harness
 from cairn.store import SCHEMA_VERSION, SessionStore, bounded_content
@@ -513,6 +513,31 @@ class TestSharedStore(StoreFixture):
         for n in range(8):
             self.assertIn(f"comment-{n}", comments)
         self.assertIn("native revision 7", self.records()[0].path.read_text())
+
+    def test_concurrent_export_and_decide_keep_every_row(self):
+        self.native("codex", "race")
+        self.run_cli("codex", "export", "--all")
+        processes = []
+        for n in range(8):
+            self.native("codex", "race", text=f"native revision {n}")
+            args = ["codex", "decide", f"claim-{n}", "-q", "--session-id", "race"]
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, "-m", "cairn", *args],
+                    env=self.env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+            )
+            self.run_cli("codex", "export", "--all")
+        for process in processes:
+            _, err = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, err)
+        text = self.records()[0].path.read_text()
+        rows = decisions.parse(text)
+        self.assertEqual([r.number for r in rows], list(range(1, 9)))
+        self.assertEqual(sorted(r.claim for r in rows), [f"claim-{n}" for n in range(8)])
+        self.assertIn("native revision 7", text)
 
     def test_annotation_mtime_never_hides_new_native_messages(self):
         for source in ("claude", "codex"):
