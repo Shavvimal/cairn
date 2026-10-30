@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment. Its failure is logged and changes nothing else.
 - `routines.<name>.stale_sources` (`warn`, `refuse`, `ignore`) and
   `cairn routine run --stale-sources`: warn about, or refuse on, a digest source not
-  exported in the last 24 h. Exports now write `<state_home>/cairn/exports/<source>.json`.
+  exported in the last 24 h. A collection-wide `export` (no FILE argument) now writes a
+  receipt to `<state_home>/cairn/exports/<source>-<key>.json`, keyed by its output
+  directory. An export of one FILE and `sync` write none.
 - `cairn routine run --json`: one run report with `schema_version` and `status`; the same
   object is `last-run.json` (the old keys are kept).
 - `cairn routine status` names a state (`fresh`, `running`, `never_run`, `stale`,
