@@ -167,4 +167,14 @@ class TestCodexTrustDoctor(unittest.TestCase):
                         admin._check_codex_trust()
                     line = output.getvalue().strip()
                     self.assertTrue(line.startswith(expected), line)
+                    # The registry suffix: none on ok, a trust code on every warning.
+                    state = expected.split(" - ", 1)[1].split(":", 1)[0].split(" ", 1)[0]
+                    suffix = {
+                        "trusted": "",
+                        "stale": " [CODEX_HOOK_TRUST_BROKEN]",
+                        "missing": " [CODEX_HOOK_TRUST_BROKEN]",
+                        "disabled": " [CODEX_HOOK_TRUST_BROKEN]",
+                        "manual": " [HOOK_NOT_TRUSTED]",
+                    }[state]
+                    self.assertTrue(line.endswith(suffix or ")"), line)
                     self.assertEqual(line.count("\n"), 0)

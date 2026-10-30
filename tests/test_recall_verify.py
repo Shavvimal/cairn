@@ -459,6 +459,7 @@ class TestChecks(VerifyFixture):
             ),
         )
         self.assertEqual(data["schema_version"], 1)
+        self.assertEqual((data["exit"], data["code"]), (4, "RECALL_VERIFY_FAILED"))
         self.assertEqual(data["file"], str(self.journal.absolute()))
         self.assertEqual(data["digest"], str(self.out.absolute()))
         self.assertFalse(data["ok"])
@@ -511,6 +512,22 @@ class TestChecks(VerifyFixture):
 
 
 class TestFix(VerifyFixture):
+    def test_fix_clears_the_registry_code(self):
+        # A failing journal names RECALL_VERIFY_FAILED on stderr; with --fix the failing
+        # blocks move, the run exits 0 and the JSON code is null.
+        original = journal(VERIFIED, "", NOT_FOUND)
+        code, _, stderr = self.verify(original)
+        self.assertEqual(code, 4)
+        self.assertTrue(
+            stderr.endswith(
+                "code: RECALL_VERIFY_FAILED (run 'cairn errors RECALL_VERIFY_FAILED')\n"
+            )
+        )
+        code, stdout, stderr = self.verify(original, "--fix", "--json")
+        self.assertEqual(code, 0)
+        self.assertIsNone(json.loads(stdout)["code"])
+        self.assertNotIn("RECALL_VERIFY_FAILED", stderr)
+
     def test_fix_moves_only_failing_blocks(self):
         original = journal(VERIFIED, "", NOT_FOUND, "", "Closing line.")
         code, stdout, _ = self.verify(original, "--fix")

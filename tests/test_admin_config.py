@@ -657,6 +657,8 @@ class TestDoctorRecallFirst(StoreFixture):
         out = buf.getvalue()
         self.assertEqual(rc, 1)
         self.assertIn("  FAIL config", out)
+        fail_line = next(line for line in out.splitlines() if line.startswith("  FAIL config"))
+        self.assertTrue(fail_line.endswith(" [CONFIG_NOT_FOUND]"), fail_line)
         self.assertIn("  warn recall-first [claude] - not in", out)
         self.assertNotIn("[codex]", out)
         self.assertFalse(self.claude_md.exists())

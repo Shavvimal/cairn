@@ -72,6 +72,7 @@ class TestDoctorIndex(StoreFixture):
             self.assertIn("ok   qmd version - qmd 2.5.3", out)
             self.assertIn("FAIL qmd runtime", out)
             self.assertIn("killed by signal 11", out)
+            self.assertIn("so search cannot work [QMD_RUNTIME_FAILED]\n", out)
 
     def test_old_version_warns_but_is_judged_by_the_index(self):
         self.stub(version="qmd 1.1.5")
@@ -106,9 +107,11 @@ class TestDoctorIndex(StoreFixture):
         code, out = self.doctor()
         self.assertEqual(code, 0, out)
         self.assertIn("warn embeddings - 4 documents, 0 vectors, 0 pending: keyword search", out)
+        self.assertIn("run 'cairn sync --cron' [QMD_INDEX_INCOMPLETE]\n", out)
         code, out = self.doctor("--strict-index")
         self.assertEqual(code, 1)
         self.assertIn("FAIL embeddings", out)
+        self.assertIn("run 'cairn sync --cron' [QMD_INDEX_INCOMPLETE]\n", out)
 
     def test_pending_warns_by_default_and_fails_strict(self):
         self.stub(status=PENDING)

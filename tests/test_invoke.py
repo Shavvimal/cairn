@@ -1061,10 +1061,16 @@ class TestAntigravityRun(InvokeFixture):
 
     def test_gcp_route_refuses_to_spawn_without_adc(self):
         self.write_config(antigravity={"billing": {"route": "gcp"}})
-        result, _ = self.run_agy()
+        result, refused = self.run_agy()
         self.assertEqual(result.returncode, 2)
         self.assertIn("billing check failed", result.stderr)
         self.assertIn("application_default_credentials.json", result.stderr)
+        self.assertIn(
+            "\ncode: INVOKE_BILLING_CHECK_FAILED (run 'cairn errors INVOKE_BILLING_CHECK_FAILED')\n",
+            result.stderr,
+        )
+        assert refused is not None
+        self.assertEqual((refused["code"], refused["exit"]), ("INVOKE_BILLING_CHECK_FAILED", 2))
         self.assertEqual(self.stub_calls(), [])
         self.assertEqual(self.run_dirs("antigravity"), [])
         self.write_adc(quota_project=None)
@@ -1091,6 +1097,10 @@ class TestAntigravityRun(InvokeFixture):
         result, _ = self.run_agy(env={"STUB_GCLOUD": "rapt"})
         self.assertEqual(result.returncode, 2)
         self.assertIn("billing check failed: Google rejected the ADC refresh token", result.stderr)
+        self.assertIn(
+            "\ncode: INVOKE_BILLING_CHECK_FAILED (run 'cairn errors INVOKE_BILLING_CHECK_FAILED')\n",
+            result.stderr,
+        )
         self.assertIn("cannot prompt during non-interactive execution", result.stderr)
         self.assertIn("gcloud auth application-default login", result.stderr)
         self.assertEqual(self.stub_calls(), [])
@@ -1352,11 +1362,20 @@ class TestAntigravityRun(InvokeFixture):
         self.write_config(antigravity={"quiet_after_s": 1})
         lock.acquire(run_dir)
         result, shown = self.invoke("wait", data["thread_id"], "--json")
+        published, report = self.invoke("publish", data["thread_id"], "--json")
         lock.release()
         self.assertEqual(result.returncode, 75, result.stderr)
         assert shown is not None
         self.assertEqual(shown["status"], "busy")
+        self.assertEqual(shown["code"], "INVOKE_BUSY")
         self.assertIn("adopting this round", shown["error"])
+        # ``publish`` with the thread lock held: busy, with the registry code and fix.
+        self.assertEqual(published.returncode, 75, published.stderr)
+        assert report is not None
+        self.assertEqual(
+            (report["busy"], report["code"], report["fix"]["verify"]),
+            (True, "INVOKE_BUSY", ["cairn", "invoke", "status", data["thread_id"]]),
+        )
         _, shown = self.invoke("status", data["thread_id"], "--json")
         assert shown is not None
         self.assertEqual((shown["execution"], shown["outcome"]), ("exited", "denied"))
