@@ -4,6 +4,35 @@ Implementation follows [the support plan](codex-support-plan.md). This record di
 observed host behavior from unit tests and packaging checks. Full desktop parity is not
 verified; do not infer it from successful CLI installation.
 
+## Evidence (2026-10-30, cairn 2.19.3, commit e29f161)
+
+This table follows the convention in [the test discipline spec](test-discipline-spec.md),
+section 5.2. The automated column names a test and the date and commit it last passed.
+The manual column names what only a real Codex can show, who checks it and where the result
+goes. A manual item moves to the automated column when a test covers it, and is never
+deleted. The sections after this one are the 2.4.0 acceptance record of 2026-10-16 and its
+follow-ups. They stay as they were written.
+
+Tests prove that cairn writes the hash it computes, records what it wrote and removes only
+what it owns. Only a real Codex can prove that Codex computes the same hash and skips the
+review prompt.
+
+| Behaviour | Automated evidence (test name, date) | Remaining manual evidence (what, who, how to record) |
+| --- | --- | --- |
+| The trust hash matches Codex's formula | `tests.test_codex_trust.TestTrustHash.test_trusted_hash_known_answers`, 2026-10-30, e29f161 | What: the formula reproduced the four hashes of a live `config.toml` on Codex CLI 0.165.0 (row "Codex trust written by cairn" below). Repeat on each new Codex minor before the verified range widens. Who: the owner. How: a log row with the Codex version and the number of hashes reproduced. |
+| Install writes the hooks.json group, then the trust table, then the receipt with a sha256 per entry | `tests.test_codex_trust.TestInstall.test_install_writes_group_then_table_then_receipt`, 2026-10-30, e29f161 | What: after `cairn hook install --harness codex`, a fresh Codex CLI session lists the Cairn hook in `/hooks` as trusted with no review prompt; after `/exit`, `cairn hook status --harness codex` shows `trustStatus` trusted and one completed request. Who: the owner, on the release candidate. How: a log row with the Codex version, the session id prefix (8 characters) and the `trustStatus` excerpt. |
+| A version outside the verified range writes no trust | `tests.test_codex_trust.TestInstall.test_out_of_range_version_writes_no_trust`, 2026-10-30, e29f161 | None. |
+| `--dry-run` writes nothing | `tests.test_codex_trust.TestUninstall.test_dry_run_writes_nothing`, 2026-10-30, e29f161 | None. |
+| Uninstall removes only the entries that still match the receipt | `tests.test_codex_trust.TestUninstall.test_uninstall_removes_only_unchanged_entries`, 2026-10-30, e29f161 | What: edit the hook command by hand, run `cairn hook uninstall --harness codex`, and confirm in `/hooks` that the edited entry stays. Who: the owner. How: a log row. |
+| `hook status --harness codex` reports the trust state | `tests.test_codex_trust.TestTrustReport.test_status_reports_codex_trust`, 2026-10-30, e29f161 | What: `hooks/list` on a live Codex after a cairn-written table reports the hook as trusted. Not yet run. Who: the owner. How: a log row with the `hooks/list` excerpt. |
+| The Codex desktop app loads and trusts the hook | none | What: the same check in the desktop app. Open since 2026-10-17 (see "Open host and platform checks"). Who: whoever has the app installed. How: a log row. |
+
+### Manual evidence log
+
+| Date | Host and version | Item | Result | Excerpt |
+| --- | --- | --- | --- | --- |
+| 2026-10-30 | Codex CLI 0.165.0, macOS | The trust hash matches Codex's formula | pass, read-only | The formula reproduced all four `[hooks.state."<key>"]` hashes of a live `config.toml` from its `hooks.json`; a SessionEnd request completed at 12:32 that day. |
+
 ## Environment and isolation
 
 Verified on 2026-10-16, macOS 26.6.2 (Apple Silicon), Codex CLI 0.160.0 and Claude Code
