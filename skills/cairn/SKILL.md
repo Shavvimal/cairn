@@ -176,7 +176,8 @@ filters on it.
 ## Preserved on export (shared)
 
 Re-exporting never clobbers your annotations. Across all sources, exports preserve the
-`## My Notes` section, a `## Decisions` table directly after it (byte for byte), and these
+`## My Notes` section, a `## Decisions` table directly after it (a table cairn wrote stays
+byte for byte; a hand edit keeps its text, with LF endings), and these
 frontmatter fields: `comments`, `status`, `tags`, `rating`, `title`, `projects`, `links`.
 `decide` and `supersede` are described in `workflows/log-session.md`.
 

@@ -242,6 +242,16 @@ class TestSections(unittest.TestCase):
         assert block is not None
         self.assertEqual(extract_annotations(block + "\n", conversation_heading=None), block)
 
+    def test_hand_edited_table_keeps_its_text_with_lf_endings(self):
+        row = "| 1 | a  b | fact | low | 2026-10-30 |  |  |"
+        crlf = f"## Decisions\r\n\r\n{HEADER}\r\n{SEPARATOR}\r\n{row}   \r\n\r\n\r\n"
+        text = doc(rows=None).replace(f"{PLACEHOLDER}\n", f"{PLACEHOLDER}\n\n{crlf}", 1)
+        block = extract_annotations(text)
+        self.assertEqual(block, notes_with(row))
+        again = document(SID, messages(), notes=block)
+        self.assertEqual(again, doc(rows=row))
+        self.assertEqual(extract_annotations(again), block)
+
     def test_extract_my_notes_section_output_unchanged(self):
         text = doc()
         self.assertEqual(extract_my_notes_section(text), notes_with(None))

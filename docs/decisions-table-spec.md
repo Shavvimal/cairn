@@ -26,7 +26,9 @@ This change adds:
 2. Corrections in place: `~~old claim~~ superseded by #4` keeps the old row and strikes it.
 3. Two verbs on every conversation source: `cairn <source> decide` and
    `cairn <source> supersede`.
-4. Round trip: re-export preserves the section byte for byte, like `## My Notes`.
+4. Round trip: re-export preserves the section as it preserves `## My Notes`. A table
+   that cairn wrote comes back byte for byte. A hand-edited table keeps every line's text,
+   but its line endings become LF and trailing blank space at the end of the section goes.
 5. Reading: `cairn recall decisions [DATE_EXPR] [--overdue] [--json]`, and an `overdue`
    list in the `cairn recall digest --json` object.
 
@@ -204,6 +206,10 @@ follows My Notes, with each part right-stripped. The value goes through the exis
 (`src/cairn/frontmatter.py:378-379`). For that reason no adapter's `render_document`
 changes. Extracting from the output gives the same string again, so the result is a fixed
 point. A document without a Decisions section re-exports byte-identical to 2.9.0.
+The extraction splits on line breaks and right-strips each part, as it always did for My
+Notes. So a hand-edited section with CRLF line endings, or with blank lines or trailing
+spaces after its last row, comes back with LF endings and without that trailing space.
+The line text is kept. A table in the canonical layout that `decide` writes is unchanged.
 
 ### 4.4 `recall decisions`
 
@@ -406,7 +412,7 @@ Row 3 still has `revisit_by` 2026-11-15, but it is struck, so it is never overdu
 |---|---|
 | The current session is not exported yet | The same as `note`: `Session file not found`, exit 1. The skill tells the agent to export first |
 | More than one active session, or mixed host hints | The existing refusal (`src/cairn/sources/base.py:355-378`), exit 1 |
-| A row was edited by hand into a bad shape | `decide` and `supersede` refuse with the line number and write nothing. `recall` warns and skips that row. Re-export keeps the section exactly as written |
+| A row was edited by hand into a bad shape | `decide` and `supersede` refuse with the line number and write nothing. `recall` warns and skips that row. Re-export keeps every line's text; line endings become LF and trailing blank space at the end of the section goes, as for My Notes |
 | `## Decisions` is not directly after My Notes | Not recognised, not parsed. Re-export behaves as on 2.9.0 (section 2, last row) |
 | A fenced `## Conversation` in My Notes | The reader stops at the real anchor only, because of the turn-marker rule |
 | A claim holds `\|` or `\\` | Escaped on write and unescaped on read. The round trip is tested |
