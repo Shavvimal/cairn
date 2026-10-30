@@ -478,7 +478,8 @@ class TestProvenanceKey(DigestFixture):
             written, [".cairn-digest", "claude-fixture0001.frames.jsonl", "claude-fixture0001.md"]
         )
         code, data, _, _ = self.digest("--provenance", "agent")
-        self.assertEqual((code, data), (3, {"sessions": [], "skipped": []}))
+        self.assertEqual((code, data["sessions"], data["skipped"]), (3, [], []))
+        self.assertEqual(data["coverage"]["verdict"], "clean-miss")
         self.assertEqual([p.name for p in out.iterdir()], [".cairn-digest"])
 
 
