@@ -2828,7 +2828,15 @@ def main(argv: list[str] | None = None) -> int:
     except LookupError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_FATAL
-    except (OSError, ValueError, RuntimeError, ConfigError) as exc:
+    except ConfigError as exc:
+        return errors.fail(
+            exc.code,
+            str(exc),
+            exit=EXIT_FATAL,
+            prefix="Error: ",
+            as_json=bool(getattr(args, "json", False)),
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_FATAL
 

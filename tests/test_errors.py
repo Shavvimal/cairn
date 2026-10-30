@@ -16,7 +16,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from cairn import __main__ as dispatcher
-from cairn import errors, instructions, invoke
+from cairn import config, errors, instructions, invoke
 
 REPO = Path(__file__).resolve().parents[1]
 DOC = REPO / "docs" / "error-codes.md"
@@ -362,6 +362,43 @@ class TestCli(unittest.TestCase):
         self.assertEqual(
             lines[3], "code: CLI_UNKNOWN_COMMAND (run 'cairn errors CLI_UNKNOWN_COMMAND')"
         )
+
+
+class TestInvokeSite(unittest.TestCase):
+    def run_invoke(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = invoke.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_config_error_is_a_registry_failure(self):
+        bad = config.ConfigError("invoke has unknown peers: codxe.", code="CONFIG_UNKNOWN_KEY")
+        with mock.patch.object(invoke, "get_config", side_effect=bad):
+            code, out, err = self.run_invoke(["codex", "--json", "--prompt", "x"])
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            err.splitlines(),
+            [
+                "Error: invoke has unknown peers: codxe.",
+                "code: CONFIG_UNKNOWN_KEY (run 'cairn errors CONFIG_UNKNOWN_KEY')",
+            ],
+        )
+        data = json.loads(out)
+        self.assertEqual((data["ok"], data["code"], data["exit"]), (False, "CONFIG_UNKNOWN_KEY", 1))
+
+    def test_usage_error_fills_the_peer(self):
+        cfg = mock.Mock()
+        with (
+            mock.patch.object(invoke, "get_config", return_value=cfg),
+            mock.patch.object(
+                invoke, "Runner", side_effect=invoke.UsageError("--permission-mode is Claude-only")
+            ),
+        ):
+            code, out, _ = self.run_invoke(["codex", "--json", "--prompt", "x"])
+        self.assertEqual(code, 2)
+        data = json.loads(out)
+        self.assertEqual(data["code"], "INVOKE_USAGE")
+        self.assertEqual(data["fix"]["verify"], ["cairn", "invoke", "codex", "--help"])
 
 
 class TestInstructionsSite(unittest.TestCase):
