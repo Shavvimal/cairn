@@ -23,6 +23,7 @@ _SOURCES = {source.source: source.entrypoint for source in SOURCES}
 # Top-level orchestration / admin commands.
 _ADMIN: dict[str, str] = {
     "hook": "cairn.hooks:main",
+    "instructions": "cairn.instructions:main",
     "resume": "cairn.resume:main",
     "sync": "cairn.sync:main",
     "recall": "cairn.recall:main",
@@ -86,6 +87,7 @@ agents (peer runs and subagents of a session):
 orchestration / admin:
   cairn sync [--hook | --cron | --all]       sync every source, then refresh QMD
   cairn hook install | status | worker       configure hooks / inspect / retry sync
+  cairn instructions install | remove | show | status --harness claude|codex   recall-first block in the user instruction file
   cairn resume <source:session-id>            print the correct native resume command
   cairn doctor [--strict-index]              check install, config, qmd + index, rg, cron, PATH
   cairn config init | path                   create / locate the per-user config
