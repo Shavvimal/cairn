@@ -21,6 +21,7 @@ import builtins
 import contextlib
 import importlib
 import io
+import os
 import re
 import subprocess
 import unittest
@@ -35,9 +36,12 @@ from cairn import __main__ as dispatch
 ROOT = Path(__file__).resolve().parents[1]
 HISTORICAL = "<!-- cairn-cli: historical -->"
 SKIP = "<!-- cairn-cli: skip -->"
-FENCE = re.compile(r"^\s*(```|~~~)")
+FENCE_OPEN = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+FENCE_CLOSE = re.compile(r"^\s*(`{3,}|~{3,})\s*$")
+BLOCKQUOTE = re.compile(r"^\s*(?:>\s?)+")
+BLOCK_START = re.compile(r"^\s*(?:#{1,6}\s|\||[-*+]\s|\d+[.)]\s)")
 CONTINUATION = re.compile(r"\\\s*$")
-INLINE_SPAN = re.compile(r"(`+)(.+?)(?<!`)\1(?!`)")
+INLINE_SPAN = re.compile(r"(`+)(.+?)(?<!`)\1(?!`)", re.S)
 WRAPPERS = (
     r"(?:(?:[A-Z_][A-Z0-9_]*=\S*|uv\s+run|python3?\s+-m|nohup|exec|command|time"
     r"|timeout\s+\S+)\s+)*"
@@ -47,7 +51,7 @@ COMMAND_START = re.compile(
 )
 NAME_PLACEHOLDER = re.compile(r"^[A-Z][A-Z0-9_]*(?::[A-Z0-9_]+)?$")
 COMMAND_WORD = re.compile(r"^[a-z][a-z-]*$")
-HELP_FLAGS = frozenset({"-h", "--help", "--version", "-V"})
+OPTION_VALUE = re.compile(r"^(--?[A-Za-z][A-Za-z0-9_-]*=)(.+)$")
 BASE_CANDIDATES = ("1", "2026-01-01", "7d")
 SENTINEL = "__cairn_ph_{}__"
 PIPE_MESSAGE = "usage alternation '{} | {}' runs as a shell pipe; write one command per line"
@@ -85,35 +89,88 @@ class Invocation:
 # ---------------------------------------------------------------------------
 
 
+def fence_open(line: str) -> tuple[str, int, str] | None:
+    """(delimiter char, delimiter length, info string) when ``line`` opens a fence."""
+    match = FENCE_OPEN.match(line)
+    if match is None or (match.group(1)[0] == "`" and "`" in match.group(2)):
+        return None
+    return match.group(1)[0], len(match.group(1)), match.group(2).strip()
+
+
+def fence_closes(line: str, opener: tuple[str, int, str]) -> bool:
+    """True when ``line`` closes the fence ``opener`` opened: same char, at least as long."""
+    match = FENCE_CLOSE.match(line)
+    return bool(match and match.group(1)[0] == opener[0] and len(match.group(1)) >= opener[1])
+
+
+def _unquote(line: str) -> tuple[str, bool]:
+    """The line without its blockquote prefix, and whether it had one."""
+    match = BLOCKQUOTE.match(line)
+    return (line[match.end() :], True) if match else (line, False)
+
+
+def _inline_regions(path: str, lines: list[str], block: list[tuple[int, str]]) -> Iterator[Region]:
+    """Inline ``cairn`` spans in one paragraph; a span can cross a soft line break."""
+    if not block:
+        return
+    text = "\n".join(code for _, code in block)
+    starts = []
+    offset = 0
+    for index, code in block:
+        starts.append((offset, index))
+        offset += len(code) + 1
+    for match in INLINE_SPAN.finditer(text):
+        index = next(i for start, i in reversed(starts) if start <= match.start())
+        line = lines[index]
+        if SKIP in line or HISTORICAL in line or (index > 0 and HISTORICAL in lines[index - 1]):
+            continue
+        span = re.sub(r"\s*\n\s*", " ", match.group(2).strip()).replace("\\|", "|")
+        if span.startswith("cairn "):
+            yield Region(path, index + 1, "inline", span)
+
+
 def code_regions(path: str, text: str) -> Iterator[Region]:
     """Yield fenced lines (continuations joined) and inline ``cairn`` spans, minus markers."""
     lines = text.split("\n")
-    in_fence = False
+    opener: tuple[str, int, str] | None = None
+    quoted = False  # the open fence sits in a blockquote
     exempt = False
+    block: list[tuple[int, str]] = []  # the paragraph being read for inline spans
     i = 0
     while i < len(lines):
-        line = lines[i]
-        if FENCE.match(line):
-            in_fence = not in_fence
-            above = lines[i - 1] if i > 0 else ""
-            exempt = in_fence and (HISTORICAL in above or SKIP in above)
+        line, in_quote = _unquote(lines[i])
+        if opener is None:
+            fence = fence_open(line)
+            if fence is None and line.strip() and not BLOCK_START.match(line):
+                block.append((i, line))
+                i += 1
+                continue
+            yield from _inline_regions(path, lines, block)
+            block = []
+            if fence is not None:
+                opener, quoted = fence, in_quote
+                above = lines[i - 1] if i > 0 else ""
+                exempt = HISTORICAL in above or SKIP in above
+            elif line.strip():
+                block.append((i, line))  # a heading, list item or table row starts a block
             i += 1
             continue
-        if in_fence:
-            start, code = i, line
-            while (
-                CONTINUATION.search(code) and i + 1 < len(lines) and not FENCE.match(lines[i + 1])
-            ):
-                i += 1
-                code = CONTINUATION.sub(" ", code) + " " + lines[i].strip()
-            if not exempt:
-                yield Region(path, start + 1, "fence", code)
-        elif not (SKIP in line or HISTORICAL in line or (i > 0 and HISTORICAL in lines[i - 1])):
-            for match in INLINE_SPAN.finditer(line):
-                span = match.group(2).strip().replace("\\|", "|")
-                if span.startswith("cairn "):
-                    yield Region(path, i + 1, "inline", span)
+        code = line if quoted else lines[i]
+        if fence_closes(code, opener):
+            opener = None
+            i += 1
+            continue
+        start = i
+        while CONTINUATION.search(code) and i + 1 < len(lines):
+            following = _unquote(lines[i + 1])[0] if quoted else lines[i + 1]
+            if fence_closes(following, opener):
+                break
+            i += 1
+            code = CONTINUATION.sub("", code).rstrip() + " " + following.strip()
+        if not exempt:
+            yield Region(path, start + 1, "fence", code)
         i += 1
+    yield from _inline_regions(path, lines, block)
 
 
 # ---------------------------------------------------------------------------
@@ -271,11 +328,49 @@ def tokenise(text: str) -> tuple[tuple[tuple[str, bool], ...], str | None, int]:
     return tuple(words), pipe_into, i
 
 
+def mask_literals(text: str) -> str:
+    """``text`` with quoted literals and comments filled, so no command starts inside them.
+
+    A command substitution inside double quotes still runs, so it stays visible.
+    """
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "'":
+            end = text.find("'", i + 1)
+            end = n if end < 0 else end
+            out[i + 1 : end] = "x" * (end - i - 1)
+            i = end + 1
+        elif c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                if text.startswith("$(", i):
+                    i = _closing(text, i + 1, "(", ")")
+                elif text[i] == "`":
+                    end = text.find("`", i + 1)
+                    i = n if end < 0 else end + 1
+                else:
+                    out[i] = "x"
+                    i += 1
+            i += 1
+        elif c == "#" and (i == 0 or text[i - 1].isspace()):
+            out[i:] = "x" * (n - i)
+            break
+        else:
+            i += 1
+    return "".join(out)
+
+
 def invocations(region: Region) -> Iterator[Invocation]:
     """Each ``cairn`` at command position in a region, tokenised up to its end."""
-    for match in COMMAND_START.finditer(region.text):
+    consumed = 0
+    for match in COMMAND_START.finditer(mask_literals(region.text)):
+        if match.start() < consumed:
+            continue  # inside the previous invocation's argv
         tail = region.text[match.end() :]
         words, pipe_into, stop = tokenise(tail)
+        consumed = match.end() + stop
         shown = tail[:stop]
         if pipe_into is not None:
             rest = re.split(r"\s{2,}(?=[a-z])", tail[stop:], maxsplit=1)[0]
@@ -343,6 +438,15 @@ def subcommand_names(command: str) -> frozenset[str]:
     return frozenset(names)
 
 
+@cache
+def option_names(command: str) -> frozenset[str]:
+    """Every option string in the route's parser tree."""
+    names: set[str] = set()
+    for action in _walk(build_route_parser(command)):
+        names.update(action.option_strings)
+    return frozenset(names)
+
+
 def parse_error(parser: argparse.ArgumentParser, argv: list[str]) -> str | None:
     """None when ``argv`` parses, else the parser's last stderr line."""
     err = io.StringIO()
@@ -350,14 +454,19 @@ def parse_error(parser: argparse.ArgumentParser, argv: list[str]) -> str | None:
         try:
             parser.parse_args(argv)
         except SystemExit as exc:
+            if exc.code == 0:
+                return None  # --help, or a route's own --version action
             lines = [line for line in err.getvalue().splitlines() if line.strip()]
             return lines[-1] if lines else f"exit {exc.code}"
     return None
 
 
-def _relaxed(error: str, argv: list[str], inline: bool) -> bool:
+def _relaxed(error: str, argv: list[str], inline: bool, command: str) -> bool:
     if not inline:
         return False
+    known = option_names(command)
+    if any(w.startswith("-") and w.split("=", 1)[0] not in known for w in argv if w != "-"):
+        return False  # argparse reports a missing argument before an unknown option
     if "the following arguments are required" in error:
         return True
     if re.search(r"one of the arguments .* is required", error):
@@ -381,9 +490,9 @@ def _check_route(command: str, rest: list[str], placeholders: dict[str, str], in
 
     def substitute(sentinel: str, current: str, named: bool) -> list[str] | None:
         for value in pool:
-            trial = [value if word == sentinel else word for word in argv]
+            trial = [word.replace(sentinel, value) for word in argv]
             error = parse_error(parser, trial)
-            if error is None or _relaxed(error, trial, inline):
+            if error is None or _relaxed(error, trial, inline, command):
                 return trial
             if _names(error, value):
                 continue
@@ -393,14 +502,18 @@ def _check_route(command: str, rest: list[str], placeholders: dict[str, str], in
 
     for _ in range(4 * len(argv) + 4):
         error = parse_error(parser, argv)
-        if error is None or _relaxed(error, argv, inline):
+        if error is None or _relaxed(error, argv, inline, command):
             return None
-        live = [word for word in argv if word in placeholders]
-        named = [word for word in live if word in error]
+        live = [s for s in placeholders if any(s in word for word in argv)]
+        named = [s for s in live if s in error]
         if named:
             sentinel = named[0]
             original = placeholders[sentinel]
-            if "unrecognized arguments" in error and original.endswith(("...", "…")):
+            if (
+                "unrecognized arguments" in error
+                and original.endswith(("...", "…"))
+                and sentinel in argv
+            ):
                 argv.remove(sentinel)
                 continue
             if sentinel in tried:
@@ -446,15 +559,18 @@ def check(invocation: Invocation) -> str | None:
             if invocation.pipe_into in subcommand_names(command):
                 left = next((w for w, _ in reversed(words)), first)
                 return PIPE_MESSAGE.format(left, invocation.pipe_into)
-    if any(word in HELP_FLAGS for word, _ in words[1:]):
-        return None  # rule 14: these exit before parsing completes
     placeholders: dict[str, str] = {}
     rest: list[str] = []
     for word, placeholder in words[1:]:
         if placeholder:
             sentinel = SENTINEL.format(len(placeholders))
-            placeholders[sentinel] = word
-            rest.append(sentinel)
+            option = OPTION_VALUE.match(word)
+            if option:  # --opt=<value>: the option name stays literal (rule 9)
+                placeholders[sentinel] = option.group(2)
+                rest.append(option.group(1) + sentinel)
+            else:
+                placeholders[sentinel] = word
+                rest.append(sentinel)
         else:
             rest.append(word)
     inline = invocation.kind == "inline"
@@ -610,6 +726,16 @@ class TestTokeniser(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(list(invocations(Region("x.md", 1, "fence", text))), [])
 
+    def test_quoted_or_commented_cairn_is_not_a_command(self) -> None:
+        for text in (
+            "cairn codex note 'Use ; cairn sync --imaginary in examples'",
+            'cairn codex note "Use ; cairn sync --imaginary in examples"',
+            "cairn sync --all # old example: ; cairn sync --imaginary",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(scan_text("x.md", f"```\n{text}\n```\n"), (1, []))
+        self.assertEqual(len(list(invocations(Region("x.md", 1, "fence", 'x="$(cairn sync)"')))), 1)
+
 
 class TestRegions(unittest.TestCase):
     def test_historical_marker_exempts_next_fence_only(self) -> None:
@@ -635,6 +761,30 @@ class TestRegions(unittest.TestCase):
         regions = list(code_regions("x.md", doc))
         self.assertEqual([r.text for r in regions], ["cairn sync --all"])
 
+    def test_inline_span_crosses_a_soft_break(self) -> None:
+        doc = "Run `cairn sync\n  --imaginary` now.\n"
+        self.assertEqual(
+            [(r.line, r.text) for r in code_regions("x.md", doc)], [(1, "cairn sync --imaginary")]
+        )
+        self.assertEqual(len(scan_text("x.md", doc)[1]), 1)
+        self.assertEqual(scan_text("x.md", f"{SKIP} `cairn sync\n--imaginary`\n"), (0, []))
+
+    def test_blockquoted_fence_is_scanned(self) -> None:
+        doc = "> ```bash\n> cairn sync --imaginary\n> ```\n"
+        self.assertEqual([r.text for r in code_regions("x.md", doc)], ["cairn sync --imaginary"])
+
+    def test_longer_fence_holds_a_shorter_one(self) -> None:
+        doc = "````md\n```bash\ncairn sync --imaginary\n```\n````\n`cairn sync --all`\n"
+        regions = list(code_regions("x.md", doc))
+        self.assertEqual(
+            [(r.line, r.kind) for r in regions],
+            [(2, "fence"), (3, "fence"), (4, "fence"), (6, "inline")],
+        )
+
+    def test_continuation_keeps_a_lowercase_argument(self) -> None:
+        doc = "```\ncairn recall expand \\\n  example.md\n```\n"
+        self.assertEqual(scan_text("x.md", doc), (1, []))
+
 
 class TestRouting(unittest.TestCase):
     def test_every_dispatch_target_has_a_builder(self) -> None:
@@ -655,7 +805,11 @@ class TestRouting(unittest.TestCase):
 
         with (
             mock.patch.object(builtins, "open", refuse),
-            mock.patch.object(subprocess, "run", refuse),
+            mock.patch.object(io, "open", refuse),  # Path.open, read_text, write_text
+            mock.patch.object(os, "open", refuse),
+            mock.patch.object(os, "listdir", refuse),
+            mock.patch.object(os, "scandir", refuse),
+            mock.patch.object(subprocess, "Popen", refuse),  # run, check_output, call
         ):
             for spec in _commands().values():
                 module, function = builder_spec(spec).split(":", 1)
@@ -703,6 +857,32 @@ class TestScanner(unittest.TestCase):
             "```\ncairn recall verify journal.md\ncairn routine\ncairn recall digest --out\n```\n"
         )
         self.assertEqual(len(scan_text("x.md", fenced)[1]), 3)
+
+    def test_option_value_placeholder_keeps_the_option(self) -> None:
+        for text in (
+            "cairn recall expand --no-such-flag=<file>",
+            "cairn recall expand --max-msgs=<count>",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(len(scan_text("x.md", f"```\n{text}\n```\n")[1]), 1)
+        self.assertEqual(
+            scan_text("x.md", "```\ncairn recall expand x.md --max-msgs=<count>\n```\n"), (1, [])
+        )
+        [violation] = scan_text("x.md", "```\ncairn sync --no-such-flag=<v>\n```\n")[1]
+        self.assertIn("unrecognized arguments: --no-such-flag=", violation)
+
+    def test_help_and_version_are_parsed_on_the_route(self) -> None:
+        doc = "```\ncairn sync --version\ncairn sync --help\ncairn claude --version\ncairn --version\n```\n"
+        seen, violations = scan_text("x.md", doc)
+        self.assertEqual(seen, 4)
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("x.md:2: cairn sync --version:", violations[0])
+
+    def test_inline_relaxation_refuses_an_unknown_option(self) -> None:
+        inline = "See `cairn recall verify x.md --digset d` and `cairn recall verify x.md`.\n"
+        seen, violations = scan_text("x.md", inline)
+        self.assertEqual(seen, 2)
+        self.assertEqual(len(violations), 1, violations)
 
 
 class TestDocs(unittest.TestCase):
@@ -769,14 +949,20 @@ def _tools(value: str) -> list[str]:
 
 def _shell_commands(text: str) -> Iterator[tuple[int, list[str]]]:
     """(line, leading words) for each command at command position in a shell fence."""
-    fence: str | None = None
+    opener: tuple[str, int, str] | None = None
     continued = False
     for number, line in enumerate(text.split("\n"), start=1):
-        opened = FENCE.match(line)
-        if opened:
-            fence = None if fence is not None else line.strip().lstrip("`~").strip().lower()
+        if opener is None:
+            opener = fence_open(line)
             continue
-        if fence not in SHELL_FENCES or not line.strip() or line.lstrip().startswith("#"):
+        if fence_closes(line, opener):
+            opener = None
+            continue
+        if (
+            opener[2].lower() not in SHELL_FENCES
+            or not line.strip()
+            or line.lstrip().startswith("#")
+        ):
             continue
         if continued:
             continued = bool(CONTINUATION.search(line))

@@ -42,7 +42,10 @@ per line, because `install | uninstall NAME` runs as a shell pipe when it is pas
 `<!-- cairn-cli: historical -->` on the line above a fence that shows an older release's
 CLI. Put `<!-- cairn-cli: skip -->` on a line whose inline code is not a command (an exact
 error string or a label), or on the line above a fence that quotes a file body. Rerun the
-check alone with `uv run python -m unittest tests.test_docs_cli`.
+check alone with `uv run python -m unittest tests.test_docs_cli`. Inline code is held to a
+looser rule than a fence: it can name a command group or a flag without its required
+arguments (`cairn routine`, `cairn recall digest --out`), but an unknown flag still fails.
+The spec, `docs/docs-cli-truth-spec.md` section 3.5, lists the exact relaxations.
 
 ## Public-repo hygiene
 

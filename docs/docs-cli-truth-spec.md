@@ -115,20 +115,20 @@ the word `cairn`.
 
 | # | Input shape | Example | Rule |
 |---|---|---|---|
-| 1 | Fenced block | ```` ```bash ````, ```` ```text ````, `~~~`, indented in a list | Every line is scanned, whatever the info string. Fence match: `^\s*(```\|~~~)`. |
-| 2 | Inline code | `` `cairn sync --all` `` | Only spans whose text starts with `cairn `. |
-| 3 | Continuation | `... --effort <level> \` | A trailing `\` joins the next line, not past a closing fence. The reported line is the first. |
+| 1 | Fenced block | ```` ```bash ````, ```` ```text ````, `~~~`, indented in a list | Every line is scanned, whatever the info string. A fence opens on three or more backticks or tildes, `^\s*(`{3,}\|~{3,})`, and closes on the same character at least as long, so a ```` ```` ```` block can hold a ```` ``` ```` line. A blockquote prefix (`> `) is removed first. |
+| 2 | Inline code | `` `cairn sync --all` `` | Only spans whose text starts with `cairn `. A span can cross a soft line break inside one paragraph; the break becomes one space and the reported line is the opening one. A blank line, a heading, a list item or a table row starts a new paragraph. Blockquote prefixes are removed. |
+| 3 | Continuation | `... --effort <level> \` | A trailing `\` joins the next line with one space, not past a closing fence. The reported line is the first. |
 | 4 | Command position | `$ cairn`, `&& cairn`, `VAR=x cairn`, `python -m cairn`, `uv run cairn` | `cairn` counts at line start (after an optional `$ ` prompt), after `&&`, `\|\|`, `;`, a spaced `\|`, `$(`, a backtick or `(`, and after env assignments and the wrappers `uv run`, `python[3] -m`, `nohup`, `exec`, `command`, `time`, `timeout N`. Elsewhere it is prose and is ignored. `.../cairn` and `cairn.foo` are ignored. |
-| 5 | End of invocation | `# comment`, `\| head`, `2>&1`, `> out`, `<<EOF`, `;`, `&`, `)` | An unquoted `#` at word start, a spaced pipe, `;`, `&`, `)`, a backtick, or a redirect ends the argv. |
+| 5 | End of invocation | `# comment`, `\| head`, `2>&1`, `> out`, `<<EOF`, `;`, `&`, `)` | An unquoted `#` at word start, a spaced pipe, `;`, `&`, `)`, a backtick, or a redirect ends the argv. Rule 4 never matches inside a quoted literal or a comment, and a match inside the previous invocation's argv is skipped. A `$(…)` inside double quotes still counts. |
 | 6 | Description column | `cairn routine run NAME   run due days now` | Two or more spaces then a lowercase letter, outside brackets and quotes, ends the argv. This handles help listings. |
 | 7 | Quotes | `--prompt "…"`, `'last week'` | One literal word. It is never a placeholder, so `"…"` is a value. |
 | 8 | Angle placeholder | `<thread-id>`, `<child file>`, `claude:<id>` | `<` opens a span through the next `>`, spaces included. A word that contains such a span is a placeholder. |
-| 9 | Name placeholder | `NAME`, `DATE`, `THREAD_ID`, `SOURCE:ID`, `{{DAY}}`, `$VAR`, `${VAR}`, unquoted `$(…)` | Placeholder. Upper-case shape: `^[A-Z][A-Z0-9_]*(:[A-Z0-9_]+)?$`. |
+| 9 | Name placeholder | `NAME`, `DATE`, `THREAD_ID`, `SOURCE:ID`, `{{DAY}}`, `$VAR`, `${VAR}`, unquoted `$(…)` | Placeholder. Upper-case shape: `^[A-Z][A-Z0-9_]*(:[A-Z0-9_]+)?$`. In `--opt=<value>` only the value is a placeholder; the option name stays literal, so an unknown option still fails. |
 | 10 | Ellipsis | `...`, `…`, `args…`, `S...` | A repeatable placeholder. It is dropped if the parser reports it as unrecognised. |
 | 11 | Optional group | `[--day D]`, `[--since 7d \| --all]` | The brackets are removed. Inside a group, `\|` separates alternatives and only the first is kept. Groups can nest. |
 | 12 | Bare alternation | `--harness claude\|codex\|antigravity` | `a\|b` with no spaces keeps `a`. |
 | 13 | Spaced pipe into a subcommand | `cairn routine install \| uninstall NAME` <!-- cairn-cli: skip --> | If the first word after a spaced `\|` is a subcommand name anywhere in the route's parser tree, this is a violation: `usage alternation 'a \| b' runs as a shell pipe; write one command per line`. |
-| 14 | Help and version | `-h`, `--help`, `--version`, `-V` | Route checked, argv not parsed (these exit). |
+| 14 | Help and version | `-h`, `--help`, `cairn sync --version` <!-- cairn-cli: skip --> | Parsed like any argv. A parser exit with status 0 (help, or a source parser's own `--version` action) is a pass. `cairn --version` and `cairn -V` are top-level dispatcher flags (`__main__.py:144`) and fall under rule 15. |
 | 15 | Not a command | `cairn - local session…`, `` `cairn invoke: …` `` | If the first argv word does not match `^[a-z][a-z-]*$` and is not a placeholder, there is no invocation. |
 | 16 | Template | `cairn <source> <verb>`, `cairn <command> [args…]` | If every argv word is a placeholder, the line is a usage template and is skipped. |
 
@@ -161,7 +161,9 @@ not a command, such as an exact error string or a label.
 An inline span often names a command group or a flag in prose. In inline code only, three
 parser errors are accepted: `the following arguments are required`,
 `one of the arguments ... is required`, and `expected one argument` when the flag is the
-last word. A fenced line gets no relaxation.
+last word. argparse reports a missing argument before an unknown option, so no relaxation
+applies when an argv word that starts with `-` is not an option string in the route's
+parser tree. A fenced line gets no relaxation.
 
 ### 3.6 Doc set
 
@@ -264,8 +266,8 @@ no file and no JSON.
 | An extractor bug finds nothing | `test_scan_finds_the_doc_set` asserts at least 400 invocations (531 on main) and at least one per file in a fixed list (README, `skills/cairn/SKILL.md`, `skills/recall/SKILL.md`, `references/harnesses/codex.md`, `docs/routine-spec.md`). |
 | argparse wording differs across 3.11-3.13 | Only the sentinel substring and the three relaxation phrases are matched. All are stable across 3.11-3.13. |
 | `nargs=REMAINDER` (`--extra`, `invoke.py:2670`) swallows the rest | This is accepted. It matches the runtime. |
-| `--help` in an argv | Rule 14. Never parsed, so nothing prints. |
-| A builder does I/O | `test_builders_do_no_io` builds every parser with `builtins.open` and `subprocess.run` patched to raise. |
+| `--help` in an argv | Rule 14. Parsed with stdout and stderr captured; exit 0 is a pass. |
+| A builder does I/O | `test_builders_do_no_io` builds every parser with `builtins.open`, `io.open` (so `Path.read_text`), `os.open`, `os.listdir`, `os.scandir` and `subprocess.Popen` patched to raise. |
 | The new spec doc holds deliberate bad examples | They carry the `historical` marker, and the test covers that. |
 
 ## 7. Tests
@@ -282,14 +284,22 @@ no file and no JSON.
 - `TestTokeniser.test_quoted_ellipsis_is_a_literal_value`
 - `TestTokeniser.test_ellipsis_word_is_dropped_when_unrecognised`
 - `TestTokeniser.test_command_position_wrappers`: `python -m cairn`, `VAR=1 cairn`, `&& cairn` match. `a cairn b` and `org/cairn --ref` do not.
+- `TestTokeniser.test_quoted_or_commented_cairn_is_not_a_command`: `; cairn` inside quotes or a `#` comment is not an invocation; `"$(cairn …)"` is.
 - `TestRegions.test_historical_marker_exempts_next_fence_only`
 - `TestRegions.test_skip_marker_exempts_its_inline_line`
 - `TestRegions.test_inline_span_must_start_with_cairn`
+- `TestRegions.test_inline_span_crosses_a_soft_break`
+- `TestRegions.test_blockquoted_fence_is_scanned`
+- `TestRegions.test_longer_fence_holds_a_shorter_one`
+- `TestRegions.test_continuation_keeps_a_lowercase_argument`
 - `TestRouting.test_every_dispatch_target_has_a_builder`: every `_SOURCES` and `_ADMIN` spec resolves to a builder under the 3.1 rule.
 - `TestRouting.test_builders_do_no_io`
 - `TestRouting.test_placeholder_in_command_slot_tries_registry_order`
 - `TestScanner.test_self_check_catches_each_class`: a synthetic doc with an unknown command, an unknown flag, a missing required argument in a fence and a spaced-pipe alternation gives exactly 4 violations at the expected lines. The same doc under the `historical` marker gives 0.
 - `TestScanner.test_inline_relaxations_apply_to_inline_only`
+- `TestScanner.test_option_value_placeholder_keeps_the_option`: `--no-such-flag=<file>` fails; `--max-msgs=<count>` without the positional fails.
+- `TestScanner.test_help_and_version_are_parsed_on_the_route`: `cairn sync --version` <!-- cairn-cli: skip --> fails, `cairn claude --version` and `cairn sync --help` pass.
+- `TestScanner.test_inline_relaxation_refuses_an_unknown_option`
 - `TestDocs.test_scan_finds_the_doc_set`
 - `TestDocs.test_every_documented_invocation_parses`
 - `TestDocs.test_help_overview_invocations_parse`
@@ -370,3 +380,4 @@ Drift found at 2.18.0, in addition to the 2.9.0 findings in 4.4:
 | `docs/recall-first-block-spec.md:99` | quotes the old `instructions` help line | Names the four new help lines |
 | `docs/recall-first-block-spec.md:186` | the quoted block's prose line starts with `cairn` | `skip` marker above the fence |
 | `docs/note-forget-spec.md:250` | a normalised claim in inline code, not a command | `skip` marker |
+| `docs/antigravity-invoke-postmortem.md:183` | a proposed `cairn invoke result <id> --files` <!-- cairn-cli: skip --> in a span that crossed a line break, found once rule 2 read multiline spans | span on one line, `skip` marker |
