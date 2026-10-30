@@ -100,8 +100,8 @@ the whole file, and report the number that `echo` printed.
 ### Recording harness evidence
 
 An acceptance document for a harness (`docs/codex-acceptance.md`) opens with a dated
-table of two columns. "Automated evidence (test name, date)" names the test and the date
-and commit it last passed. "Remaining manual evidence (what, who, how to record)" names
+table of three columns. "Behaviour" names one behaviour per row. "Automated evidence
+(test name, date)" names the test and the date and commit it last passed, or `none`. "Remaining manual evidence (what, who, how to record)" names
 what only a real host can show, who checks it, and where the result goes. A manual item
 moves to the automated column when a test covers it, and is never deleted. Use the
 template in `docs/test-discipline-spec.md`, section 5.2. When you add a file under

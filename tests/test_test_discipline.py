@@ -16,6 +16,8 @@ ROW = re.compile(r"^\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*\[[^\]]+\]\(([^)]+)\)")
 LINK = re.compile(r"\]\(([^)#\s]+)(?:#[^)]*)?\)")
 AUTOMATED = "Automated evidence (test name, date)"
 MANUAL = "Remaining manual evidence (what, who, how to record)"
+EVIDENCE_HEADING = r"^## Evidence \(\d{4}-\d{2}-\d{2}, cairn \d+\.\d+\.\d+, commit [0-9a-f]{7,}\)$"
+AUTOMATED_CELL = re.compile(r"^`(tests\.[\w.]+)`, (\d{4}-\d{2}-\d{2}), ([0-9a-f]{7,})$")
 
 
 def index_rows() -> list[tuple[str, str]]:
@@ -76,14 +78,52 @@ class RulesTests(unittest.TestCase):
         docs = sorted(DOCS.glob("*-acceptance.md"))
         self.assertGreater(len(docs), 0)
         for path in docs:
-            text = path.read_text(encoding="utf-8")
             with self.subTest(doc=path.name):
-                self.assertRegex(
-                    text, r"(?m)^## Evidence \(\d{4}-\d{2}-\d{2}, cairn \d+\.\d+\.\d+, commit \w+\)"
-                )
-                self.assertIn(AUTOMATED, text)
-                self.assertIn(MANUAL, text)
-                self.assertIn("### Manual evidence log", text)
+                section = evidence_section(path.read_text(encoding="utf-8"))
+                self.assertRegex(section.splitlines()[0], EVIDENCE_HEADING)
+                self.assertIn(f"| Behaviour | {AUTOMATED} | {MANUAL} |", section)
+                self.assertIn("### Manual evidence log", section)
+                rows = evidence_rows(section)
+                self.assertGreater(len(rows), 0)
+                for behaviour, automated, _manual in rows:
+                    if automated == "none":
+                        continue
+                    match = AUTOMATED_CELL.match(automated)
+                    self.assertIsNotNone(match, f"{behaviour}: {automated!r}")
+                    assert match is not None
+                    suite = unittest.defaultTestLoader.loadTestsFromName(match.group(1))
+                    self.assertEqual(suite.countTestCases(), 1, match.group(1))
+                    for test in suite:
+                        self.assertNotEqual(type(test).__name__, "_FailedTest", match.group(1))
+
+
+def evidence_section(text: str) -> str:
+    """The first ``## `` section of TEXT, heading line first."""
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("## "))
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    return "\n".join(lines[start:end])
+
+
+def evidence_rows(section: str) -> list[tuple[str, str, str]]:
+    """The body rows of the evidence table (the one whose header names AUTOMATED)."""
+    rows: list[tuple[str, str, str]] = []
+    in_table = False
+    for line in section.splitlines():
+        if AUTOMATED in line and line.startswith("|"):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not line.startswith("|"):
+            break
+        if set(line) <= set("|- "):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split(" | ")]
+        if len(cells) != 3:
+            raise AssertionError(f"evidence row has {len(cells)} cells: {line}")
+        rows.append((cells[0], cells[1], cells[2]))
+    return rows
 
 
 if __name__ == "__main__":
