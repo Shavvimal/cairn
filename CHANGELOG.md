@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.3]
+
+### Added
+- A retrieval-quality test: an invented exported store of 33 documents and 36 fixed
+  queries (`tests/fixtures/recall-qrels.json`) in three families (temporal, exact,
+  title-bare). `tests/test_recall_qrels.py` runs `cairn recall list` and the skills' rg
+  pass over it and gates recall@5 and top-1 per family. See `docs/recall-qrels-spec.md`.
+- CI installs ripgrep, so the exact-match families run on every pull request.
+
+### Changed
+- `parse_date_range` reads the clock through `cairn.timeutil._utcnow()`, a seam for tests.
+
+### Fixed
+- An exact search for a term that starts with `-` failed with an rg flag error. The
+  `/search` and `/recall` skills now pass the query with `-e`.
+
 ## [2.19.2]
 
 ### Added
