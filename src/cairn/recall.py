@@ -167,7 +167,9 @@ def main(argv: list[str] | None = None) -> int:
                 args,
                 records,
                 (start, end),
-                coverage=lambda found: gaps.coverage(store.config, requested, (start, end), found),
+                coverage=lambda found, skipped: gaps.coverage(
+                    store.config, requested, (start, end), found, skipped=skipped
+                ),
             )
         if args.command == "frame":
             return digest.run_frame(args, store.resolve(args.session_id, records))

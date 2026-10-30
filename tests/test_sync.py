@@ -332,6 +332,26 @@ class TestIndexStamp(SyncFixture):
         self.assertEqual(stamp["database"], str((self.root / "cache/qmd/index.sqlite").resolve()))
         self.assertIn("codex-sessions", stamp["collections"])
 
+    def test_stamp_time_is_read_before_update_under_the_index_lock(self):
+        # The stub notes when `qmd update` ran and whether the index lock was held.
+        probe = SCENARIO_QMD.replace(
+            'if command in ("embed", "status"):', 'if command in ("update", "embed", "status"):'
+        ).replace(
+            'with open(here / "calls.log", "a") as log:',
+            'if command == "update":\n'
+            "    import time\n"
+            '    (here / "update_ns").write_text(str(time.time_ns()))\n'
+            'with open(here / "calls.log", "a") as log:',
+        )
+        self.fake_qmd(probe)
+        self.native("codex", "stamped")
+        self.assertEqual(self.sync_cron().returncode, 0, self.log_text)
+        stamp = self.stamp()
+        assert stamp is not None
+        update_ns = int((self.root / "update_ns").read_text())
+        self.assertLess(stamp["started_ns"], update_ns)
+        self.assertIn("update held", self.calls())
+
     def test_no_stamp_after_failed_update(self):
         self.scenario({"update": {"rc": 1, "err": "boom\n"}})
         self.assertEqual(self.sync_cron().returncode, 1)

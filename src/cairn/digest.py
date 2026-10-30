@@ -403,16 +403,17 @@ def run_digest(
     records: list[SessionRecord],
     window: tuple[datetime, datetime],
     *,
-    coverage: Callable[[bool], dict] | None = None,
+    coverage: Callable[[bool, list[dict[str, str]]], dict] | None = None,
 ) -> int:
     """Digest every qualifying session.
 
     Exit codes follow the routine's ``prepare`` contract: 0 when at least one session
     was written (skipped legacy or corrupt files only warn and appear in ``skipped``),
     3 when the day has no input (zero sessions written). Errors raise and exit 1.
-    ``coverage``, given whether any session was written, returns the store gaps for
-    the window (:func:`cairn.gaps.coverage`); it adds a ``coverage`` key to the JSON
-    and one stderr note when coverage is degraded. It never changes the exit code.
+    ``coverage``, given whether any session was written and the skipped sessions,
+    returns the store gaps for the window (:func:`cairn.recall_gaps.coverage`); it adds
+    a ``coverage`` key to the JSON and one stderr note when coverage is degraded. It
+    never changes the exit code.
     """
     start, end = window
     out = Path(args.out).expanduser().absolute() if args.out else default_out(start)
@@ -450,7 +451,7 @@ def run_digest(
     _stems(digests)
     write(out, digests)
     rows = [d.row for d in digests]
-    cov = coverage(bool(digests)) if coverage is not None else None
+    cov = coverage(bool(digests), skipped) if coverage is not None else None
     if args.json:
         payload: dict = {"sessions": rows, "skipped": skipped}
         if cov is not None:

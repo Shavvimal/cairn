@@ -164,7 +164,12 @@ Print one computed **Gaps** line before One Thing. Temporal recall reads
 
 - If the status is `degraded`, print `**Gaps:** <warn messages joined by "; ">`, then
   the info messages if there is room.
-- If the status is `clean`, print `**Gaps:** none found (exports, index, rg checked)`.
+- If the status is `clean` and `gaps` still holds `info` gaps, print
+  `**Gaps:** none blocking (<info messages joined by "; ">)`.
+- If `gaps` is empty, name only what was checked. Temporal coverage (`scope: store`)
+  checks the exported store, not QMD or rg: print `**Gaps:** none found in the
+  exported store`. The topic report checks the store, QMD and rg: print
+  `**Gaps:** none found (exports, index, rg checked)`.
 
 Build the line from the JSON only. Never add a gap the JSON does not contain.
 
@@ -194,7 +199,7 @@ A miss is clean or degraded. Read `coverage.verdict` (temporal) or `status` from
 - Clean miss:
 
   ```
-  No sessions or notes match "QUERY" in WINDOW; exports and the index are current.
+  No sessions or notes match "QUERY" in WINDOW; no coverage gap was found.
   ```
 
   Then suggest different terms, a broader date range, or `--min-msgs 1`.
@@ -220,4 +225,4 @@ as "I have no record".
 - The rg pass wins on exact terms (identifiers, error strings, names) and on files that
   were exported after the last `qmd update`.
 - Always enumerate collections with `qmd collection list` rather than assuming a fixed set.
-- `cairn recall gaps` never exports or indexes; each gap names the command that fixes it.
+- `cairn recall gaps` never exports or indexes; a gap with a non-null `fix` names the command that fixes it.

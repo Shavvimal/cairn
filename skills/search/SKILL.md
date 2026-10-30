@@ -114,15 +114,20 @@ Two engines:
    are named `YYYY-MM-DD-<id>.md`), and the matched line. The user wants a quick answer,
    not a wall of text.
 
-   If a search returns zero hits, or fewer than half of `-n`, run the gaps report once:
+   If a search returns zero hits, run the gaps report once:
 
    ```bash
    cairn recall gaps --json
    ```
 
    Use only the gaps in its JSON. If `status` is `degraded`, report:
-   `No match for "QUERY", but the index is behind: <gaps>. rg can see unindexed files: /search QUERY --exact.`
-   If `status` is `clean`, report: `No match for "QUERY" in the indexed collections.`
+   `No match for "QUERY", but coverage is degraded: <warn messages>.` Then add the
+   `fix` of each warn gap. Suggest `/search QUERY --exact` only when `rg.available` is
+   `true` and a gap is `index-lag`, `index-count` or `collection-missing`: rg reads the
+   files QMD has not indexed. If `status` is `clean`, report:
+   `No match for "QUERY" in the indexed collections.`
+   A search with some hits but fewer than `-n` is a normal result: report the hits and
+   do not run the gaps report.
 
 6. **If `--full`** (or the user asks to expand a hit):
 

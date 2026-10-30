@@ -10,6 +10,7 @@ import io
 import json
 import os
 import time
+import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -169,6 +170,106 @@ class TestClassify(StoreFixture):
         self.assertEqual(self.kinds(missing), [("index-unknown", "warn")])
         self.assertIn("temporal recall still works", missing[0].message)
 
+    def test_per_file_lag_ignores_other_documents(self):
+        # The newest export is from a minute ago (another session, an exchange), but
+        # one native file changed 90 minutes after its own export's activity.
+        changed = NOW - timedelta(minutes=30)
+        given = collection(
+            last_export_at=NOW - timedelta(minutes=1),
+            unexported=((changed, changed - timedelta(minutes=90)),),
+        )
+        found = classify(facts(given), NOW)
+        self.assertEqual(self.kinds(found), [("export-lag", "warn")])
+        self.assertEqual(found[0].facts, {"lag_s": 90 * 60, "basis": "file", "sessions": 1})
+        self.assertIn("not exported for 1 session", found[0].message)
+        self.assertEqual(found[0].interval, (changed - timedelta(minutes=90), changed))
+        # A file with no export is behind from its mtime to now.
+        fresh = collection(unexported=((NOW - timedelta(minutes=10), None),))
+        self.assertEqual(self.kinds(classify(facts(fresh), NOW)), [("export-lag", "info")])
+        stale = collection(unexported=((NOW - timedelta(hours=3), None),))
+        found = classify(facts(stale), NOW)
+        self.assertEqual(self.kinds(found), [("export-lag", "warn")])
+        self.assertEqual(found[0].interval, (None, NOW - timedelta(hours=3)))
+        self.assertEqual(classify(facts(collection(unexported=())), NOW), [])
+
+    def test_export_lag_boundary_and_clock_skew(self):
+        native = NOW - timedelta(minutes=1)  # lagging()'s native change
+        grace = timedelta(seconds=gaps.EXPORT_GRACE_S)
+        at_grace = lagging(90, newest_activity_at=native - grace)
+        self.assertEqual(self.kinds(classify(facts(at_grace), NOW)), [("export-lag", "info")])
+        past = lagging(90, newest_activity_at=native - grace - timedelta(seconds=1))
+        self.assertEqual(self.kinds(classify(facts(past), NOW)), [("export-lag", "warn")])
+        future = lagging(90, native_newest_at=NOW + timedelta(minutes=5))
+        found = classify(facts(future), NOW)
+        self.assertTrue(found[0].message.endswith("(clock skew)"))
+        self.assertEqual(found[0].interval, (NOW - timedelta(minutes=91), NOW))
+        near = lagging(90, native_newest_at=NOW + timedelta(seconds=gaps.CLOCK_SKEW_S))
+        self.assertNotIn("clock skew", classify(facts(near), NOW)[0].message)
+
+    def test_window_boundary_is_half_open(self):
+        lag = lagging(90)  # unexported interval (NOW-91m, NOW-1m]
+        low, high = NOW - timedelta(minutes=91), NOW - timedelta(minutes=1)
+        self.assertEqual(classify(facts(lag), NOW, window=(high - timedelta(hours=1), low)), [])
+        self.assertEqual(len(classify(facts(lag), NOW, window=(high, NOW))), 1)
+        self.assertEqual(classify(facts(lag), NOW, window=(high + timedelta(seconds=1), NOW)), [])
+
+    def test_unreadable_exports_of_a_disabled_source_still_warn(self):
+        disabled = collection(
+            source="cursor", collection="cursor-sessions", enabled=False, unreadable=1, index=None
+        )
+        found = classify(facts(disabled), NOW)
+        self.assertEqual(
+            self.kinds(found), [("unreadable-exports", "warn"), ("source-disabled", "info")]
+        )
+
+    def test_repair_commands_parse(self):
+        import argparse
+
+        from cairn import cli
+        from cairn.registry import SOURCES
+
+        window = argparse.ArgumentParser(parents=[cli._window_parent()])
+        for source in SOURCES:
+            command = gaps.export_command(source.source).split()
+            self.assertEqual(command[:3], ["cairn", source.source, "export"])
+            if source.windowed:
+                self.assertEqual(command[3:], ["--all"])
+                window.parse_args(command[3:])
+            else:
+                self.assertEqual(command[3:], [])
+        never = collection(
+            source="service-docs",
+            collection="service-docs",
+            session=False,
+            exported_docs=0,
+            index=None,
+        )
+        self.assertEqual(classify(facts(never), NOW)[0].fix, "cairn service-docs export")
+
+    def test_skipped_digest_sessions_are_a_warn(self):
+        skipped = [
+            {"ref": "claude:a", "reason": "corrupt"},
+            {"ref": "claude:b", "reason": "legacy"},
+            {"ref": "codex:c", "reason": "corrupt"},
+        ]
+        found = gaps.skipped_gaps(skipped)
+        self.assertEqual(
+            [(g.kind, g.severity, g.collection, g.fix) for g in found],
+            [
+                ("unreadable-exports", "warn", "claude-code-sessions", "cairn claude export --all"),
+                ("unreadable-exports", "warn", "codex-sessions", None),
+            ],
+        )
+        self.assertEqual(found[0].facts, {"count": 2, "skipped": ["claude:a", "claude:b"]})
+        window = (NOW - timedelta(days=1), NOW)
+        with mock.patch.object(gaps, "gather", return_value=facts()):
+            cov = gaps.coverage(config.get_config(), ["claude"], window, False, now=NOW)
+            self.assertEqual(cov["verdict"], "clean-miss")
+            cov = gaps.coverage(
+                config.get_config(), ["claude"], window, False, skipped=skipped, now=NOW
+            )
+        self.assertEqual(cov["verdict"], "degraded-miss")
+
     def test_is_deterministic(self):
         given = facts(
             lagging(90),
@@ -322,6 +423,91 @@ class TestGather(GapsFixture):
         self.assertEqual(claude.index, IndexFacts(True, 2, 1, "qmd-relative"))
         kinds = [g.kind for g in classify(self.gather(), datetime.now(UTC))]
         self.assertIn("index-stamp-missing", kinds)
+
+    def touch(self, path: Path, seconds_ago: float) -> None:
+        stamp = time.time() - seconds_ago
+        os.utime(path, (stamp, stamp))
+
+    def test_other_writes_do_not_hide_a_session_export_lag(self):
+        first = self.native("claude", "pf-0001")
+        self.native("claude", "pf-0002")
+        self.export()
+        self.age_exports(3 * 3600)
+        # pf-0001 changed an hour after its export and was not exported again.
+        self.touch(first, 2 * 3600)
+        folder = self.root / "data" / "claude-code-sessions"
+        other = next(p for p in folder.rglob("*.md") if "pf-0002" in p.read_text())
+        os.utime(other, None)  # a note on the other session, written now
+        (folder / "exchange-codex-0001.md").write_text(
+            "---\ntype: peer-exchange\ntitle: x\n---\nbody\n"
+        )
+        claude = self.by_name(self.gather(index=False), "claude-code-sessions")
+        self.assertEqual(len(claude.unexported or ()), 1)
+        lag = [g for g in classify(self.gather(index=False), datetime.now(UTC))]
+        self.assertEqual([g.kind for g in lag], ["export-lag"])
+        self.assertEqual(lag[0].facts["sessions"], 1)
+        # Exporting the session clears it.
+        self.export()
+        claude = self.by_name(self.gather(index=False), "claude-code-sessions")
+        self.assertEqual(claude.unexported, ())
+
+    def test_session_records_recall_rejects_are_unreadable(self):
+        self.native("claude", "ok-0001")
+        self.export()
+        folder = self.root / "data" / "claude-code-sessions"
+        (folder / "wrong-source.md").write_text(
+            "---\ntype: claude-session\nsession_id: wrong-0001\nsource: codex\n---\nbody\n"
+        )
+        (folder / "no-id.md").write_text("---\ntype: claude-session\ntitle: x\n---\nbody\n")
+        claude = self.by_name(self.gather(index=False), "claude-code-sessions")
+        self.assertEqual((claude.exported_docs, claude.unreadable), (1, 2))
+        kinds = [g.kind for g in classify(self.gather(index=False), datetime.now(UTC))]
+        self.assertIn("unreadable-exports", kinds)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every folder")
+    def test_unreadable_native_folder_is_reported(self):
+        self.native("claude", "perm-0001")
+        locked = self.claude / "-locked"
+        locked.mkdir()
+        (locked / "hidden.jsonl").write_text("{}\n")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o700)
+        claude = self.by_name(self.gather(index=False), "claude-code-sessions")
+        self.assertIsNotNone(claude.native_newest_at)
+        self.assertIsNotNone(claude.store_error)
+        assert claude.store_error is not None
+        self.assertTrue(claude.store_error.startswith("native store read incompletely: "))
+        found = classify(self.gather(index=False), datetime.now(UTC))
+        self.assertIn(("store-missing", "info"), [(g.kind, g.severity) for g in found])
+
+    def test_corrupt_stamp_time_is_absent(self):
+        for started in (10**100, 0, -5):
+            qmd.stamp_path().parent.mkdir(parents=True, exist_ok=True)
+            qmd.stamp_path().write_text(
+                json.dumps(
+                    {
+                        "version": qmd.STAMP_VERSION,
+                        "database": "x",
+                        "started_ns": started,
+                        "collections": [],
+                    }
+                )
+            )
+            self.assertIsNone(qmd.read_stamp(), started)
+
+    def test_stamp_write_failure_warns_and_keeps_the_old_stamp(self):
+        qmd.record_update(1_000, ["claude-code-sessions"])
+        err = io.StringIO()
+        with (
+            mock.patch.object(qmd, "atomic_write", side_effect=OSError("disk full")),
+            redirect_stderr(err),
+        ):
+            qmd.record_update(2_000, ["claude-code-sessions"])
+        self.assertEqual(
+            err.getvalue(), "Warning: could not record the qmd update time: disk full\n"
+        )
+        stamp = qmd.read_stamp()
+        self.assertEqual(stamp["started_ns"] if stamp else None, 1_000)
 
 
 class TestCli(GapsFixture):

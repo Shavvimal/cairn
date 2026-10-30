@@ -155,8 +155,9 @@ except the catalog cache save that `recall list` already does.
 3. **Native newest.** For an enabled collection with a store, apply its probe from the
    table below and record `native_newest_at` and `native_basis`. Probes use `os.scandir`
    and `stat` only. They never import a source module, because those read config and
-   raise at import (section 2). A native path that contains the current session id
-   (`CLAUDE_CODE_SESSION_ID`, else `CODEX_THREAD_ID`) is skipped, so the live session
+   raise at import (section 2). A native path that contains a current session id
+   (`CLAUDE_CODE_SESSION_ID` and `CODEX_THREAD_ID`; both are set when one harness runs
+   the other as a peer, and both sessions are live) is skipped, so the live session
    that runs the skill never reports itself as lag.
 
    | Source | Probe | Basis |
@@ -191,9 +192,9 @@ output: no clock read, no I/O. Gap kinds are a fixed vocabulary:
 
 | Kind | Scope | Severity | Condition |
 |---|---|---|---|
-| `export-lag` | store | warn if lag > `EXPORT_GRACE_S` and basis `file`, else info | `native_newest_at > newest_activity_at`; lag = the difference |
+| `export-lag` | store | warn if lag > `EXPORT_GRACE_S` and basis `file`, else info | `native_newest_at > newest_activity_at`; lag = the difference (section 11: Claude, Codex and Antigravity compare each native file with its own export) |
 | `never-exported` | store | warn | enabled, native files exist, `exported_docs == 0` |
-| `unreadable-exports` | store | warn | `unreadable > 0` |
+| `unreadable-exports` | store | warn | `unreadable > 0`, or a digest skipped a session in the window (section 11) |
 | `source-disabled` | store | warn if the source was named with `--source`, else info | `enabled` is false |
 | `store-missing` | store | info | enabled, store configured, store path absent |
 | `collection-missing` | index | warn | enabled, markdown on disk, name absent from `qmd collection list` (doctor's rule, `src/cairn/admin.py:1178-1190`) |
@@ -310,12 +311,12 @@ caller.
 |---|---|
 | QMD not installed | `index-unknown` warn, `qmd not found: topic search cannot run; temporal recall still works`. Store gaps are still computed. `coverage` never needs QMD. |
 | `qmd collection list` times out (5 s), exits non-zero, or prints no `qmd://` block | `index-unknown` warn with the reason. No `index-lag` or `collection-missing` is claimed from missing data. |
-| Stamp missing, corrupt, wrong `version`, or for another database | Treated as absent. `index-stamp-missing` info; `index-lag` falls back to `qmd-relative`. |
-| Native store unreadable (`PermissionError`) | `store-missing` info with the error text. |
+| Stamp missing, corrupt, wrong `version`, or for another database | Treated as absent. `index-stamp-missing` info; `index-lag` falls back to `qmd-relative`. A `started_ns` that is not positive or not before year 10000 (`qmd.MAX_STAMP_NS`) is corrupt. |
+| Native store unreadable (`PermissionError`) | `store-missing` info with the error text. A permission or other error on a folder or file inside the store gives `store-missing` info `native store read incompletely: <first error> (+N more)`; the facts read from the rest are kept. A file that vanishes during the walk is ignored. |
 | Native mtime in the future (clock skew) | Lag is clamped to `now`; a skew over 60 s adds `(clock skew)` to the message. |
 | Sync running while `gaps` runs | `gaps` takes no lock, so a transient `index-lag` can appear; the next run clears it. Stated in the help text. |
 | A note written after the last update | Counted in `unindexed_files`. That is true: the note text is not searchable until the next `qmd update`. |
-| A concurrent live session in another terminal | Shows as `export-lag` until it is exported. Only the current session is excluded. |
+| A concurrent live session in another terminal | Shows as `export-lag` until it is exported. Only the current sessions (section 4.1 step 3) are excluded. |
 | Cold catalog cache | The first run rebuilds it (577 ms for 8,344 files, `docs/codex-acceptance.md:89`). The same rebuild would happen on the next `recall list`. |
 
 **Speed.** Warm, on 10,000 exported files: catalog load about 90 ms
@@ -431,13 +432,35 @@ empty.
 
 Where the code differs from the sections above:
 
-- **Export lag needs an export older than the native change.** `export-lag` is raised only
-  when `native_newest_at` is also later than `last_export_at`, the newest export file's
-  mtime. A native file's mtime always trails its last message by the write time, and a
-  native file can be touched without a new message (re-export keeps `activity_at`), so the
-  `activity_at` comparison alone would report a lag that `cairn sync` cannot clear. The
-  cost: an annotation written after the native change hides the lag until the next
-  export. The lag amount is still measured from `newest_activity_at`.
+- **Claude, Codex and Antigravity compare each native file with its own export.** The
+  probe maps a native file to its native id (the Claude file stem, the Codex rollout's
+  thread uuid, the Antigravity `brain/<id>` folder). A file is covered when the export
+  document with that id has an mtime at least as new as the file: an export rewrites its
+  document whenever the native `source_revision` (path, mtime, size) changes, so a
+  touched file is cleared by `cairn sync`. A file with no export counts only when it is
+  newer than `newest_activity_at`, because an older one is outside the export window or
+  one the exporter skips (no messages). `export-lag` lists the uncovered files
+  (`facts.sessions`); the lag is the widest unexported interval: from the export's
+  `activity_at` to the file's mtime, or from the mtime to now when the file has no
+  export. Its severity is `warn` past `EXPORT_GRACE_S`. Another session's export, a
+  peer exchange or a note on another session no longer hides the lag; a note on the
+  same session still does until the next export.
+- **Store-basis sources (Cursor, Granola) compare with the collection.** `export-lag` is
+  raised only when `native_newest_at` is also later than `last_export_at`, the newest
+  export file's mtime, because the store mtime moves without a new session. Its
+  severity is never above `info`.
+- **Unreadable exports use recall's record check.** `unreadable` counts the catalog's
+  parse errors plus every session-type document that `store.record_from_frontmatter`
+  rejects (a `source` that disagrees with the collection, no native id). Those are left
+  out of `exported_docs`. The gap is checked before the `source-disabled` return,
+  because recall reads a disabled collection's exports too.
+- **Skipped digest sessions.** `run_digest` passes its `skipped` rows to the coverage
+  callable. Each source with a skipped session adds an `unreadable-exports` warn with
+  `facts.count` and `facts.skipped` (the refs), and `fix` `cairn <source> export --all`
+  when one was a legacy export. A day whose only sessions were skipped is a
+  `degraded-miss`, not a `clean-miss`.
+- **Repair commands.** `never-exported` names `cairn <source> export --all` for a
+  windowed source and `cairn <source> export` for one without `--all` (service docs).
 - **Non-session collections** (service docs, journal) compare the native newest file with
   `last_export_at`, because they have no `activity_at`.
 - **`index-count`** is reported only for a collection with no `index-lag`, so one set of
@@ -459,4 +482,4 @@ Where the code differs from the sections above:
   which does not check rg.
 - **Text note.** `+N more` counts every other gap in the coverage, warn or info.
 - **Digest coverage** is passed to `run_digest` as a callable that takes "was any session
-  written", so the verdict uses the digest's own result.
+  written" and the skipped sessions, so the verdict uses the digest's own result.

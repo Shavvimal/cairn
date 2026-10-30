@@ -211,6 +211,8 @@ def list_collections(qmd_binary: str | None = None) -> set[str]:
 # unindexed, so the stamp errs towards reporting a gap, never towards hiding one.
 
 STAMP_VERSION = 1
+# 9999-12-31T23:59:59Z: a larger value cannot become a datetime, so it is corrupt.
+MAX_STAMP_NS = 253402300799 * 10**9
 
 
 def stamp_path() -> Path:
@@ -243,7 +245,10 @@ def record_update(started_ns: int, collections: Iterable[str]) -> None:
 
 
 def read_stamp() -> dict | None:
-    """The index stamp, or ``None`` when it is missing, corrupt or of another version."""
+    """The index stamp, or ``None`` when it is missing, corrupt or of another version.
+
+    A ``started_ns`` that is not a positive time before year 10000 is corrupt.
+    """
     try:
         data = json.loads(stamp_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -253,6 +258,7 @@ def read_stamp() -> dict | None:
         or data.get("version") != STAMP_VERSION
         or not isinstance(data.get("database"), str)
         or type(data.get("started_ns")) is not int
+        or not 0 < data["started_ns"] < MAX_STAMP_NS
         or not isinstance(data.get("collections"), list)
         or not all(isinstance(name, str) for name in data["collections"])
     ):

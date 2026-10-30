@@ -11,7 +11,7 @@ into gaps and is pure: the same facts and ``now`` give the same gaps. Native
 stores are walked by ``os.scandir``/``stat`` only and no source module is imported,
 because those read the config and raise at import time.
 
-The report never repairs anything: each gap names the command that fixes it.
+The report never repairs anything: a gap with a ``fix`` names the command that fixes it.
 """
 
 from __future__ import annotations
@@ -26,10 +26,11 @@ from pathlib import Path
 
 from .catalog import load_catalog, scan
 from .config import CairnConfig, Collection
-from .harnesses.antigravity import conversation_transcript
+from .harnesses.antigravity import conversation_transcript, transcript_conversation_id
 from .qmd import CollectionInfo, collection_details, read_stamp
 from .registry import SOURCES, Source
 from .runtime import qmd_resources
+from .store import record_from_frontmatter
 from .timeutil import parse_iso
 
 SCHEMA_VERSION = 1
@@ -89,6 +90,10 @@ class CollectionFacts:
     native_newest_at: datetime | None = None
     native_basis: str = "none"  # file | store | none
     index: IndexFacts | None = None
+    # Per-file comparison (claude, codex, antigravity): one ``(native mtime, activity_at
+    # of its export or None)`` per native file changed after its own export. ``None``:
+    # not compared per file, so the collection's newest export is the reference.
+    unexported: tuple[tuple[datetime, datetime | None], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -181,120 +186,169 @@ def _current_session_ids() -> tuple[str, ...]:
     return tuple(value for name in SESSION_ENV_VARS if (value := os.environ.get(name)))
 
 
-def _newest(paths: Iterable[Path], skip: tuple[str, ...]) -> float | None:
-    """The largest mtime among non-empty regular files, skipping the live session."""
-    newest: float | None = None
-    for path in paths:
-        if skip and any(token in str(path) for token in skip):
-            continue
+class _Scan:
+    """One native-store walk: every stat-able file and every traversal error.
+
+    A file or folder that vanishes during the walk is a race and is ignored. Any other
+    ``OSError`` (a permission error on a project or date folder) is recorded, so an
+    incomplete walk is reported instead of read as "no native activity".
+    """
+
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+
+    def error(self, exc: OSError) -> None:
+        if not isinstance(exc, FileNotFoundError):
+            self.errors.append(str(exc))
+
+    def scandir(self, path: Path) -> list[os.DirEntry]:
         try:
-            st = os.stat(path)
-        except OSError:
-            continue
-        if not stat_mod.S_ISREG(st.st_mode) or st.st_size == 0:
-            continue
-        if newest is None or st.st_mtime > newest:
-            newest = st.st_mtime
-    return newest
+            with os.scandir(path) as entries:
+                return list(entries)
+        except OSError as exc:
+            self.error(exc)
+            return []
+
+    def walk(self, root: Path, accept: Callable[[str], bool]) -> Iterable[Path]:
+        for directory, _dirs, files in os.walk(root, onerror=self.error, followlinks=False):
+            for name in files:
+                if accept(name):
+                    yield Path(directory) / name
+
+    def files(self, paths: Iterable[Path], skip: tuple[str, ...]) -> list[tuple[Path, int]]:
+        """``(path, mtime_ns)`` of non-empty regular files, skipping the live session."""
+        found = []
+        for path in paths:
+            if skip and any(token in str(path) for token in skip):
+                continue
+            try:
+                st = os.stat(path)
+            except OSError as exc:
+                self.error(exc)
+                continue
+            if stat_mod.S_ISREG(st.st_mode) and st.st_size > 0:
+                found.append((path, st.st_mtime_ns))
+        return found
 
 
-def _scandir(path: Path) -> list[os.DirEntry]:
-    try:
-        with os.scandir(path) as entries:
-            return list(entries)
-    except OSError:
-        return []
-
-
-def _claude_files(store: Path) -> Iterable[Path]:
-    for project in _scandir(store):
+def _claude_files(store: Path, scan: _Scan) -> Iterable[Path]:
+    for project in scan.scandir(store):
         if project.is_dir(follow_symlinks=False):
-            for entry in _scandir(Path(project.path)):
+            for entry in scan.scandir(Path(project.path)):
                 if entry.name.endswith(".jsonl"):
                     yield Path(entry.path)
 
 
-def _walk_files(root: Path, accept: Callable[[str], bool]) -> Iterable[Path]:
-    for directory, _dirs, files in os.walk(root, followlinks=False):
-        for name in files:
-            if accept(name):
-                yield Path(directory) / name
-
-
-def _antigravity_files(store: Path) -> Iterable[Path]:
-    for entry in _scandir(store / "brain"):
+def _antigravity_files(store: Path, scan: _Scan) -> Iterable[Path]:
+    for entry in scan.scandir(store / "brain"):
         if entry.is_dir(follow_symlinks=False):
             transcript = conversation_transcript(store, entry.name)
             if transcript is not None:
                 yield transcript
 
 
-def _store_files(store: Path, names: Iterable[str]) -> Iterable[Path]:
-    return (store / name for name in names)
-
-
-def _granola_files(store: Path) -> Iterable[Path]:
-    for entry in _scandir(store):
+def _granola_files(store: Path, scan: _Scan) -> Iterable[Path]:
+    for entry in scan.scandir(store):
         if entry.name.startswith("cache-v") and entry.name.endswith(".json"):
             yield Path(entry.path)
 
 
-# source -> (probe over the store, basis). ``store`` basis: the mtime changes
-# without a new session (a database or cache rewrite), so its lag is never a warn.
-NativeProbe = Callable[[Path], Iterable[Path]]
-PROBES: dict[str, tuple[NativeProbe, str]] = {
-    "claude": (_claude_files, "file"),
+def _claude_ids(path: Path) -> tuple[str, ...]:
+    return (path.stem,)  # <store>/<project>/<session id>.jsonl
+
+
+def _codex_ids(path: Path) -> tuple[str, ...]:
+    # rollout-<timestamp>-<thread uuid>.jsonl; the bare form is kept for odd names.
+    return (path.stem[-36:], path.stem.removeprefix("rollout-"))
+
+
+def _antigravity_ids(path: Path) -> tuple[str, ...]:
+    conversation = transcript_conversation_id(path)
+    return (conversation,) if conversation else ()
+
+
+# source -> (probe over the store, basis, native ids of one probed file). ``store``
+# basis: the mtime changes without a new session (a database or cache rewrite), so
+# its lag is never a warn. A source with an id function is compared file by file
+# with its own export; the others with the collection's newest export.
+NativeProbe = Callable[[Path, _Scan], Iterable[Path]]
+NativeIds = Callable[[Path], tuple[str, ...]]
+PROBES: dict[str, tuple[NativeProbe, str, NativeIds | None]] = {
+    "claude": (_claude_files, "file", _claude_ids),
     "codex": (
-        lambda store: _walk_files(
+        lambda store, scan: scan.walk(
             store, lambda n: n.startswith("rollout-") and n.endswith(".jsonl")
         ),
         "file",
+        _codex_ids,
     ),
-    "antigravity": (_antigravity_files, "file"),
+    "antigravity": (_antigravity_files, "file", _antigravity_ids),
     "cursor": (
-        lambda store: _store_files(
-            store, ("globalStorage/state.vscdb", "globalStorage/state.vscdb-wal")
+        lambda store, _scan: (
+            store / name for name in ("globalStorage/state.vscdb", "globalStorage/state.vscdb-wal")
         ),
         "store",
+        None,
     ),
-    "granola": (_granola_files, "store"),
+    "granola": (_granola_files, "store", None),
 }
 
 
-def _native(source: str | None, coll: Collection) -> tuple[datetime | None, str, bool, str | None]:
-    """``(native_newest_at, basis, store_exists, store_error)`` for one collection."""
+@dataclass(frozen=True)
+class _NativeFacts:
+    newest_at: datetime | None = None
+    basis: str = "none"
+    store_exists: bool = False
+    store_error: str | None = None
+    # ``(native ids, mtime_ns)`` per probed file, for a source compared file by file.
+    files: tuple[tuple[tuple[str, ...], int], ...] | None = None
+
+
+def _scan_error(scan: _Scan) -> str | None:
+    if not scan.errors:
+        return None
+    more = f" (+{len(scan.errors) - 1} more)" if len(scan.errors) > 1 else ""
+    return f"native store read incompletely: {scan.errors[0]}{more}"
+
+
+def _native(source: str | None, coll: Collection) -> _NativeFacts:
+    """The newest native file of one collection, and each file when compared per file."""
     skip = _current_session_ids()
+    scan = _Scan()
     if source == "service-docs":
         roots = [s.path for s in coll.service_sources]
         missing = [str(r) for r in roots if not r.is_dir()]
-        newest = _newest(
-            (p for r in roots for p in _walk_files(r, lambda n: n.endswith(".md"))), skip
+        found = scan.files(
+            (p for r in roots for p in scan.walk(r, lambda n: n.endswith(".md"))), skip
         )
+        newest = max((m for _, m in found), default=None)
         error = f"service source {', '.join(missing)} not found" if missing else None
-        return (
-            datetime.fromtimestamp(newest, UTC) if newest is not None else None,
+        return _NativeFacts(
+            _from_ns(newest) if newest is not None else None,
             "file",
             not missing,
-            error,
+            error or _scan_error(scan),
         )
     if coll.store is None or source not in PROBES:
-        return None, "none", False, None
+        return _NativeFacts()
     store = coll.store
     try:
         os.stat(store)
     except FileNotFoundError:
-        return None, "none", False, None
+        return _NativeFacts()
     except OSError as exc:
-        return None, "none", False, str(exc)
+        return _NativeFacts(store_error=str(exc))
     if not os.access(store, os.R_OK | os.X_OK) and store.is_dir():
-        return None, "none", False, f"store {store} is not readable"
-    probe, basis = PROBES[source]
-    newest = _newest(probe(store), skip)
-    return (
-        datetime.fromtimestamp(newest, UTC) if newest is not None else None,
+        return _NativeFacts(store_error=f"store {store} is not readable")
+    probe, basis, ids = PROBES[source]
+    found = scan.files(probe(store, scan), skip)
+    newest = max((m for _, m in found), default=None)
+    return _NativeFacts(
+        _from_ns(newest) if newest is not None else None,
         basis,
         True,
-        None,
+        _scan_error(scan),
+        tuple((ids(path), m) for path, m in found) if ids is not None else None,
     )
 
 
@@ -307,26 +361,48 @@ def _source_of(collection: str) -> Source | None:
     return next((s for s in SOURCES if s.collection == collection), None)
 
 
-def _exports(output_dir: Path, source: Source | None) -> tuple[dict, list[int]]:
-    """Export facts plus every markdown file's ``mtime_ns`` (for the index count)."""
+# native id -> (newest export mtime_ns, its activity_at)
+ExportIndex = dict[str, tuple[int, datetime | None]]
+
+
+def _exports(output_dir: Path, source: Source | None) -> tuple[dict, list[int], ExportIndex]:
+    """Export facts, every markdown file's ``mtime_ns`` and the session exports by id.
+
+    A session document recall would skip (frontmatter that does not parse, a source
+    that disagrees with the collection, no native id) counts as ``unreadable`` and not
+    as an export: coverage applies the same record check as ``recall list``.
+    """
+    by_id: ExportIndex = {}
     if source is not None and source.session_type:
         catalog = load_catalog(output_dir)
         catalog.save()
         mtimes = [entry.mtime_ns for entry in catalog.entries.values()]
         newest: datetime | None = None
-        exported = 0
-        for entry in catalog.entries.values():
+        exported = rejected = 0
+        for rel, entry in catalog.entries.items():
             fm = entry.frontmatter
             if fm.get("type") not in source.session_types:
+                continue
+            try:
+                record = record_from_frontmatter(
+                    catalog.path_of(rel), fm, source.source, source.id_field, source.session_types
+                )
+            except ValueError:
+                record = None
+            if record is None:
+                rejected += 1
                 continue
             exported += 1
             stamp = _utc(fm.get("activity_at")) or _utc(fm.get("started_at"))
             if stamp is not None and (newest is None or stamp > newest):
                 newest = stamp
+            known = by_id.get(record.session_id)
+            if known is None or entry.mtime_ns > known[0]:
+                by_id[record.session_id] = (entry.mtime_ns, stamp)
         facts = {
             "markdown_files": len(catalog.entries) + len(catalog.errors),
             "exported_docs": exported,
-            "unreadable": len(catalog.errors),
+            "unreadable": len(catalog.errors) + rejected,
             "newest_activity_at": newest,
         }
     else:
@@ -339,7 +415,33 @@ def _exports(output_dir: Path, source: Source | None) -> tuple[dict, list[int]]:
             "newest_activity_at": None,
         }
     facts["last_export_at"] = _from_ns(max(mtimes)) if mtimes else None
-    return facts, mtimes
+    return facts, mtimes, by_id
+
+
+def _unexported(
+    files: tuple[tuple[tuple[str, ...], int], ...],
+    by_id: ExportIndex,
+    newest_activity_at: datetime | None,
+) -> tuple[tuple[datetime, datetime | None], ...]:
+    """Native files written after their own export, newest first.
+
+    An export rewrites its document whenever the native revision changes, so a
+    document at least as new as its native file covers it. Another session's export,
+    a peer exchange or a note on another session proves nothing about this file. A
+    file with no export counts only when it is newer than every exported activity:
+    an older one is outside the export window or one the exporter skips on purpose
+    (no messages), and ``cairn sync`` would not clear it.
+    """
+    result = []
+    for ids, mtime_ns in files:
+        export = next((by_id[i] for i in ids if i in by_id), None)
+        if export is not None and export[0] >= mtime_ns:
+            continue
+        at = _from_ns(mtime_ns)
+        if export is None and newest_activity_at is not None and at <= newest_activity_at:
+            continue
+        result.append((at, export[1] if export is not None else None))
+    return tuple(sorted(result, key=lambda row: row[0], reverse=True))
 
 
 def selected_collections(
@@ -383,11 +485,11 @@ def gather(
     now = now or datetime.now(UTC)
     rows: list[tuple[CollectionFacts, list[int]]] = []
     for name, coll, source in selected_collections(config, sources):
-        exports, mtimes = _exports(config.output_dir(name), source)
-        native_at, basis, exists, error = (
+        exports, mtimes, by_id = _exports(config.output_dir(name), source)
+        native = (
             _native(source.source if source else None, coll)
             if coll.sync.enabled
-            else (None, "none", coll.store is not None and coll.store.exists(), None)
+            else _NativeFacts(store_exists=coll.store is not None and coll.store.exists())
         )
         rows.append(
             (
@@ -396,11 +498,16 @@ def gather(
                     source=source.source if source else None,
                     enabled=coll.sync.enabled,
                     store=coll.store,
-                    store_exists=exists,
-                    store_error=error,
+                    store_exists=native.store_exists,
+                    store_error=native.store_error,
                     session=bool(source and source.session_type),
-                    native_newest_at=native_at,
-                    native_basis=basis,
+                    native_newest_at=native.newest_at,
+                    native_basis=native.basis,
+                    unexported=(
+                        _unexported(native.files, by_id, exports["newest_activity_at"])
+                        if native.files is not None
+                        else None
+                    ),
                     **exports,
                 ),
                 mtimes,
@@ -451,12 +558,72 @@ def gather(
 # ---------------------------------------------------------------------------
 
 
+def export_command(source: str | None) -> str:
+    """The command that exports every native item of ``source``."""
+    found = next((s for s in SOURCES if s.source == source), None)
+    if found is None:
+        return FIX_SYNC
+    return (
+        f"cairn {found.source} export --all" if found.windowed else f"cairn {found.source} export"
+    )
+
+
+def _unexported_gap(
+    c: CollectionFacts, now: datetime, gap: Callable[..., Gap], skew_note: str
+) -> list[Gap]:
+    """``export-lag`` from the native files written after their own export."""
+    rows = c.unexported or ()
+    if not rows:
+        return []
+    clamped = min(rows[0][0], now)
+    # Each file is behind by its unexported interval: from its export's activity_at to
+    # its mtime, or, with no export (or an export newer by the clock), from its mtime
+    # to now.
+    behind = [
+        (min(m, now) - low).total_seconds()
+        if low is not None and low < min(m, now)
+        else (now - min(m, now)).total_seconds()
+        for m, low in rows
+    ]
+    lag_s = int(max(behind))
+    lows = [low for _, low in rows]
+    low = None if any(x is None for x in lows) else min(x for x in lows if x is not None)
+    reference = c.newest_activity_at or c.last_export_at
+    severity = WARN if lag_s > EXPORT_GRACE_S else INFO
+    sessions = f"{len(rows)} session" + ("" if len(rows) == 1 else "s")
+    return [
+        gap(
+            "export-lag",
+            severity,
+            f"native activity at {_minute(clamped)} not exported for {sessions}, "
+            f"newest export {_minute(reference)} ({duration(lag_s)} behind){skew_note}",
+            FIX_SYNC,
+            lag_s=lag_s,
+            basis=c.native_basis,
+            sessions=len(rows),
+            interval=(low, clamped),
+        )
+    ]
+
+
 def _store_gaps(c: CollectionFacts, now: datetime, named: set[str]) -> list[Gap]:
     def gap(kind: str, severity: str, message: str, fix: str | None, **extra) -> Gap:
         interval = extra.pop("interval", None)
         return Gap(kind, severity, STORE, c.collection, c.source, message, fix, extra, interval)
 
     gaps: list[Gap] = []
+    if c.unreadable:
+        # Recall reads a disabled collection's exports too, so this is checked first.
+        gaps.append(
+            gap(
+                "unreadable-exports",
+                WARN,
+                f"{c.unreadable} exported files could not be read as sessions; recall "
+                "skips them (cairn recall list warns about each one)",
+                None,
+                count=c.unreadable,
+            )
+        )
     if not c.enabled:
         severity = WARN if c.source in named else INFO
         last = c.newest_activity_at or c.last_export_at
@@ -467,17 +634,6 @@ def _store_gaps(c: CollectionFacts, now: datetime, named: set[str]) -> list[Gap]
         gaps.append(gap("store-missing", INFO, c.store_error, None))
     elif c.store is not None and not c.store_exists:
         gaps.append(gap("store-missing", INFO, f"store {c.store} not found", None))
-    if c.unreadable:
-        gaps.append(
-            gap(
-                "unreadable-exports",
-                WARN,
-                f"{c.unreadable} exported files could not be parsed; recall skips them "
-                "(cairn recall list prints each one)",
-                None,
-                count=c.unreadable,
-            )
-        )
     native = c.native_newest_at
     if native is None:
         return gaps
@@ -485,19 +641,20 @@ def _store_gaps(c: CollectionFacts, now: datetime, named: set[str]) -> list[Gap]
     clamped = min(native, now)
     skew_note = " (clock skew)" if skew > CLOCK_SKEW_S else ""
     if c.exported_docs == 0:
-        fix = f"cairn {c.source} export --all" if c.source else FIX_SYNC
         gaps.append(
             gap(
                 "never-exported",
                 WARN,
                 f"native files exist (newest {_minute(clamped)}) but nothing is exported"
                 + skew_note,
-                fix,
+                export_command(c.source) if c.source else FIX_SYNC,
                 basis=c.native_basis,
                 interval=(None, clamped),
             )
         )
         return gaps
+    if c.unexported is not None:
+        return gaps + _unexported_gap(c, now, gap, skew_note)
     reference = c.newest_activity_at if c.session else c.last_export_at
     reference = reference or c.last_export_at
     caught_up = c.last_export_at is not None and c.last_export_at >= native
@@ -732,23 +889,58 @@ def render_text(facts: Facts, gaps: list[Gap]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def skipped_gaps(skipped: Iterable[dict]) -> list[Gap]:
+    """One ``unreadable-exports`` warn per source for the sessions a digest skipped.
+
+    ``skipped`` are the digest's ``{"ref": "source:id", "reason": "legacy" | "corrupt"}``
+    rows. Each is a session in the window the command could not read, so the
+    result is never a clean miss.
+    """
+    by_source: dict[str, list[dict]] = {}
+    for row in skipped:
+        by_source.setdefault(str(row["ref"]).split(":", 1)[0], []).append(row)
+    gaps = []
+    for name, rows in sorted(by_source.items()):
+        source = next((s for s in SOURCES if s.source == name), None)
+        legacy = any(row.get("reason") == "legacy" for row in rows)
+        gaps.append(
+            Gap(
+                "unreadable-exports",
+                WARN,
+                STORE,
+                source.collection if source else None,
+                name,
+                f"{len(rows)} sessions in the window could not be digested "
+                "(legacy or corrupt export; listed in skipped)",
+                export_command(name) if legacy else None,
+                {"count": len(rows), "skipped": [row["ref"] for row in rows]},
+            )
+        )
+    return gaps
+
+
 def coverage(
     config: CairnConfig,
     sources: Iterable[str],
     window: tuple[datetime, datetime],
     found: bool,
     *,
+    skipped: Iterable[dict] = (),
     now: datetime | None = None,
 ) -> dict:
     """The store gaps that can hide a row from ``window`` for ``sources``. No QMD call.
 
     ``sources`` are the requested sources (``--source``, else the command's
-    default). ``found`` says whether the command returned any row.
+    default). ``found`` says whether the command returned any row. ``skipped`` are
+    the sessions a digest could not read (:func:`skipped_gaps`).
     """
     now = now or datetime.now(UTC)
     sources = list(sources)
     facts = gather(config, sources, index=False, now=now)
-    gaps = classify(facts, now, window=window, requested=sources)
+    gaps = sorted(
+        classify(facts, now, window=window, requested=sources) + skipped_gaps(skipped),
+        key=_order,
+    )
     status = status_of(gaps)
     verdict = "found" if found else ("clean-miss" if status == "clean" else "degraded-miss")
     start, end = window
@@ -786,8 +978,10 @@ __all__ = [
     "classify",
     "coverage",
     "coverage_note",
+    "export_command",
     "gather",
     "render_text",
+    "skipped_gaps",
     "status_of",
     "to_json",
 ]
