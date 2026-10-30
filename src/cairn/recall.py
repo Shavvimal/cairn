@@ -189,6 +189,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.min_msgs < 0:
                 raise ValueError("--min-msgs must be nonnegative")
             if args.refresh and not refresh(sources):
+                # refresh() printed which source failed; name the code after it.
+                errors.emit("RECALL_FAILED")
+                if getattr(args, "json", False):
+                    message = "refresh failed; the store may be stale"
+                    print(json.dumps(errors.failure("RECALL_FAILED", message, exit=1)))
                 return 1
         records = family = store.records(sources)
         # An explicit ID is global unless a project filter is requested. Listing and

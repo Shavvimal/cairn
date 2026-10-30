@@ -229,8 +229,8 @@ _ENTRIES = (
     ),
     ErrorCode(
         "RECALL_FAILED",
-        "recall could not answer: a bad argument, an unreadable file, a config error or "
-        "a refresh timeout.",
+        "recall could not answer: a bad argument, an unreadable file, a config error, or "
+        "a --refresh export that failed or timed out.",
         "recall reads the exported store and never guesses a date or a session.",
         "Act on the argument or file the message names.",
         ("cairn", "recall", "list", "today"),

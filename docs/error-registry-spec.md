@@ -205,7 +205,7 @@ plus `"code": "INVOKE_DENIED", "fix": {...}`; `retryable` keeps the per-round va
 | `QMD_RUNTIME_FAILED` | 1 | no | `qmd status` failed, so QMD cannot open its index | Read the QMD error; check the QMD install | `cairn doctor` | `admin.py:889-891` |
 | `QMD_INDEX_INCOMPLETE` | 0 (`--strict-index` 1) | yes | Index empty, without vectors, pending, or unreadable | Run `cairn sync --cron`; investigate if pending does not fall | `cairn doctor --strict-index` | `admin.py:905-923` |
 | `HOOK_NOT_TRUSTED` | 0 | no | Hook files exist but the host has not confirmed trust | Ask the user to review and trust cairn's hook in the host | `cairn hook status` | `admin.py:1238`, `hooks.py:316` |
-| `RECALL_FAILED` | 1 | no | recall could not answer: bad argument, unreadable file, refresh timeout | Act on the argument or file the message names | `cairn recall list today` | `recall.py:193-195`, `digest.py:84-103` |
+| `RECALL_FAILED` | 1 | no | recall could not answer: bad argument, unreadable file, failed or timed-out refresh | Act on the argument or file the message names | `cairn recall list today` | `recall.py:193-195`, `digest.py:84-103` |
 | `DIGEST_EMPTY_DAY` | 3 | no | No session was written for the day | Nothing to digest; stop the day as empty | `cairn recall list yesterday --all-projects` | `digest.py:418` |
 | `ROUTINE_UNKNOWN` | 2 | no | Name is not in `routines` | Use a listed name or add the routine | `cairn routine list` | `routine.py:71-74` |
 | `ROUTINE_USAGE` | 2 | no | Bad name, future `--day`, or launchd-only action off macOS | Correct the argument the message names | `cairn routine list` | `routine.py:78-80, 142-203`, `routine_run.py:545-546` |

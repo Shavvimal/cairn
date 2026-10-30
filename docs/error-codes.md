@@ -53,7 +53,7 @@ exit; the command decides it.
 | `QMD_MISSING` | 1 | no | The configured qmd_binary is not on PATH and is not a file. |
 | `QMD_RUNTIME_FAILED` | 1 | no | 'qmd status' failed, so QMD cannot open its index. |
 | `RECALL_DEGRADED` | 0: the status is data ('status: degraded', verdict 'degraded-miss') | yes | Coverage is degraded: export lag, index lag, unindexed files, a disabled source, a missing store or a missing rg. |
-| `RECALL_FAILED` | 1 | no | recall could not answer: a bad argument, an unreadable file, a config error or a refresh timeout. |
+| `RECALL_FAILED` | 1 | no | recall could not answer: a bad argument, an unreadable file, a config error, or a --refresh export that failed or timed out. |
 | `RECALL_VERIFY_FAILED` | 4 | no | A journal citation does not resolve to an unchanged digest frame, or a quote is not in a cited frame. |
 | `ROUTINE_DAY_FAILED` | 1 | yes | A day failed or was deferred; the reasons are in 'failures'. |
 | `ROUTINE_HELD` | 2 | no | The routine is paused, or the breaker disabled it after repeated failures. |
@@ -364,7 +364,7 @@ exit; the command decides it.
 
 ## RECALL_FAILED
 
-- Meaning: recall could not answer: a bad argument, an unreadable file, a config error or a refresh timeout.
+- Meaning: recall could not answer: a bad argument, an unreadable file, a config error, or a --refresh export that failed or timed out.
 - Why: recall reads the exported store and never guesses a date or a session.
 - Next step: Act on the argument or file the message names.
 - Verify: `cairn recall list today`
