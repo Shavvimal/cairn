@@ -670,9 +670,10 @@ else `~/.claude`), or `AGENTS.md` in the Codex home (`AGENTS.override.md` when t
 holds text, because Codex then loads it instead). The block tells the agent to run recall
 before it asks about past work, to use `--exact` search for literals, and to ask with a
 hypothesis. cairn changes only the text between `<!-- cairn:recall-first:begin v1 -->` and
-`<!-- cairn:recall-first:end -->`. `--dry-run` prints the diff, `show` prints the block for
-a paste by hand, and `status` reports each harness. `cairn instructions remove` deletes the
-block and records an opt-out, so a later `install` from the setup or update workflow does
+`<!-- cairn:recall-first:end -->`, plus the one blank line that separates the block from the
+text above it. `--dry-run` prints the diff, `show` prints the block for
+a paste by hand, and `status` reports each harness. `cairn instructions remove --harness
+claude|codex` deletes the block and records an opt-out, so a later `install` from the setup or update workflow does
 not add it back without `--force`. Deleting the block by hand counts as the same opt-out.
 `cairn doctor` reports the block state as a warning only.
 
