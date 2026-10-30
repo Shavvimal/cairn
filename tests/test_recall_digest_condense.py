@@ -375,6 +375,14 @@ class TestProvenanceKey(DigestFixture):
         fm = split((out / "codex-owned0001.md").read_text())[0]
         self.assertEqual((fm["provenance"], fm["owner"]), ("agent", "routine:example-daily"))
 
+    def test_text_row_shows_provenance_and_owner(self):
+        self.write_peer("owned-0001", "routine:example-daily")
+        out = self.root / "text"
+        code, stdout, _ = self.cli("digest", DAY, "--all-projects", "--out", str(out))
+        self.assertEqual(code, 0)
+        self.assertIn("codex:owned-0001  primary  agent  frames_today=", stdout)
+        self.assertIn("  owner=routine:example-daily", stdout)
+
     def test_provenance_tool_drops_peers(self):
         self.write_doc("fixture.md", fixture_document())
         self.write_peer("peer-0001", "claude session claude:fixture-0001")

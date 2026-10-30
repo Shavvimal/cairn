@@ -326,6 +326,7 @@ Other modules:
 | `tests/test_recall_digest_condense.py::test_indented_preamble_reads_as_at_export` | leading whitespace before the preamble reads `agent` at export and in the digest (added in review) |
 | `tests/test_recall_digest_condense.py::test_stored_key_beats_body_evidence` | a valid stored key wins over a peer body; an invalid or empty one warns and reads `agent` (added in review) |
 | `tests/test_recall_digest_condense.py::test_filter_to_nothing_clears_a_populated_directory` | a rerun filtered to nothing removes the earlier markdown and sidecars (added in review) |
+| `tests/test_recall_digest_condense.py::test_text_row_shows_provenance_and_owner` | digest text row holds the value and `owner=` (added in review) |
 | `tests/test_recall.py::TestRecallList::test_owner_in_text_and_json` | `owner=` in list text rows, `(owner ...)` in expand, owner in JSON (added in review) |
 | `tests/test_recall.py::TestRecallList::test_null_or_blank_owner_is_no_owner` | `owner: null` and a blank owner give `"owner": null` (added in review) |
 | `tests/test_recall.py::TestRecallSubagents::test_subagent_export_is_agent` | a Claude subagent export writes `provenance: agent` (added in review) |
