@@ -534,6 +534,44 @@ even when native mtime is unchanged; unavailable native data leaves old exports 
 
 Every export checks whether its source actually changed (mtime/timestamp/hash) before doing work, so a "nothing changed" run is nearly instant. Steps are timed and logged to `.context/logs/context-sync.log`.
 
+**Exporter guards.** A host can change its transcript format without notice. An export
+refuses to write a session whose source file holds records but renders no user or
+assistant message, prints `Error: parser drift: SOURCE:ID KIND: ...` and exits 1. The
+last good document stays in place. The finding is kept in
+`<data_root>/exporter/findings.json` until a later parse of that session succeeds; the
+hook worker stores the same message as the request error. A top-level session with
+assistant turns but no user turn is written with a `Warning: parser drift: ... no-user-turns`
+line. An existing document whose frontmatter does not parse blocks its re-export with
+`Error: refusing to re-export ...; fix or move it`. `cairn <source> export --json` prints
+one JSON object on stdout (documents written, findings, the spec target) and sends the
+human lines to stderr. Every exported document carries `exporter_version` and
+`exporter_spec_target`: the adapter version and the date its record shapes were last
+checked against a live store.
+
+`cairn sync --cron` and `cairn sync --all` then run a gap check for Claude Code, Codex
+and Antigravity. It compares the session files changed in the last 30 days (leaving out
+files changed in the last 10 minutes) with the documents in the collection, re-exports
+the missing ones once with `--since 30d` and checks again:
+
+```text
+  [gap-check] codex-sessions: 41 on disk in 30d, 1 missing, 0 held by parser drift
+  [gap-heal:codex-sessions] ok (2.1s)
+  [gap-check] codex-sessions: after heal 0 missing
+  [exporter-drift] 1 open findings: claude:5e551000 zero-messages
+```
+
+A session with an open drift finding is "held", not missing. A gap the heal cannot close
+fails the `gap-check:<collection>` step, so the run ends `=== FAILED ===` with that step
+named. The `[exporter-drift]` line repeats on every sync while a finding stays open.
+Cursor is not in the gap check. A document you delete by hand comes back on the next full
+sync while its source file is under 30 days old; move the source file or wait for the
+window to pass. `cairn sync --hook` runs neither step.
+
+`cairn doctor` prints one `exporter [SOURCE]` line per enabled adapter with its spec
+target, up to five `parser drift` warnings (oldest first), and a read-only
+`gap check [COLLECTION]` line per covered collection. These lines warn and never fail
+the doctor run.
+
 Everything a session spawned lives in one folder named after its document,
 `<collection>/<project>/<date>-<shortid>/`: subagent transcripts as `agent-<id>.md`
 (`type: claude-subagent` or `codex-subagent`, hidden from `list`, shown by

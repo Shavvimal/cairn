@@ -123,6 +123,15 @@ fails (for example its `sessionId` is not the parent), the parent is still writt
 the hook job fails, so it retries. An `agent-<agentId>` id (with or without its
 transcript path) refreshes the parent's index and exports that one subagent.
 
+## Parser checks
+
+- **Spec target.** `SPEC_TARGETS["claude"]` in `src/cairn/sources/spec_targets.py`: the date the
+  record shapes were checked against a live store and the host version that day. Every
+  document carries it as `exporter_spec_target`, beside `exporter_version`.
+- **Fixtures.** `tests/fixtures/claude/` holds invented transcripts with expected
+  messages; `tests/test_parser_fixtures.py` scores message recall exactly.
+- **Drift.** A transcript whose `user` and `assistant` records (or unknown record types) render no message is refused as `zero-messages`. A file of only control records (`attachment`, `last-prompt` and the like) is `empty`: it exports as before and the gap check does not count it. Subagent transcripts never warn `no-user-turns`. A refused subagent fails the parent's hook job, so it retries.
+
 ## Annotate
 
 ```bash
