@@ -654,6 +654,7 @@ Front matter keys, in this order. Scalars are written as `key: "value"` with
 | `role` | `primary`, `peer` or `subagent` |
 | `parent` | `source:id` or `null` |
 | `orphan_peer` | `true` or `false` |
+| `provenance` | `user`, `agent`, `tool` or `imported` (added by the provenance layer, `docs/provenance-spec.md`): the stored key, else the value derived from front matter, else `agent` when the role is `peer` or `orphan_peer` is true |
 | `owner` | copied from the session front matter when present; the key is omitted otherwise |
 | `date` | the window day, `YYYY-MM-DD` |
 | `session_started_at` | `record.started_at` in UTC, or `null` |
@@ -700,6 +701,7 @@ cwd: "/tmp/demo"
 role: "primary"
 parent: null
 orphan_peer: false
+provenance: "tool"
 date: "2026-03-28"
 session_started_at: "2026-03-27T22:10:00Z"
 first_ts: "2026-03-28T09:02:11Z"
@@ -775,6 +777,8 @@ then `ref`:
       "frames_path": "~/.cache/cairn/digests/2026-03-28/claude-3f2a9c1e7b4d.frames.jsonl",
       "role": "primary",
       "parent": null,
+      "provenance": "tool",
+      "owner": null,
       "project": "demo",
       "cwd": "/tmp/demo",
       "frames_today": 6,
@@ -787,12 +791,15 @@ then `ref`:
 ```
 
 `path` and `frames_path` are absolute in real output (the `~` above is for the
-example). `chars` is the digest body length. Skipped sessions (legacy, corrupt) are not
+example). `chars` is the digest body length. `provenance` and `owner` were added by the
+provenance layer (`docs/provenance-spec.md`): `owner` is the front-matter value, or `null`.
+`--provenance VALUE` (repeatable) drops sessions outside the set before anything is
+written; a dropped session is not listed in `skipped`. Skipped sessions (legacy, corrupt) are not
 rows; they are stderr warnings and entries of `skipped[]`. With `--json`, stdout is one
 object, `{"sessions": [rows], "skipped": [{"ref", "reason"}]}` (answer 2).
 
 Without `--json`, stdout is one line per written session,
-`REF  ROLE  frames_today=N  chars=C  [truncated F]`, then
+`REF  ROLE  PROVENANCE  frames_today=N  chars=C  [owner=X]  [truncated F]`, then
 `N sessions written to DIR`.
 
 ## 9. Test plan

@@ -145,6 +145,11 @@ Everything a session spawned sits in a folder named after its document:
 (`type: agent-exchange`). The parent document carries a `## Subagents` index and `links:`
 to the peer sessions it spawned or was spawned by.
 
+Every session and exchange document also carries `provenance: tool|agent|imported|user`
+in its head, directly before `status:`: who produced the body text. The exporter writes it
+on every re-render, so it is not an annotation; `cairn recall list --provenance VALUE`
+filters on it.
+
 ## Preserved on export (shared)
 
 Re-exporting never clobbers your annotations. Across all sources, exports preserve the

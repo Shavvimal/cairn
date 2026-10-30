@@ -32,14 +32,16 @@ Parse the user's input after `/recall`:
 
 ```bash
 cairn recall list "DATE_EXPR"          # e.g. yesterday, today, "last week", 2026-06-20
-cairn recall list "DATE_EXPR" --json   # machine-readable (session_id, time, msgs, title, project, type, parent)
+cairn recall list "DATE_EXPR" --json   # machine-readable (session_id, time, msgs, title, project, type, parent, provenance, owner)
 cairn recall list "DATE_EXPR" --include-subagents   # also list subagent transcripts
 ```
 
 Date expressions: `today`, `yesterday`, `YYYY-MM-DD`, `N days ago`, `last N days`,
 `this week`, `last week`, `last <weekday>`. Useful flags (see `cairn recall list --help`):
 `--all-projects` (scan every project, not just the current dir), `--min-msgs N` (default 3;
-use `--min-msgs 1` to include short sessions), `--project PATH`, repeatable `--source claude|codex|cursor|granola`, and `--refresh`.
+use `--min-msgs 1` to include short sessions), `--project PATH`, repeatable `--source claude|codex|cursor|granola`,
+repeatable `--provenance user|agent|tool|imported`, and `--refresh`.
+Use `--provenance tool` to leave out peer and routine runs.
 Use `--refresh` for recent/live history: it exports without requiring QMD. Stop on refresh
 failure and report the store as potentially stale. Date windows are UTC; reduced-precision
 legacy records are labeled. Keep source-qualified `reference` values for expansion.
@@ -68,7 +70,8 @@ cairn recall frame SOURCE:SESSION_ID ORDINAL --frames DIR/SOURCE-SHORTID.frames.
 
 Other flags: `--project P`, repeatable `--source claude|codex|antigravity|cursor`,
 `--include-subagents`, `--min-msgs N` (default 1, not 3 as in `list`), `--max-chars N`
-(per session, default 40000) and `--refresh`. Each session gives `SOURCE-SHORTID.md`,
+(per session, default 40000), repeatable `--provenance VALUE` and `--refresh`.
+Use `--provenance tool` to leave out peer and routine runs. Each session gives `SOURCE-SHORTID.md`,
 the condensed body, and `SOURCE-SHORTID.frames.jsonl`, one row per frame. A
 `<!-- f12 TS ROLE -->` marker cites frame ordinal 12; the `cairn:turn` numbers are
 lengths, never ids. To dig into a cited line, run `recall frame` with that ordinal: it
