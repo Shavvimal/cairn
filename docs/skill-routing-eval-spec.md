@@ -33,7 +33,7 @@ This layer adds:
    user intents per skill, plus a few negative rows.
 2. `tests/test_skill_routing.py`: a deterministic stdlib check that each intent matches
    the trigger set of its expected skill and of no other skill, unless the row declares
-   the overlap. It reports every overlap pair as a table.
+   the overlap. A failure message ends with every overlap pair as a table.
 3. A lint in the same test: an intent that equals or contains a whole trigger phrase
    fails with "copied from trigger".
 4. A `CONTRIBUTING.md` section: a description change updates the fixture and runs the
@@ -125,13 +125,17 @@ negative row "search the web for the python 3.13 release notes".
   `file:line | intent | expected | matched (skill <- trigger) | problem`.
 - Problem strings, exact: `missed`, `also matched: <skill>[, <skill>]`,
   `ambiguous_with not matched: <skill>`, `copied from trigger: <skill> "<trigger>"`,
-  `unknown skill: <name>`, `bad row: <reason>`, `duplicate intent (also <file>:<line>)`.
+  `bad row: unknown skill: <name>`, `bad row: <reason>`, `duplicate intent (also <file>:<line>)`.
+  A `bad row` line shows `-` in the intent, expected and matched columns.
 - `bad row` reasons for the shape checks, exact: `blank line`, `not a JSON object`,
   `unknown keys [...]`, `intent must be a non-empty string`, `expected is required`,
   `expected must be a skill name or null`, `ambiguous_with must be a list of strings`,
   `ambiguous_with has duplicates`, `ambiguous_with contains expected`,
   `ambiguous_with must be empty when expected is null or not routable`,
-  `note must be a string`.
+  `note must be a string`, `fixture of unknown skill '<dir>'` (a fixture whose directory
+  has no `SKILL.md`). An intent with no words fails as `intent must be a non-empty string`.
+- `skill <name>: unbalanced quotes after "Use when the user says"` and
+  `skill <name>: a quoted trigger has no words`.
 - `skill <name>: no row matches "<trigger>" alone` and
   `skill <name>: "<trigger>" has the tokens of another trigger` (section 4.8).
 - `undeclared overlap pairs` followed by a table
@@ -147,13 +151,16 @@ negative row "search the web for the python 3.13 release notes".
 
 1. Glob `skills/*/SKILL.md`. Skip the class (`skipUnless`) if `skills/` is absent, as
    `tests/test_plugin_manifest.py:22` does for an sdist run.
-2. Read the lines between the first `---` and the next `---`. Keep only unindented
-   `key: value` lines. Take `name`, `description` and `disable-model-invocation`.
-   Assert `name` equals the directory name.
+2. Read the lines between the first `---` and the next `---`. Take unindented
+   `key: value` lines; an indented line folds into the previous value with one space, and
+   a block indicator (`>`, `|`, `>-`, `|-`) starts an empty value. Take `name`,
+   `description` and `disable-model-invocation`. Assert `name` equals the directory name.
 3. A skill is routable unless `disable-model-invocation` is `true`.
 4. Triggers: every double-quoted span in the description after the literal marker
    `Use when the user says`. Text before the marker is ignored, so `"One Thing"` in
-   recall is not a trigger. A routable skill with zero triggers fails.
+   recall is not a trigger. A routable skill with zero triggers fails. An odd number of
+   double quotes after the marker fails as `unbalanced quotes`, and a quoted span with no
+   words fails as `a quoted trigger has no words`.
 
 ### 4.2 Normalise and tokenise
 
@@ -165,8 +172,8 @@ negative row "search the web for the python 3.13 release notes".
 - Intent tokens: the stem of every word in the normalised intent.
 - Trigger tokens: the stems of the words that are not in a fixed stopword list (articles,
   prepositions, pronouns, auxiliaries, `what`, `please`: 58 words in the module constant `STOPWORDS` in `tests/test_skill_routing.py`).
-  Weak-trigger rule: if the trigger has more than one word and fewer than two tokens
-  remain, keep all its words. This applies today to "what did we work on" and "what was I
+  Weak-trigger rule: if fewer than two tokens remain, keep all the trigger's words, so a
+  one-word stopword trigger keeps its word. A trigger with no words matches nothing. This applies today to "what did we work on" and "what was I
   doing". Without it they reduce to `{work}` and `{doing}` (section 4.3 table).
 
 ### 4.3 Match: token set, not substring
@@ -314,7 +321,7 @@ Module docstring states the limit from section 1.2 in two sentences.
 | `TestTriggerExtraction.test_every_routable_skill_has_triggers` | F3 |
 | `TestTriggerExtraction.test_setup_is_not_routable` | `setup` has `disable-model-invocation: true` |
 | `TestMatcher.test_normalise_and_stem` | inline cases: `sessions`, `meetings`, `working`, `exported` |
-| `TestMatcher.test_weak_trigger_keeps_stopwords` | "what was I doing" needs all four tokens |
+| `TestMatcher.test_weak_trigger_keeps_stopwords` | "what was I doing" needs all four tokens; a one-word stopword trigger keeps its word; an empty trigger matches nothing |
 | `TestMatcher.test_token_set_ignores_order` | inline synthetic triggers, no repo read |
 | `TestMatcher.test_copy_lint` | equal, contained, single-word exemption, inline |
 | `TestRoutingEval.test_rows_are_well_formed` | 4.5 step 1 and 2 |
@@ -324,6 +331,9 @@ Module docstring states the limit from section 1.2 in two sentences.
 | `TestRoutingEval.test_fixture_counts` | 4.7 |
 | `TestRoutingEval.test_every_trigger_has_its_own_row` | 4.8 on the repository rows |
 | `TestRowChecks.test_parse_rejects_each_bad_shape` | every `bad row` reason of 4.5 step 1, inline rows |
+| `TestRowChecks.test_triggers_need_the_marker_and_balanced_quotes` | no marker gives no trigger, quote balance |
+| `TestRowChecks.test_load_skills_reports_bad_descriptions` | unbalanced quotes, empty trigger, `name` mismatch, folded description, temp directory |
+| `TestRowChecks.test_fixture_of_an_unknown_skill_is_a_bad_row` | orphan fixture directory |
 | `TestRowChecks.test_blank_line_inside_a_fixture_is_a_bad_row` | blank line rule, temp directory |
 | `TestRowChecks.test_route_problems` | `missed`, `also matched`, stale exemption, null and setup rows that try an exemption |
 | `TestRowChecks.test_read_head_needs_both_delimiters` | `frontmatter not opened`, `frontmatter not closed`, temp file |
@@ -333,7 +343,7 @@ Module docstring states the limit from section 1.2 in two sentences.
 The `TestMatcher` cases use inline data so a description edit cannot break them. Use
 `self.fail(table)` once per test with every offender, not one assertion per row, so one
 run shows the whole picture. Put the helpers (`normalise`, `stem`, `read_head`,
-`triggers`, `matches`, `copied`) at module level with type hints for mypy.
+`triggers`, `trigger_matches`, `matched`, `copied`) at module level with type hints for mypy.
 
 ---
 
@@ -388,7 +398,7 @@ Where the implementation departs from sections 1-10:
 - Layers 05 to 09 changed the bodies of `recall`, `search`, `cairn` and `setup`, and the
   unquoted part of the `cairn` description (`decide/supersede/forget`). No quoted trigger
   changed, so the original 74 rows in Appendix A shipped unchanged. Review added three
-  rows (section 4.8) for 77 in total. The test was run on top of layers 01-10: 20 tests,
+  rows (section 4.8) for 77 in total. The test was run on top of layers 01-10: 23 tests,
   77 rows, 0 failures, the 4 declared pairs in section 4.6.
 - The new `cairn` subcommands (`decide`, `supersede`, `forget`, `instructions`, `routine
   pause`) have no quoted trigger, so no row routes to them. Adding a row would need a
@@ -404,6 +414,8 @@ Where the implementation departs from sections 1-10:
   '<skill>' in the fixture of '<owner>'`.
 - Review added section 4.8, the `TestRowChecks` class with inline skills, and the shape
   rules for `expected` type, `note` type, blank lines and exemptions on negative rows.
+  The second review added the empty-trigger and stopword-trigger rules, the quote-balance
+  and orphan-fixture checks, and folding of indented frontmatter lines.
 - The helpers live in the test module, not in `src/cairn`: this is test infrastructure and
   nothing ships to the runtime.
 

@@ -74,18 +74,20 @@ def intent_tokens(intent: str) -> frozenset[str]:
 
 
 def trigger_tokens(trigger: str) -> frozenset[str]:
-    """Content tokens of a trigger. A multi-word trigger left with fewer than two content
-    tokens keeps all its words (the weak-trigger rule), so "what was I doing" does not
-    reduce to ``{doing}``."""
+    """Content tokens of a trigger. A trigger left with fewer than two content tokens keeps
+    all its words (the weak-trigger rule), so "what was I doing" does not reduce to
+    ``{doing}`` and a one-word stopword trigger does not reduce to nothing."""
     words = normalise(trigger).split()
     kept = frozenset(stem(w) for w in words if w not in STOPWORDS)
-    if len(words) > 1 and len(kept) < 2:
+    if len(kept) < 2:
         return frozenset(stem(w) for w in words)
     return kept
 
 
 def trigger_matches(trigger: str, intent: str) -> bool:
-    return trigger_tokens(trigger) <= intent_tokens(intent)
+    """An empty trigger matches nothing; ``load_skills`` reports it."""
+    tokens = trigger_tokens(trigger)
+    return bool(tokens) and tokens <= intent_tokens(intent)
 
 
 def copied(intent: str, trigger: str) -> bool:
@@ -108,13 +110,26 @@ def read_head(path: Path) -> dict[str, str]:
     if not lines or lines[0].strip() != "---":
         raise FrontmatterError("frontmatter not opened")
     head: dict[str, str] = {}
+    key = ""
     for line in lines[1:]:
         if line.strip() == "---":
             return head
         if line and not line[0].isspace() and ":" in line:
             key, value = line.split(":", 1)
-            head[key.strip()] = value.strip()
+            key = key.strip()
+            value = value.strip()
+            # A folded or literal block starts on the next line.
+            head[key] = "" if value in (">", "|", ">-", "|-") else value
+        elif line.strip() and key:
+            # An indented continuation line folds into the value with one space.
+            head[key] = f"{head[key]} {line.strip()}".strip()
     raise FrontmatterError("frontmatter not closed")
+
+
+def quotes_balanced(description: str) -> bool:
+    """True if the text after the marker holds an even number of double quotes."""
+    index = description.find(MARKER)
+    return index < 0 or description[index:].count('"') % 2 == 0
 
 
 def triggers(description: str) -> list[str]:
@@ -157,9 +172,15 @@ def load_skills(root: Path = SKILLS_ROOT) -> tuple[dict[str, Skill], list[str]]:
             continue
         if head.get("name") != directory:
             problems.append(f"skill {directory}: name is {head.get('name')!r}")
+        description = head.get("description", "")
+        if not quotes_balanced(description):
+            problems.append(f'skill {directory}: unbalanced quotes after "{MARKER}"')
+        found = tuple(triggers(description))
+        if any(not trigger_tokens(t) for t in found):
+            problems.append(f"skill {directory}: a quoted trigger has no words")
         skills[directory] = Skill(
             name=directory,
-            triggers=tuple(triggers(head.get("description", ""))),
+            triggers=found,
             routable=head.get("disable-model-invocation") != "true",
         )
     return skills, problems
@@ -183,6 +204,10 @@ def load_rows(skills: dict[str, Skill], root: Path = SKILLS_ROOT) -> tuple[list[
     bad: list[Row] = []
     for path in sorted(root.glob(f"*/{FIXTURE_NAME}")):
         owner = path.parent.name
+        if owner not in skills:
+            reason = f"bad row: fixture of unknown skill {owner!r}"
+            bad.append(Row(path=path, line=1, intent=reason))
+            continue
         lines = path.read_text(encoding="utf-8").split("\n")
         last = max((n for n, raw in enumerate(lines, 1) if raw.strip()), default=0)
         for number, raw in enumerate(lines, 1):
@@ -211,7 +236,7 @@ def _parse_row(raw: str, owner: str, skills: dict[str, Skill], row: Row) -> str:
     if unknown:
         return f"unknown keys {unknown}"
     intent = data.get("intent")
-    if not isinstance(intent, str) or not intent.strip():
+    if not isinstance(intent, str) or not normalise(intent):
         return "intent must be a non-empty string"
     if "expected" not in data:
         return "expected is required"
@@ -392,8 +417,11 @@ class TestMatcher(unittest.TestCase):
         self.assertEqual(trigger_tokens("what was I doing"), {"what", "was", "i", "doing"})
         self.assertTrue(trigger_matches("what was I doing", "so what was I doing on friday"))
         self.assertFalse(trigger_matches("what was I doing", "what is codex doing right now"))
-        # A single-word trigger is never weak.
+        # A single-word trigger keeps its word, even a stopword; an empty one matches nothing.
         self.assertEqual(trigger_tokens("recall"), {"recall"})
+        self.assertEqual(trigger_tokens("all"), {"all"})
+        self.assertFalse(trigger_matches("all", "export my sessions"))
+        self.assertFalse(trigger_matches(", ", "export my sessions"))
 
     def test_token_set_ignores_order(self) -> None:
         self.assertEqual(trigger_tokens("export sessions"), {"export", "session"})
@@ -435,6 +463,7 @@ class TestRowChecks(unittest.TestCase):
             ('{"intent": "x", "expected": null, "why": 1}', "alpha", "unknown keys ['why']"),
             ('{"intent": " ", "expected": null}', "alpha", "intent must be a non-empty string"),
             ('{"intent": 3, "expected": null}', "alpha", "intent must be a non-empty string"),
+            ('{"intent": "???", "expected": null}', "alpha", "intent must be a non-empty string"),
             ('{"intent": "x"}', "alpha", "expected is required"),
             ('{"intent": "x", "expected": []}', "alpha", "expected must be a skill name or null"),
             ('{"intent": "x", "expected": {}}', "alpha", "expected must be a skill name or null"),
@@ -486,6 +515,47 @@ class TestRowChecks(unittest.TestCase):
         )
         self.assertEqual((good.intent, good.expected), ("x", None))
 
+    def test_triggers_need_the_marker_and_balanced_quotes(self) -> None:
+        self.assertEqual(triggers('Says "one two" here. No marker.'), [])
+        good = f'Before "not this". {MARKER} "one two", "three four".'
+        self.assertEqual(triggers(good), ["one two", "three four"])
+        self.assertTrue(quotes_balanced(good))
+        self.assertFalse(quotes_balanced(f'{MARKER} "one two", or "three four.'))
+
+    def test_load_skills_reports_bad_descriptions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, head in (
+                ("open", f'name: open\ndescription: x {MARKER} "one two", "three.'),
+                ("empty", f'name: empty\ndescription: x {MARKER} "one two", "?!".'),
+                ("named", f'name: other\ndescription: x {MARKER} "one two".'),
+                (
+                    "wrapped",
+                    f'name: wrapped\ndescription: >\n  x {MARKER} "one two",\n  "three four".',
+                ),
+            ):
+                (root / name).mkdir()
+                (root / name / "SKILL.md").write_text(f"---\n{head}\n---\nbody\n", encoding="utf-8")
+            skills, problems = load_skills(root)
+        self.assertEqual(
+            problems,
+            [
+                "skill empty: a quoted trigger has no words",
+                "skill named: name is 'other'",
+                f'skill open: unbalanced quotes after "{MARKER}"',
+            ],
+        )
+        self.assertEqual(skills["wrapped"].triggers, ("one two", "three four"))
+
+    def test_fixture_of_an_unknown_skill_is_a_bad_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "gone" / FIXTURE_NAME
+            fixture.parent.mkdir()
+            fixture.write_text('{"intent": "x y", "expected": null}\n', encoding="utf-8")
+            rows, bad = load_rows(_SYN, root=Path(tmp))
+        self.assertEqual(rows, [])
+        self.assertEqual([r.intent for r in bad], ["bad row: fixture of unknown skill 'gone'"])
+
     def test_blank_line_inside_a_fixture_is_a_bad_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fixture = Path(tmp) / "alpha" / FIXTURE_NAME
@@ -522,8 +592,8 @@ class TestRowChecks(unittest.TestCase):
                 path.write_text(text, encoding="utf-8")
                 with self.assertRaisesRegex(FrontmatterError, want):
                     read_head(path)
-            path.write_text("---\nname: x\n  indented: y\n---\nbody\n", encoding="utf-8")
-            self.assertEqual(read_head(path), {"name": "x"})
+            path.write_text("---\nname: x\ndescription: one\n  two\n---\nbody\n", encoding="utf-8")
+            self.assertEqual(read_head(path), {"name": "x", "description": "one two"})
 
     def test_overlap_problems(self) -> None:
         rows = [_row("export the widgets then ask beta", "alpha", ["beta"])]
