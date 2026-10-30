@@ -224,7 +224,7 @@ def first_exception_line(text: str) -> str:
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
     if not lines:
         return "unknown"
-    if len(lines) > 1 and lines[0].startswith("Failed to import"):
+    if len(lines) > 1 and lines[0].startswith(("Failed to import", "Failed to call load_tests")):
         return lines[-1]
     return lines[0]
 
@@ -348,6 +348,8 @@ def describe_change(root: Path, ref: str, path: str, tracked: set[str]) -> FileC
             return FileChange(path, state, None, None)
         if len(fields) >= 3:
             return FileChange(path, state, int(fields[0]), int(fields[1]))
+        if old is not None and new is not None:
+            return FileChange(path, state, 0, 0)  # a mode change git does not track
     data = new[1] if new is not None else b""
     if is_binary(data):
         return FileChange(path, state, None, None)
@@ -436,15 +438,44 @@ def snapshot(root: Path, dest: Path) -> None:
             shutil.copy2(source, target)
 
 
+def remove(target: Path) -> None:
+    """Delete TARGET: a file, a link or a directory (never followed through a link)."""
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+    elif target.is_dir():
+        shutil.rmtree(target)
+
+
+def prune(dest: Path, directory: Path) -> None:
+    """Remove DIRECTORY and its parents up to DEST while they are empty.
+
+    An empty directory left under ``src/`` would import as a namespace package.
+    """
+    while directory != dest and directory.is_dir() and not directory.is_symlink():
+        if any(directory.iterdir()):
+            return
+        directory.rmdir()
+        directory = directory.parent
+
+
 def revert(root: Path, ref: str, dest: Path, changes: list[FileChange]) -> None:
-    """Give each changed path its REF content and mode inside DEST, or delete it there."""
+    """Give each changed path its REF content and mode inside DEST, or delete it there.
+
+    Deletions go first, so a path that is a file at REF and a directory now (or the
+    reverse) is free before its REF content is written.
+    """
+    entries = {change.path: ref_entry(root, ref, change.path) for change in changes}
     for change in changes:
-        target = inside(dest, dest / change.path)
-        if target.is_symlink() or target.exists():
-            target.unlink()
-        entry = ref_entry(root, ref, change.path)
+        if entries[change.path] is None:
+            target = inside(dest, dest / change.path)
+            remove(target)
+            prune(dest, target.parent)
+    for change in changes:
+        entry = entries[change.path]
         if entry is None:
             continue
+        target = inside(dest, dest / change.path)
+        remove(target)
         mode, data = entry
         target.parent.mkdir(parents=True, exist_ok=True)
         if mode == "120000":
@@ -491,7 +522,8 @@ def guard_imports(tree: Path, changes: list[FileChange], timeout: float) -> None
     probe = (
         "import importlib, sys\n"
         "m = importlib.import_module(sys.argv[1])\n"
-        "print(getattr(m, '__file__', None) or list(getattr(m, '__path__', []))[0])\n"
+        "f = getattr(m, '__file__', None)\n"
+        "print('\\0'.join([f] if f else list(getattr(m, '__path__', []))))\n"
     )
     for pkg in top_packages(changes):
         proc = subprocess.Popen(
@@ -515,12 +547,13 @@ def guard_imports(tree: Path, changes: list[FileChange], timeout: float) -> None
             raise
         if proc.returncode != 0 or not stdout.strip():
             continue  # the package does not import at REF; the run reports the load error
-        where = os.path.realpath(stdout.strip().splitlines()[-1])
-        if not (where == src or where.startswith(src + os.sep)):
-            raise SetupError(
-                f"error: package '{pkg}' imports from {where}, not from the reverted copy; "
-                "the run would test the fix"
-            )
+        for found in stdout.strip().splitlines()[-1].split("\0"):
+            where = os.path.realpath(found)
+            if not (where == src or where.startswith(src + os.sep)):
+                raise SetupError(
+                    f"error: package '{pkg}' imports from {where}, not from the reverted copy; "
+                    "the run would test the fix"
+                )
 
 
 def run_target(

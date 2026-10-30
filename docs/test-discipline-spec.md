@@ -152,7 +152,7 @@ REASON in exit 3 is `load error: <first line of the loader exception>`, `0 tests
 A cannot lose work only if nothing ever kills it between revert and restore. B cannot
 lose work but reverts too much and drops uncommitted fixes. The chosen design is B's
 safety property with A's precision: the script only reads the repository (`git ls-files`,
-`git diff`, `git show`, `git cat-file`, `git ls-tree`, `git merge-base`, `git rev-parse`)
+`git diff`, `git cat-file`, `git ls-tree`, `git merge-base`, `git rev-parse`)
 and writes only under the temp dir and the log dir. "Restore" is therefore not a step: the
 real tree never changed, and the second run happens there.
 
@@ -161,7 +161,7 @@ real tree never changed, and the second run happens there.
 1. Find the repo root with `git rev-parse --show-toplevel`. Exit 2 on failure.
 2. Resolve REF: `--since` through `git rev-parse --verify REF^{commit}`, else the
    merge-base of HEAD with `main`, then `origin/main`. SHORT is `git rev-parse --short=7`.
-3. Build the file list. Default: `git diff --no-renames --name-status REF -- src/`
+3. Build the file list. Default: `git diff --no-renames --name-only -z REF -- src/`
    (REF against the working tree, so committed and uncommitted changes both count) plus
    `git ls-files --others --exclude-standard -- src/`. With `--files`, reject any path under
    `tests/`, and reject a path with no difference from REF. Exit 2 if the list is empty.
@@ -171,13 +171,16 @@ real tree never changed, and the second run happens there.
    that exists into `<tmp>/tree` (`shutil.copy2`, symlinks kept as symlinks). Then run
    `git init -q` and `git add -A` inside the copy, so tests that list tracked files see the
    same set.
-6. Revert inside the copy only. A path present at REF gets `git show REF:PATH` bytes and
-   the REF mode from `git ls-tree REF -- PATH` (`100755` sets the exec bit, which matters
-   for `hooks/launch.sh`). A path absent at REF is deleted.
+6. Revert inside the copy only. Deletions go first: a path absent at REF is deleted, and
+   any directory it leaves empty is removed too (an empty directory under `src/` would
+   import as a namespace package). Then a path present at REF gets the blob bytes and
+   mode that `git ls-tree -z REF -- PATH` names, read with `git cat-file blob SHA`
+   (`100755` sets the exec bit, which matters for `hooks/launch.sh`).
 7. Guard the import path. For each top-level package `PKG` under a reverted `src/PKG/...`,
-   run `python -c "import PKG; print(PKG.__file__)"` with the copy's environment. Exit 2
-   if the file is not under `<tmp>/tree/src`. This catches an editable install that wins
-   over `PYTHONPATH`.
+   import it with `importlib.import_module` in a child with the copy's environment and
+   print `PKG.__file__`, or every entry of `PKG.__path__` for a namespace package. Exit 2
+   if any of them is not under `<tmp>/tree/src`. This catches an editable install that
+   wins over `PYTHONPATH`, or that adds a second portion to a namespace package.
 8. Reverted run: `sys.executable -c RUNNER TARGET OUT.json` with `cwd=<tmp>/tree`,
    `PYTHONPATH=<tmp>/tree/src` prepended, and stdout and stderr written to
    `<log-dir>/reverted.log`. RUNNER is a module constant. It loads TARGET with
@@ -210,7 +213,8 @@ reverted src/cairn/x.py (+12 -3) to f0ea1e1, ran tests.test_x.TestY.test_z -> FA
 
 Several files are space-separated: `reverted src/cairn/a.py (+12 -3) src/cairn/b.py
 (+4 -0) to f0ea1e1, ...`. The reverted result is `FAIL (N)` with N = failures + errors,
-`PASS`, or `NOT RUN (REASON)`. The restored result is `PASS` or `FAIL (N)`. The line holds
+`PASS`, or `NOT RUN (REASON)`. The restored result is `PASS`, `FAIL (N)`, or `NOT RUN (REASON)` (exit 4 for a load
+error, exit 3 for 0 tests run or all skipped). The line holds
 only repo-relative paths, so it is safe for a public PR body. `to SHORT` is an addition to
 the brief's shape: a reviewer needs the ref to repeat the check.
 
@@ -326,6 +330,13 @@ uses invented identity `x@y.z`, and sets `HOME` to a temp dir. Skip if `git` is 
 | `test_one_skipped_subtest_beside_a_run_one_counts_as_run` | a skipped subtest next to a failing one: exit 0, `skipped` 0 |
 | `test_zero_tests_exit_3` | an empty test class: `NOT RUN (0 tests ran)` |
 | `test_unexpected_success_counts_as_failure` | an `expectedFailure` test that passes on the current tree: exit 4 |
+| `test_namespace_package_absent_at_ref_does_not_import_the_fix` | a namespace package added by the fix leaves no empty directory in the copy; a second portion from the real `src` gives exit 2 |
+| `test_file_replaced_by_directory_is_reverted` | a file at REF that is a directory now is a file again in the copy |
+| `test_mode_only_change_without_filemode_counts_no_lines` | with `core.fileMode=false`, a mode-only change counts `+0 -0` |
+| `test_binary_deleted_and_symlink_changes_are_reverted` | `(binary)`, `(+0 -1)` and a symlink target in the line; the copy holds the REF file and link and lacks the binary |
+| `test_origin_main_is_the_fallback_ref` | with no local `main`, the merge-base with `origin/main` is REF |
+| `test_child_exit_without_result_is_a_runner_error` | a test that calls `os._exit(1)`: `NOT RUN (load error: RunnerError: ...)`, exit 4 |
+| `test_load_tests_failure_names_the_exception` | a `load_tests` that raises: `NOT RUN (load error: ValueError: boom)` |
 
 `tests/test_test_discipline.py`:
 
@@ -354,6 +365,7 @@ return 0, run `tests.test_check_test_discriminates`, record the failing count, t
 | `docs/codex-acceptance.md` | new "Evidence (2026-10-30 ...)" section after the intro (line 6), section 5.3, plus a pointer that the older tables below are the 2.4.0 record |
 | `docs/test-discipline-spec.md` | this spec |
 | `README.md:544` | `docs/  # design plans, research and acceptance evidence (index: docs/README.md)` |
+| `README.md`, after the `docs/` line | `scripts/  # manifest sync; check-test-discriminates.py (make discriminates)` |
 
 ### 8.1 CONTRIBUTING section
 
@@ -426,7 +438,7 @@ does not check the PR line. The code differs from the sections above in these po
    `error: PATH is outside the repository`.
 8. **Lint scope.** `make lint`, `make format` and CI name `scripts/check-test-discriminates.py`
    alone; `scripts/sync_plugin_manifest.py` stays outside the linter.
-9. **Tests.** `tests/test_check_test_discriminates.py` has 29 tests: the 27 of section 7
+9. **Tests.** `tests/test_check_test_discriminates.py` has 36 tests: the 34 of section 7
    plus `test_identical_file_exits_2` and `test_not_a_git_tree_exits_2`.
    `test_shadowed_import_exits_2` uses a `sitecustomize.py` on `PYTHONPATH` that puts the
    real `src` first, in place of an installed `.pth`. `tests/test_test_discipline.py`
@@ -444,4 +456,7 @@ does not check the PR line. The code differs from the sections above in these po
     the rest), so a run started from a git hook cannot write into the real index. The
     import probe runs under `--timeout` in its own process group. `--log-dir` is made
     absolute before the reverted run changes directory. `skipped` counts methods in which
-    nothing ran, not skipped subtests.
+    nothing ran, not skipped subtests. Deletions in the copy run before restores and
+    remove the directories they empty, and the import guard checks every portion of a
+    namespace package. A mode-only change that git does not track counts `+0 -0`, and a
+    `load_tests` failure reports its exception line.

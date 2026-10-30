@@ -345,6 +345,13 @@ class DiscriminationScriptTests(unittest.TestCase):
             proc.stderr.strip(),
             "check-test-discriminates: error: ../outside.py is outside the repository",
         )
+        outside = str(self.tmp / "outside.py")
+        proc = self.run_script("--files", outside)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(
+            proc.stderr.strip(),
+            f"check-test-discriminates: error: {outside} is outside the repository",
+        )
 
     def test_relative_log_dir_is_taken_from_the_invocation_dir(self):
         self.fix_and_test()
@@ -396,6 +403,109 @@ class DiscriminationScriptTests(unittest.TestCase):
             "on the reverted tree",
         )
 
+    def test_namespace_package_absent_at_ref_does_not_import_the_fix(self):
+        self.write("src/nspkg/feature.py", FIX_CODE)
+        self.write(
+            "tests/test_demo.py", TEST_CODE.replace("from demo import", "from nspkg.feature import")
+        )
+        self.commit("namespace fix")
+        shadow = self.tmp / "shadow"
+        shadow.mkdir()
+        (shadow / "sitecustomize.py").write_text(
+            f"import sys\nsys.path.append({str(self.repo / 'src')!r})\n", encoding="utf-8"
+        )
+        self.env["PYTHONPATH"] = str(shadow)
+        proc = self.run_script("--keep")
+        kept = Path(proc.stderr.split("kept the reverted copy: ", 1)[1].splitlines()[0])
+        self.addCleanup(shutil.rmtree, kept.parent, True)
+        self.assertFalse((kept / "src/nspkg").exists())
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("error: package 'nspkg' imports from ", proc.stderr)
+
+    def test_file_replaced_by_directory_is_reverted(self):
+        self.git("checkout", "-q", "main")
+        self.write("src/demo/data", "base\n")
+        self.commit("data file")
+        self.base = self.git("rev-parse", "--short=7", "HEAD")
+        self.git("checkout", "-q", "-B", "feature")
+        self.git("rm", "-q", "src/demo/data")
+        self.write("src/demo/data/table.txt", "fix\n")
+        self.fix_and_test()
+        proc = self.run_script("--keep")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        kept = Path(proc.stderr.split("kept the reverted copy: ", 1)[1].splitlines()[0])
+        self.addCleanup(shutil.rmtree, kept.parent, True)
+        self.assertEqual((kept / "src/demo/data").read_text(), "base\n")
+
+    def test_mode_only_change_without_filemode_counts_no_lines(self):
+        self.fix_and_test()
+        self.git("config", "core.fileMode", "false")
+        (self.repo / "src/demo/__init__.py").chmod(0o755)
+        proc = self.run_script("--since", "HEAD", "--files", "src/demo/__init__.py", "--json")
+        files = json.loads(proc.stdout)["files"]
+        self.assertEqual(files[0]["added"], 0, proc.stdout)
+        self.assertEqual(files[0]["deleted"], 0)
+
+    def test_binary_deleted_and_symlink_changes_are_reverted(self):
+        self.git("checkout", "-q", "main")
+        self.write("src/demo/gone.py", "G = 1\n")
+        os.symlink("a", self.repo / "src/demo/link")
+        self.commit("more files")
+        self.base = self.git("rev-parse", "--short=7", "HEAD")
+        self.git("checkout", "-q", "-B", "feature")
+        self.fix_and_test()
+        (self.repo / "src/demo/gone.py").unlink()
+        (self.repo / "src/demo/link").unlink()
+        os.symlink("b", self.repo / "src/demo/link")
+        (self.repo / "src/demo/blob.bin").write_bytes(b"\0\1\2")
+        proc = self.run_script("--keep")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout.strip(),
+            self.line(
+                "src/demo/__init__.py (+1 -1) src/demo/blob.bin (binary) "
+                "src/demo/gone.py (+0 -1) src/demo/link (+1 -1)",
+                "FAIL (1)",
+            ),
+        )
+        kept = Path(proc.stderr.split("kept the reverted copy: ", 1)[1].splitlines()[0])
+        self.addCleanup(shutil.rmtree, kept.parent, True)
+        self.assertEqual((kept / "src/demo/gone.py").read_text(), "G = 1\n")
+        self.assertEqual(os.readlink(kept / "src/demo/link"), "a")
+        self.assertFalse((kept / "src/demo/blob.bin").exists())
+
+    def test_origin_main_is_the_fallback_ref(self):
+        self.fix_and_test()
+        base = self.git("rev-parse", "main")
+        self.git("update-ref", "refs/remotes/origin/main", base)
+        self.git("branch", "-q", "-D", "main")
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), self.line("src/demo/__init__.py (+1 -1)", "FAIL (1)"))
+
+    def test_child_exit_without_result_is_a_runner_error(self):
+        self.fix_and_test(
+            test=TEST_CODE.replace("self.assertEqual(value(), 2)", "import os; os._exit(1)")
+        )
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 4, proc.stderr)
+        self.assertIn(
+            "restored -> NOT RUN (load error: RunnerError: the test process exited 1 "
+            "without a result)",
+            proc.stdout,
+        )
+
+    def test_load_tests_failure_names_the_exception(self):
+        self.fix_and_test()
+        self.write(
+            "tests/test_broken.py",
+            "def load_tests(loader, tests, pattern):\n    raise ValueError('boom')\n",
+        )
+        self.commit("broken loader")
+        proc = self.run_script(target="tests.test_broken")
+        self.assertEqual(proc.returncode, 4, proc.stderr)
+        self.assertIn("NOT RUN (load error: ValueError: boom)", proc.stdout)
+
     # -- skips -----------------------------------------------------------------
 
     def test_skipped_subtests_on_current_tree_exit_3(self):
@@ -413,6 +523,7 @@ class DiscriminationScriptTests(unittest.TestCase):
         self.assertTrue(
             proc.stdout.strip().endswith("restored -> NOT RUN (all 1 tests skipped)"), proc.stdout
         )
+        self.assertIn("VACUOUS: " + TARGET + " did not run on the current tree", proc.stderr)
 
     def test_one_skipped_subtest_beside_a_run_one_counts_as_run(self):
         test = TEST_CODE.replace(
