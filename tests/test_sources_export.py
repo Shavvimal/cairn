@@ -226,7 +226,11 @@ class TestClaudeProvenance(_AdapterFixture):
         text = out.read_text(encoding="utf-8")
         placeholder = re.search(r"<!-- Add your notes here\.[^>]*-->", text)
         assert placeholder is not None
-        out.write_text(text.replace(placeholder[0], "Hand-written follow-up"), encoding="utf-8")
+        text = text.replace(placeholder[0], "Hand-written follow-up")
+        # A hand edit of the key does not survive: the re-render recomputes it.
+        text = text.replace("\nprovenance: tool\n", "\nprovenance: user\n", 1)
+        out.write_text(text, encoding="utf-8")
+        self.assertEqual(parse_frontmatter(text)["provenance"], "user")
         transcript = self._write(store, "Investigate the widget bug", "Now add a test")
         self.assertEqual(self._export(mod, transcript), out)
         text = out.read_text(encoding="utf-8")
