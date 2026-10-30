@@ -310,8 +310,9 @@ _ROUTINE_SCALARS = (
     "catch_up_days",
     "timeout_s",
     "budget_usd_per_day",
+    "stale_sources",
 )
-_ROUTINE_ARGV_FIELDS = ("prepare", "validate")
+_ROUTINE_ARGV_FIELDS = ("prepare", "validate", "terminal_hook")
 _ROUTINE_SET_FIELDS = (*_ROUTINE_SCALARS, "sources", *_ROUTINE_ARGV_FIELDS)
 _PROFILE_SET_FIELDS = ("base", "extra_args")
 _ROUTINE_KEY_HINT = (
@@ -374,7 +375,7 @@ def _coerce_routine(key: str, field: str, value: str) -> object:
         if value.lstrip().startswith("["):
             return _json_strings(key, value)
         return [item.strip() for item in value.split(",") if item.strip()]
-    if field == "prepare" and _is_null(value):
+    if field in ("prepare", "terminal_hook") and _is_null(value):
         return None
     if field in _ROUTINE_ARGV_FIELDS:
         return _json_strings(key, value)

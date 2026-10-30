@@ -409,6 +409,20 @@ class TestConfigSetRoutines(_ConfigFixture):
             config.get_config().routines["daily"].validate, ("pnpm", "validate", "{{DAY}}")
         )
 
+    def test_terminal_hook_and_stale_sources_set(self):
+        _quiet(admin._config_set, "routines.daily", json.dumps(ROUTINE))
+        rc, _, err = _quiet(admin._config_set, "routines.daily.terminal_hook", '["/bin/echo"]')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(config.get_config().routines["daily"].terminal_hook, ("/bin/echo",))
+        self.assertEqual(_quiet(admin._config_set, "routines.daily.terminal_hook", "null")[0], 0)
+        self.assertIsNone(config.get_config().routines["daily"].terminal_hook)
+        rc, _, err = _quiet(admin._config_set, "routines.daily.terminal_hook", '["notify"]')
+        self.assertEqual(rc, 1)
+        self.assertIn("terminal_hook[0] must be an absolute path after expanding ~", err)
+        rc, _, err = _quiet(admin._config_set, "routines.daily.stale_sources", "refuse")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(config.get_config().routines["daily"].stale_sources, "refuse")
+
     def test_outputs_key_set_and_null_removes(self):
         _quiet(admin._config_set, "routines.daily", json.dumps(ROUTINE))
         rc, _, err = _quiet(admin._config_set, "routines.daily.outputs.inbox_dir", "/tmp/inbox")
