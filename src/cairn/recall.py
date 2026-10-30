@@ -93,6 +93,11 @@ def main(argv: list[str] | None = None) -> int:
     digest_cmd.add_argument("--min-msgs", type=int, default=1)
     digest_cmd.add_argument("--include-subagents", action="store_true")
     digest_cmd.add_argument(
+        "--include-routine-sessions",
+        action="store_true",
+        help="keep sessions owned by a routine (owner routine:NAME); excluded by default",
+    )
+    digest_cmd.add_argument(
         "--out", help="output directory (default: $XDG_CACHE_HOME/cairn/digests/DATE)"
     )
     digest_cmd.add_argument("--json", action="store_true")

@@ -307,5 +307,83 @@ class TestProvenance(DigestFixture):
         self.assertIn(("unreadable-exports", "cairn claude export --all"), kinds)
 
 
+class TestRoutineExclusion(DigestFixture):
+    """Sessions owned by a routine stay out of the next digest (journal-verify spec 4.6)."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_doc("fixture.md", fixture_document())
+        self.messages = [
+            msg("user", "2026-03-28T08:00:00Z", "Write the journal."),
+            msg("assistant", "2026-03-28T08:01:00Z", "Done."),
+        ]
+
+    def owned(self, session_id: str, owner: str) -> None:
+        tail = (f'owner: "{owner}"',)
+        self.write_doc(f"{session_id}.md", document(session_id, self.messages, tail_extra=tail))
+
+    def test_routine_owner_excluded_by_default(self):
+        self.owned("run-0001", "routine:daily")
+        code, data, _, out = self.digest()
+        self.assertEqual(code, 0)
+        self.assertEqual([r["ref"] for r in data["sessions"]], ["claude:fixture-0001"])
+        self.assertEqual(data["excluded"], [{"ref": "claude:run-0001", "owner": "routine:daily"}])
+        self.assertFalse((out / "claude-run0001.md").exists())
+
+    def test_human_output_names_the_exclusion(self):
+        self.owned("run-0001", "routine:daily")
+        out = self.root / "human"
+        code, stdout, _ = self.cli("digest", DAY, "--all-projects", "--out", str(out))
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "1 routine sessions excluded; pass --include-routine-sessions to keep them\n",
+            stdout,
+        )
+
+    def test_include_routine_sessions_keeps_them(self):
+        self.owned("run-0001", "routine:daily")
+        code, data, _, out = self.digest("--include-routine-sessions")
+        self.assertEqual(code, 0)
+        refs = sorted(r["ref"] for r in data["sessions"])
+        self.assertEqual(refs, ["claude:fixture-0001", "claude:run-0001"])
+        self.assertEqual(data["excluded"], [])
+        self.assertTrue((out / "claude-run0001.md").is_file())
+
+    def test_other_owner_kept(self):
+        self.owned("review-0001", "review")
+        code, data, _, _ = self.digest()
+        self.assertEqual(code, 0)
+        self.assertIn("claude:review-0001", [r["ref"] for r in data["sessions"]])
+        self.assertEqual(data["excluded"], [])
+
+    def test_subagent_of_routine_session_excluded(self):
+        self.owned("run-0001", "routine:daily")
+        child = document(
+            "agent-0009",
+            self.messages,
+            doc_type="claude-subagent",
+            head_extra=("parent_session_id: run-0001",),
+        )
+        self.write_doc("child.md", child)
+        code, data, _, _ = self.digest("--include-subagents")
+        self.assertEqual(code, 0)
+        self.assertEqual([r["ref"] for r in data["sessions"]], ["claude:fixture-0001"])
+        self.assertEqual(
+            data["excluded"],
+            [
+                {"ref": "claude:agent-0009", "owner": "routine:daily"},
+                {"ref": "claude:run-0001", "owner": "routine:daily"},
+            ],
+        )
+
+    def test_only_routine_sessions_is_empty_day(self):
+        (self.root / "data" / "claude-code-sessions" / "fixture.md").unlink()
+        self.owned("run-0001", "routine:daily")
+        code, data, _, _ = self.digest()
+        self.assertEqual(code, 3)
+        self.assertEqual(data["sessions"], [])
+        self.assertEqual(data["excluded"], [{"ref": "claude:run-0001", "owner": "routine:daily"}])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -245,10 +245,10 @@ class TestSelection(DigestFixture):
 
 
 class TestRolesAndPeers(DigestFixture):
-    def peer(self, messages: list[dict], **kwargs) -> tuple[dict, dict[int, str], str]:
+    def peer(self, messages: list[dict], *args: str, **kwargs) -> tuple[dict, dict[int, str], str]:
         self.write_doc("peer.md", document("peer-0001", messages, source="codex", **kwargs),
                        "codex-sessions")  # fmt: skip
-        _, _, _, out = self.digest()
+        _, _, _, out = self.digest(*args)
         fm, body = split((out / "codex-peer0001.md").read_text())
         return fm, blocks(body), body
 
@@ -284,15 +284,35 @@ class TestRolesAndPeers(DigestFixture):
         self.assertEqual(sorted(kept), list(range(6)))
         self.assertEqual(kept[2], "First look.")
 
-    def test_owner_preamble_is_orphan_with_owner(self):
-        """``cairn invoke --owner`` with no caller: the routine's own peer session."""
+    def owner_preamble_messages(self) -> list[dict]:
         head = preamble("codex", None, 1, 1800, "routine:example-daily")
         self.assertIn("being invoked by routine:example-daily via cairn", head)
         messages = peer_messages()
         messages[0] = msg("user", "2026-03-28T11:00:00Z", head + "\n\n---\n\nWrite the journal.")
-        fm, _, _ = self.peer(messages)
+        return messages
+
+    def test_owner_preamble_is_orphan_with_owner(self):
+        """``cairn invoke --owner`` with no caller: the routine's own peer session, kept
+        only with ``--include-routine-sessions``."""
+        fm, _, _ = self.peer(self.owner_preamble_messages(), "--include-routine-sessions")
         self.assertEqual((fm["role"], fm["parent"], fm["orphan_peer"]), ("primary", "null", "true"))
         self.assertEqual(fm["owner"], "routine:example-daily")
+
+    def test_routine_owner_from_preamble_excluded(self):
+        """No ``owner`` key in front matter (exported before the publisher wrote it): the
+        preamble alone excludes the session by default."""
+        self.write_doc(
+            "peer.md",
+            document("peer-0001", self.owner_preamble_messages(), source="codex"),
+            "codex-sessions",
+        )
+        code, data, _, out = self.digest()
+        self.assertEqual(code, 3)
+        self.assertEqual(data["sessions"], [])
+        self.assertEqual(
+            data["excluded"], [{"ref": "codex:peer-0001", "owner": "routine:example-daily"}]
+        )
+        self.assertFalse((out / "codex-peer0001.md").exists())
 
     def test_subagents_skipped_unless_requested(self):
         messages = [msg("user", "2026-03-28T08:00:00Z", "child task"), msg("assistant", None, "ok")]

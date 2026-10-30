@@ -48,7 +48,7 @@ from .frames import (
 )
 from .frames import sha1_8 as frame_sha1_8
 from .frontmatter import _escape_scalar
-from .mutations import _LINK_REF, _bare_link
+from .mutations import _LINK_REF, ROUTINE_OWNER_PREFIX, _bare_link
 from .recall_gaps import coverage_note
 from .storage import atomic_write
 from .store import SessionRecord
@@ -82,6 +82,7 @@ class Digest:
     sidecar: str
     row: dict
     first_ts: datetime
+    owner: str | None = None  # front matter ``owner``, else the owner-form preamble
 
 
 def one_day(expr: str) -> tuple[datetime, datetime]:
@@ -371,7 +372,7 @@ def build(
         "truncated": {"frames_dropped": len(dropped), "chars_dropped": sum(map(len, dropped))},
     }
     markdown = front_matter(fields) + body + "\n"
-    return Digest(record, "", markdown, sidecar, row, first_ts)
+    return Digest(record, "", markdown, sidecar, row, first_ts, str(owner) if owner else None)
 
 
 def _stems(digests: list[Digest]) -> None:
@@ -398,6 +399,12 @@ def write(out: Path, digests: list[Digest]) -> None:
         digest.row["path"], digest.row["frames_path"] = str(markdown), str(frames)
 
 
+def _routine_owned(owner: object) -> bool:
+    """Whether ``owner`` names a routine (``routine:<name>``): its session is a routine's
+    own output and stays out of the next digest."""
+    return isinstance(owner, str) and owner.startswith(ROUTINE_OWNER_PREFIX)
+
+
 def run_digest(
     args: argparse.Namespace,
     records: list[SessionRecord],
@@ -414,6 +421,10 @@ def run_digest(
     returns the store gaps for the window (:func:`cairn.recall_gaps.coverage`); it adds
     a ``coverage`` key to the JSON and one stderr note when coverage is degraded. It
     never changes the exit code.
+
+    Sessions owned by a routine (``owner: routine:<name>``, in front matter or in the
+    owner-form preamble) and their subagents are left out and listed in ``excluded``,
+    unless ``--include-routine-sessions`` is given.
     """
     start, end = window
     out = Path(args.out).expanduser().absolute() if args.out else default_out(start)
@@ -426,9 +437,15 @@ def run_digest(
         if r.in_window(start, end)
         and (r.is_subagent or r.user_messages is None or r.user_messages >= args.min_msgs)
     ]
+    keep_routine = args.include_routine_sessions
     digests: list[Digest] = []
     skipped: list[dict[str, str]] = []
+    excluded: dict[str, str] = {}  # ref -> owner
     for record in sorted(selected, key=lambda r: r.reference):
+        owner = record.metadata.get("owner")
+        if not keep_routine and _routine_owned(owner):
+            excluded[record.reference] = str(owner)
+            continue
         try:
             digest = build(record, read_text(record.path), start, end, args.max_chars)
         except LegacyExport:
@@ -443,17 +460,31 @@ def run_digest(
             print(f"Warning: skipping {record.reference}: {exc}", file=sys.stderr)
             skipped.append({"ref": record.reference, "reason": "corrupt"})
             continue
-        if digest is not None:
-            digests.append(digest)
+        if digest is None:
+            continue
+        if not keep_routine and _routine_owned(digest.owner):
+            excluded[record.reference] = str(digest.owner)
+            continue
+        digests.append(digest)
+    if excluded:
+        kept = []
+        for digest in digests:
+            parent = digest.row["parent"]
+            if digest.row["role"] == "subagent" and parent in excluded:
+                excluded[digest.record.reference] = excluded[parent]
+            else:
+                kept.append(digest)
+        digests = kept
     if getattr(args, "provenance", None):
         digests = [d for d in digests if d.row["provenance"] in args.provenance]
     digests.sort(key=lambda d: (d.first_ts, d.record.reference))
     _stems(digests)
     write(out, digests)
     rows = [d.row for d in digests]
+    excluded_rows = [{"ref": ref, "owner": excluded[ref]} for ref in sorted(excluded)]
     cov = coverage(bool(digests), skipped) if coverage is not None else None
     if args.json:
-        payload: dict = {"sessions": rows, "skipped": skipped}
+        payload: dict = {"sessions": rows, "skipped": skipped, "excluded": excluded_rows}
         if cov is not None:
             payload["coverage"] = cov
         print(json.dumps(payload, indent=2))
@@ -465,6 +496,11 @@ def run_digest(
             print(
                 f"{row['ref']}  {row['role']}  {row['provenance']}  "
                 f"frames_today={row['frames_today']}  chars={row['chars']}{owner}{note}"
+            )
+        if excluded_rows:
+            print(
+                f"{len(excluded_rows)} routine sessions excluded; "
+                "pass --include-routine-sessions to keep them"
             )
         print(f"{len(rows)} sessions written to {out}")
     if cov is not None and (degraded := coverage_note(cov)):
@@ -479,6 +515,44 @@ def _stored_row(path: Path, ordinal: int) -> dict:
             if line.strip() and (row := json.loads(line)).get("ordinal") == ordinal:
                 return row
     raise ValueError(f"no row for ordinal {ordinal} in {path}")
+
+
+def load_sidecar(path: Path) -> dict[int, dict]:
+    """Every row of a ``.frames.jsonl`` sidecar by ordinal, read once."""
+    rows: dict[int, dict] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip() and isinstance(row := json.loads(line), dict):
+                ordinal = row.get("ordinal")
+                if isinstance(ordinal, int):
+                    rows[ordinal] = row
+    return rows
+
+
+def frame_unchanged(text: str, anchor: int, frame: Frame, row: dict) -> bool:
+    """Whether ``frame`` is the frame the sidecar ``row`` recorded: its marker sits at
+    ``anchor + offset`` with the stored length, the fresh walk puts it at the same
+    offset, and the body has the same ``sha1_8``."""
+    offset = row.get("offset")
+    found = None
+    if isinstance(offset, int) and offset >= 0:
+        found = MARKER.match(text, anchor + offset)
+    return (
+        found is not None
+        and int(found[1]) == row.get("length")
+        and frame.offset == offset
+        and frame_sha1_8(frame.body) == row.get("sha1_8")
+    )
+
+
+def changed_detail(ref: str, ordinal: int, row: dict, frame: Frame) -> str:
+    """The text that says a cited frame changed since the digest wrote ``row``."""
+    return (
+        f"{ref} frame {ordinal} changed since the digest "
+        f"(stored sha1_8 {row.get('sha1_8')}, offset {row.get('offset')}; "
+        f"now sha1_8 {frame_sha1_8(frame.body)}, offset {frame.offset}); "
+        "the export was re-rendered"
+    )
 
 
 def run_frame(args: argparse.Namespace, record: SessionRecord) -> int:
@@ -497,26 +571,13 @@ def run_frame(args: argparse.Namespace, record: SessionRecord) -> int:
         raise ValueError(f"ordinal {ordinal} out of range; session has {len(frames)} frames")
     stored = _stored_row(Path(args.frames).expanduser(), ordinal) if args.frames else None
     frame = frames[ordinal]
-    current = frame_sha1_8(frame.body)
     if stored is None:
         print(frame.body)
-        print(f"sha1_8 {current}", file=sys.stderr)
+        print(f"sha1_8 {frame_sha1_8(frame.body)}", file=sys.stderr)
         return 0
-    offset = stored.get("offset")
-    found = None
-    if isinstance(offset, int) and offset >= 0:
-        found = MARKER.match(text, anchor + offset)
-    same = (
-        found is not None
-        and int(found[1]) == stored.get("length")
-        and frame.offset == offset
-        and current == stored.get("sha1_8")
-    )
-    if not same:
+    if not frame_unchanged(text, anchor, frame, stored):
         print(
-            f"Warning: {record.reference} frame {ordinal} changed since the digest "
-            f"(stored sha1_8 {stored.get('sha1_8')}, offset {offset}; "
-            f"now sha1_8 {current}, offset {frame.offset}); the export was re-rendered",
+            f"Warning: {changed_detail(record.reference, ordinal, stored, frame)}",
             file=sys.stderr,
         )
     print(frame.body)
