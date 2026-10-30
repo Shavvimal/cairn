@@ -252,13 +252,14 @@ def scan_annotations(
     end = notes[1]
     if end >= len(bare) or bare[end] != DECISIONS_SECTION:
         return notes, None
-    decisions_end = _section_end(bare, end + 1, track_fences=True)
+    decisions_end = _section_end(bare, end + 1, track_fences=True, anchor=conversation_heading)
     if decisions_end is None:
         decisions_end = _section_end(bare, end + 1, track_fences=False)
     assert decisions_end is not None  # the scan without fences always ends
     return notes, (end, decisions_end)
 
 
+_TURN_MARKER = "<!-- cairn:turn "
 _LINE_BREAKS = "\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
 
 
@@ -301,12 +302,20 @@ def _scan_my_notes(
     return (start, len(lines)) if start is not None else None
 
 
-def _section_end(lines: list[str], begin: int, *, track_fences: bool) -> int | None:
+def _section_end(
+    lines: list[str], begin: int, *, track_fences: bool, anchor: str | None = None
+) -> int | None:
     """The index of the next ``## `` line at or after ``begin`` outside a fence, the
-    line count at the end, or ``None`` when a fence is left open to the end."""
+    line count at the end, or ``None`` when a fence is left open to the end.
+
+    An ``anchor`` heading followed by a blank line and a turn marker (the frame anchor)
+    ends the section even inside a fence, so a fence left open in the section cannot
+    pair with the conversation's fences and pull the conversation in."""
     fence = None
     for index in range(begin, len(lines)):
         line = lines[index]
+        if anchor is not None and line == anchor and _turn_follows(lines, index):
+            return index
         if track_fences:
             token = _fence_token(line)
             if token:
@@ -320,6 +329,11 @@ def _section_end(lines: list[str], begin: int, *, track_fences: bool) -> int | N
         if line.startswith("## "):
             return index
     return None if fence is not None else len(lines)
+
+
+def _turn_follows(lines: list[str], index: int) -> bool:
+    following = lines[index + 1 : index + 3]
+    return len(following) == 2 and following[0] == "" and following[1].startswith(_TURN_MARKER)
 
 
 def resolve_title(

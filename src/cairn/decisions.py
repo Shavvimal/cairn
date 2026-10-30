@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from .frontmatter import (
+    _LINE_BREAKS,
     DECISIONS_SECTION,
     FrontmatterParseError,
     _bare_line,
@@ -87,7 +88,7 @@ _DATE_RE: Final = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _NUMBER_RE: Final = re.compile(r"^[1-9][0-9]{0,8}$")
 MAX_ROW_NUMBER: Final = 999_999_999
 # Every character str.splitlines() breaks a line at; a claim turns each into a space.
-_LINE_BREAKS_RE: Final = re.compile("[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
+_LINE_BREAKS_RE: Final = re.compile(f"[{re.escape(_LINE_BREAKS)}]")
 _TURN_PREFIX: Final = "<!-- cairn:turn "
 
 KINDS: Final = ("decision", "fact", "commitment", "hunch")
@@ -303,6 +304,7 @@ def parse_table(lines: list[str], span: tuple[int, int]) -> tuple[list[DecisionR
     start, end = span
     rows: list[DecisionRow] = []
     problems: list[Problem] = []
+    numbered: set[int] = set()
     expect = "header"
     for index in range(start + 1, end):
         text = _bare_line(lines[index]).strip()
@@ -322,13 +324,16 @@ def parse_table(lines: list[str], span: tuple[int, int]) -> tuple[list[DecisionR
         parsed = parse_row(text, number)
         if isinstance(parsed, Problem):
             problems.append(parsed)
+            cells = _cells(text)
+            if cells and _NUMBER_RE.match(cells[0]):
+                numbered.add(int(cells[0]))  # a row with a bad cell still holds its number
         elif any(row.number == parsed.number for row in rows):
             problems.append(Problem(number, f"duplicate row #{parsed.number}"))
         else:
             rows.append(parsed)
     if expect != "rows":
         return [], [Problem(start + 1, "the section has no table header and separator")]
-    numbers = {row.number for row in rows}
+    numbers = {row.number for row in rows} | numbered
     kept = []
     for row in rows:
         target = row.superseded_by
@@ -398,6 +403,9 @@ def rewrite(
     old = {row.number: row for row in rows}
     if old.keys() - set(numbers):
         raise DecisionError("an edit of ## Decisions cannot remove a row")
+    for row in new_rows:
+        if row.number not in old or row != old[row.number]:
+            _check_reads_back(row)
     newline = _ending(lines[notes[0]]) or "\n"
     for row in new_rows:
         before = old.get(row.number)
@@ -425,6 +433,15 @@ def rewrite(
         block.append(newline)  # a blank line before the heading that follows
     lines[position:position] = block
     return "".join(lines), new_rows
+
+
+def _check_reads_back(row: DecisionRow) -> None:
+    """Refuse a row whose written line would not parse back to the same row."""
+    back = parse_row(render_row(row))
+    if isinstance(back, Problem):
+        raise DecisionError(f"row #{row.number} would not read back: {back.reason}")
+    if back != row:
+        raise DecisionError(f"row #{row.number} would not read back as written")
 
 
 @dataclass(frozen=True)

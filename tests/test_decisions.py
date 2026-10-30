@@ -16,6 +16,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -177,6 +178,56 @@ class TestGrammar(unittest.TestCase):
         self.assertEqual([r.number for r in rows], [2])
         self.assertEqual(problems, [Problem(4, "row #1 is superseded by #7, which does not exist")])
 
+    def test_bad_row_does_not_make_its_superseded_row_dangle(self):
+        lines = [
+            "## Decisions",
+            HEADER,
+            SEPARATOR,
+            "| 1 | ~~old~~ superseded by #2 | decision | medium | 2026-10-29 |  |  |",
+            "| 2 | new | bet | medium | 2026-10-30 |  | supersedes #1 |",
+        ]
+        rows, problems = parse_table(lines, (0, len(lines)))
+        self.assertEqual([(r.number, r.state) for r in rows], [(1, "superseded")])
+        reason = "unknown kind 'bet'; use one of decision, fact, commitment, hunch"
+        self.assertEqual(problems, [Problem(5, reason)])
+
+    def test_header_and_separator_problems_reject_the_whole_table(self):
+        row = "| 1 | x | fact | high | 2026-10-30 |  |  |"
+        for lines, problem in (
+            (
+                ["## Decisions", "", "| # | claim |", SEPARATOR, row],
+                Problem(3, "expected the table header"),
+            ),
+            (
+                ["## Decisions", HEADER, "|---|---|", row],
+                Problem(3, "expected the table separator"),
+            ),
+            (["## Decisions", "", "prose only"], Problem(3, "expected the table header")),
+            (["## Decisions", ""], Problem(1, "the section has no table header and separator")),
+            (["## Decisions", HEADER], Problem(1, "the section has no table header and separator")),
+        ):
+            with self.subTest(lines=lines):
+                self.assertEqual(parse_table(lines, (0, len(lines))), ([], [problem]))
+
+    def test_rewrite_refuses_removed_duplicate_or_unreadable_rows(self):
+        text = doc()
+        for edit, message in (
+            (lambda rows: rows[:-1], "an edit of ## Decisions cannot remove a row"),
+            (lambda rows: [*rows, rows[0]], "an edit of ## Decisions must keep row numbers unique"),
+            (
+                lambda rows: [*rows, DecisionRow(4, "x ", "fact", "low", "2026-10-30")],
+                "row #4 would not read back as written",
+            ),
+            (
+                lambda rows: [*rows, DecisionRow(4, "x", "fact", "low", "soon")],
+                "row #4 would not read back: since must be a date YYYY-MM-DD, got 'soon'",
+            ),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaises(decisions.DecisionError) as caught:
+                    rewrite(text, edit)
+                self.assertEqual(str(caught.exception), message)
+
     def test_lenient_whitespace_strict_values(self):
         lenient = "  |1|  Keep it   |decision|high|2026-10-30||  |  "
         self.assertEqual(parse_row(lenient), self.row(number=1))
@@ -251,6 +302,16 @@ class TestSections(unittest.TestCase):
         again = document(SID, messages(), notes=block)
         self.assertEqual(again, doc(rows=row))
         self.assertEqual(extract_annotations(again), block)
+
+    def test_unclosed_fence_in_decisions_stops_at_the_frame_anchor(self):
+        fenced = [msg("user", "2026-10-28T09:00:00Z", "```md\n## Inside a code block\n```")]
+        rows = f"{WORKED_ROWS}\n```\nleft open"
+        text = document(SID, fenced, notes=notes_with(rows))
+        lines = text.splitlines()
+        _notes, section = scan_annotations(lines)
+        assert section is not None
+        self.assertEqual(lines[section[1]], "## Conversation")
+        self.assertEqual(extract_annotations(text), notes_with(rows))
 
     def test_extract_my_notes_section_output_unchanged(self):
         text = doc()
@@ -517,6 +578,18 @@ class TestSupersede(DecisionsFixture):
         code, _, err = self.run_verb("supersede", "3", "y", "--session-id", SID)
         self.assertEqual((code, err), (1, "Error: row #3 is already struck (superseded by #4)\n"))
 
+    def test_quiet_supersede_and_a_strike_without_marker(self):
+        rows = WORKED_ROWS.replace("| 2 | The digest", "| 2 | ~~The digest").replace(
+            "fixed export |", "fixed export~~ |"
+        )
+        path = self.write_doc("a.md", doc(rows=rows))
+        code, _, err = self.run_verb("supersede", "2", "x", "--session-id", SID)
+        self.assertEqual((code, err), (1, "Error: row #2 is already struck (no marker)\n"))
+        self.assertEqual(
+            self.run_verb("supersede", "3", "x", "-q", "--session-id", SID), (0, "", "")
+        )
+        self.assertEqual(decisions.parse(path.read_text())[-1].supersedes, 3)
+
     def test_inherits_kind_not_revisit_by(self):
         path = self.write_doc("a.md", doc())
         code, out, _ = self.run_verb("supersede", "2", "Still true", "--json", "--session-id", SID)
@@ -629,6 +702,37 @@ class TestRecallDecisions(DecisionsFixture):
             },
         )
         self.assertIn("claude:bbbbbbbb-0002#1", [r["ref"] for r in data["decisions"]])
+
+    def test_project_and_source_filters(self):
+        def refs(*argv: str) -> list[str]:
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                self.assertEqual(recall.main(["decisions", "--json", "--include-struck", *argv]), 0)
+            return sorted({r["session"] for r in json.loads(out.getvalue())["decisions"]})
+
+        self.assertEqual(refs("--project", "demo"), [f"claude:{SID}"])
+        self.assertEqual(refs("--project", "elsewhere"), [])
+        self.assertEqual(refs("--all-projects", "--source", "codex"), [])
+        self.assertEqual(refs("--all-projects", "--source", "claude"), [f"claude:{SID}"])
+
+    def test_unreadable_document_is_a_problem(self):
+        missing = self.folder / "gone.md"
+        undecodable = self.write_doc("bad.md", "## My Notes\n")
+        undecodable.write_bytes(b"## My Notes\n\xff\n")
+        records: Any = [
+            SimpleNamespace(path=missing, source="claude", reference="claude:gone"),
+            SimpleNamespace(path=undecodable, source="claude", reference="claude:bad"),
+        ]
+        err = io.StringIO()
+        with redirect_stderr(err):
+            found, problems = decisions.collect(records)
+        self.assertEqual(found, [])
+        self.assertEqual(
+            [(p["path"], p["line"]) for p in problems],
+            [(str(missing), None), (str(undecodable), None)],
+        )
+        self.assertIn("utf-8", problems[1]["reason"])
+        self.assertEqual(err.getvalue().count("Warning: "), 2)
 
     def test_oversized_numbers_are_problems_not_crashes(self):
         big = "9" * 4301
