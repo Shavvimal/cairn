@@ -8,11 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.19.1]
 
 ### Added
-- `skills/<name>/routing-eval.jsonl` for all seven skills: 74 paraphrased user intents, each
+- `skills/<name>/routing-eval.jsonl` for all seven skills: 77 paraphrased user intents, each
   naming the skill it should reach, `null` for "no skill", and an optional `ambiguous_with`.
 - `tests/test_skill_routing.py`: checks that each intent matches the quoted triggers of its
-  skill and of no other skill unless declared, rejects an intent that copies a trigger, and
-  prints the overlap table across skills. It checks trigger text, not the harness router.
+  skill and of no other skill unless declared, and rejects an intent that copies a trigger.
+  A failure message includes the overlap table across skills. It checks trigger text, not the harness router.
 - CONTRIBUTING: "Changing a skill description".
 - `docs/skill-routing-eval-spec.md`.
 
