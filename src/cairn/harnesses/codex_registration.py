@@ -16,6 +16,7 @@ import json
 import os
 import shlex
 import sys
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -161,6 +162,10 @@ def _read_receipt(path: Path) -> dict:
     return receipt
 
 
+def _legacy_commands(state: _State) -> set[str]:
+    return set(state.legacy.get("commands", []))
+
+
 def _identity(entry: dict) -> tuple:
     return entry.get("kind"), entry.get("key"), entry.get("sha256")
 
@@ -293,7 +298,9 @@ def _uninstall(*, dry_run: bool) -> list[str]:
         for index, group in enumerate(groups):
             if not _owned_handlers(group, state.commands):
                 retained.append(group)
-            elif not group_entries:  # legacy v1 ownership: by exact command only
+            elif not group_entries or _owned_handlers(group, _legacy_commands(state)):
+                # v1 ownership, by exact command, while the v1 file exists (also beside the
+                # prepared receipt of an interrupted migration)
                 handlers = [h for h in _handlers(group) if h.get("command") not in state.commands]
                 if handlers:
                     retained.append({**group, "hooks": handlers})
@@ -405,6 +412,7 @@ def _plan_install(
             owned == len(_handlers(group))
             and state.entries("hooks_json_group")
             and trust.canonical_sha(group) not in group_shas
+            and not _owned_handlers(group, _legacy_commands(state))
         ):
             raise ValueError(
                 f"SessionEnd group {position} in {state.hooks_path} changed since cairn wrote "
@@ -542,7 +550,13 @@ def _plan_table(state: _State, plan: _Plan, owned: list[dict]) -> None:
     plan.table_entry = entry
 
 
-def _install(config: CairnConfig, *, dry_run: bool, want_trust: bool) -> str:
+def _install(
+    config: CairnConfig,
+    *,
+    dry_run: bool,
+    want_trust: bool,
+    before_write: Callable[[], None] | None = None,
+) -> str:
     command = _command(config)
     version, reason = trust.codex_version() if want_trust else (None, "")
     hooks_path = _paths()[0]
@@ -551,6 +565,8 @@ def _install(config: CairnConfig, *, dry_run: bool, want_trust: bool) -> str:
         plan = _plan_install(state, command, version, reason, want_trust)
         if dry_run:
             return "\n".join(plan.lines + ([plan.skip] if plan.skip else []))
+        if before_write is not None:
+            before_write()  # the plan passed every refusal check, so writing starts here
         group_entry = {
             "kind": "hooks_json_group",
             "event": EVENT,
@@ -668,8 +684,13 @@ def configure(
     remove: bool = False,
     dry_run: bool = False,
     trust_hook: bool = True,
+    before_write: Callable[[], None] | None = None,
 ) -> str:
-    """Install (or with ``remove``, uninstall) the fallback group and its trust table."""
+    """Install (or with ``remove``, uninstall) the fallback group and its trust table.
+
+    ``before_write`` runs once the install is known to go ahead, before cairn's first
+    write: ``hook install`` writes the launcher there, so a refused install writes nothing.
+    """
     if remove:
         plan = _uninstall(dry_run=dry_run)
         if dry_run:
@@ -680,13 +701,15 @@ def configure(
         h.get("pluginId") == "cairn@cairn" and h.get("eventName") == "sessionEnd" for h in observed
     )
     if bundled:
+        if before_write is not None and not dry_run:
+            before_write()
         plan = _uninstall(dry_run=dry_run)
         message = (
             "Bundled Codex SessionEnd discovered; no fallback registered. Review trust in /hooks."
         )
         return "\n".join([*plan, message]) if dry_run else message
     assert config is not None
-    return _install(config, dry_run=dry_run, want_trust=trust_hook)
+    return _install(config, dry_run=dry_run, want_trust=trust_hook, before_write=before_write)
 
 
 def trust_report() -> dict:

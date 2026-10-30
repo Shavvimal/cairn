@@ -428,6 +428,50 @@ class TestInstall(TrustFixture):
                 data["hooks"]["SessionEnd"][0] = original
                 self.hooks_path.write_text(json.dumps(data))
 
+    def test_interrupted_v1_migration_can_finish_or_be_removed(self):
+        legacy = self.root / "xdg/cairn/codex-hook-registration.json"
+        old = {"hooks": [{"type": "command", "command": "echo old", "timeout": 3}]}
+        for finish in ("install", "uninstall"):
+            with self.subTest(finish=finish):
+                legacy.parent.mkdir(parents=True, exist_ok=True)
+                legacy.write_text(
+                    json.dumps({"path": str(self.hooks_path), "commands": ["echo old"]})
+                )
+                self.hooks_path.write_text(json.dumps({"hooks": {"SessionEnd": [old]}}))
+                self.receipt.unlink(missing_ok=True)
+                with (
+                    patch.object(trust, "write_json", side_effect=OSError("crash")),
+                    self.assertRaises(OSError),
+                ):
+                    self.run_configure()
+                self.assertEqual(self.receipt_data()["status"], "prepared")
+                if finish == "install":
+                    self.run_configure()
+                    groups = json.loads(self.hooks_path.read_text())["hooks"]["SessionEnd"]
+                    self.assertEqual([g["hooks"][0]["command"] for g in groups], [self.command()])
+                else:
+                    _, warning = self.run_configure(remove=True)
+                    self.assertNotIn("changed since cairn wrote it", warning)
+                    groups = json.loads(self.hooks_path.read_text())["hooks"]["SessionEnd"]
+                    self.assertEqual(groups, [])
+                self.assertFalse(legacy.exists())
+
+    def test_refused_install_leaves_the_launchers_alone(self):
+        self.run_configure()
+        data = json.loads(self.hooks_path.read_text())
+        data["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] = 99
+        self.hooks_path.write_text(json.dumps(data))
+        for launcher in hooks.launcher_paths():
+            launcher.parent.mkdir(parents=True, exist_ok=True)
+            launcher.write_text("# before\n")
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            code = hooks.main(["install", "--harness", "codex"])
+        self.assertEqual(code, 1)
+        self.assertIn("changed since cairn wrote it; cairn changed nothing", err.getvalue())
+        for launcher in hooks.launcher_paths():
+            self.assertEqual(launcher.read_text(), "# before\n")
+
     def test_concurrent_change_while_staging_refuses(self):
         self.toml.write_text("[tui]\ntheme = 'dark'\n")
         stage = trust._stage

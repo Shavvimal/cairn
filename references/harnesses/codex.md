@@ -121,8 +121,9 @@ Files and safety rules:
   `enabled = false`) is left alone, with a warning.
 - After the write, cairn asks Codex (`hooks/list`) once more. If Codex lists the hook with
   a `trustStatus` other than `trusted`, cairn removes the table it wrote and prints the
-  `/hooks` step. If `hooks/list` fails, or does not list the hook or its status, the table
-  stays and the success line says so.
+  `/hooks` step. If `hooks/list` fails, the table stays and the success line ends with
+  `(Codex did not answer hooks/list: <reason>)`. If it does not list the hook or gives no
+  status, the table stays and the success line has no note.
 - Reinstall replaces cairn's group only while its sha256 equals the receipt's. If you
   edited the group (timeout, matcher, status message), install stops and changes nothing:
   restore or remove the group, then run it again. A group whose command you changed is no

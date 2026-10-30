@@ -482,12 +482,19 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("--no-trust applies to --harness codex")
             if args.dry_run:
                 print("\n".join(launcher_plan(config)))
-            else:
+            elif args.harness != "codex":
                 print(install_launcher(config))
             if args.harness == "codex":
                 from .harnesses.codex_registration import configure
 
-                print(configure(config, dry_run=args.dry_run, trust_hook=not args.no_trust))
+                # The launcher is written only once the registration passed its checks.
+                message = configure(
+                    config,
+                    dry_run=args.dry_run,
+                    trust_hook=not args.no_trust,
+                    before_write=lambda: print(install_launcher(config)),
+                )
+                print(message)
             elif args.harness == "antigravity":
                 from .harnesses import antigravity_registration
 

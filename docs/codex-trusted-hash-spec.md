@@ -459,3 +459,9 @@ the sections above in these points:
 19. A receipt that is not a JSON object, has another `receipt_version`, or has an entry
     without a known `kind`, a `sha256` or (for a table) a `key` is a `ValueError` that
     names the receipt and asks to move it aside (exit 1).
+20. While the v1 file exists, its commands keep owning their groups by exact command, also
+    beside a v2 receipt, so a migration interrupted after the prepared receipt can still be
+    completed or uninstalled.
+21. `hook install --harness codex` writes the launcher only after the registration plan
+    passed its checks (and before the bundled-hook removal), so a refused install, or an
+    `inspect_hooks` failure, writes no file.
