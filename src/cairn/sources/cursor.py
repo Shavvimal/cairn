@@ -39,6 +39,7 @@ from ..schema import SessionData
 from ..store import is_current
 from ..timeutil import today_str
 from .base import ConversationSource
+from .spec_targets import SPEC_TARGETS
 
 COLLECTION = "cursor-sessions"
 _config = get_config()
@@ -359,6 +360,7 @@ def fetch_bubbles(
 class CursorSource(ConversationSource):
     name = "cursor-sessions"
     version = "2.0.0"
+    spec_target = SPEC_TARGETS["cursor"]
     output_dir = OUTPUT_DIR
     session_type = "cursor-session"
     collection = "cursor-sessions"

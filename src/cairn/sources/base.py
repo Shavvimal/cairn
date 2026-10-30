@@ -34,6 +34,7 @@ from ..rendering import render_conversation, strip_lone_surrogates
 from ..schema import Message, SessionData
 from ..storage import atomic_write, document_lock, lock_path, locked
 from ..store import SessionRecord, metadata_lines, native_id_of, record_from_frontmatter
+from .spec_targets import SpecTarget
 
 
 class ConversationSource(ABC):
@@ -57,6 +58,8 @@ class ConversationSource(ABC):
     preserved_note: str = "syncs"
     # Chat transcript boundary; meetings have native notes before My Notes instead.
     conversation_heading: str | None = "## Conversation"
+    # The dated host version the parser's record shapes were checked against.
+    spec_target: SpecTarget | None = None
 
     # ====================================================================
     # Overridable per source
@@ -302,6 +305,7 @@ class ConversationSource(ABC):
                 markdown = strip_lone_surrogates(self.render_document(data, existing_fm, my_notes))
                 metadata = "\n".join(
                     metadata_lines(self.source_name, source_id, data)
+                    + self.exporter_lines()
                     + provenance.head_lines(self.source_name, markdown, data)
                 )
                 markdown = markdown.replace("\nstatus:", "\n" + metadata + "\nstatus:", 1)
@@ -329,6 +333,17 @@ class ConversationSource(ABC):
                 # identity is this write's, not a concurrent annotation's.
                 self.catalog.put(output_file, rendered_fm)
         return output_file
+
+    def exporter_lines(self) -> list[str]:
+        """The parser stamp: adapter version and spec-target date, two flat keys.
+
+        Regenerated on every export like the other metadata lines. A nested mapping
+        would not parse (the frontmatter parser and the catalog take flat values).
+        """
+        lines = [f'exporter_version: "{fm_mod._escape_scalar(self.version)}"']
+        if self.spec_target is not None:
+            lines.append(f'exporter_spec_target: "{self.spec_target.checked}"')
+        return lines
 
     def all_sessions(self) -> list[tuple[Path, dict]]:
         return listing.get_session_files(self.output_dir, self.session_type, self.catalog)

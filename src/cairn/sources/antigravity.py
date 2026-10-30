@@ -58,6 +58,7 @@ from ..schema import SessionData, SubagentRef
 from ..store import file_revision, is_current
 from ..timeutil import today_str
 from .base import ConversationSource
+from .spec_targets import SPEC_TARGETS
 
 COLLECTION = "antigravity-sessions"
 _config = get_config()
@@ -496,6 +497,7 @@ def _subagent_index(refs: list[SubagentRef]) -> list[str]:
 class AntigravitySource(ConversationSource):
     name = "antigravity-sessions"
     version = "2.0.0"
+    spec_target = SPEC_TARGETS["antigravity"]
     output_dir = OUTPUT_DIR
     session_type = "antigravity-session"
     subagent_type = "antigravity-subagent"

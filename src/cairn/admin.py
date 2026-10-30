@@ -1086,6 +1086,18 @@ def _check_antigravity_permissions(config: CairnConfig) -> None:
     print(f"       deny:  {', '.join(report['deny']) or '(none)'}")
 
 
+def _check_exporters(config: CairnConfig) -> None:
+    """Warn-only exporter lines: each enabled adapter's spec target."""
+    from .registry import BY_NAME
+    from .sources.spec_targets import SPEC_TARGETS
+
+    for source, target in SPEC_TARGETS.items():
+        coll = config.collections.get(BY_NAME[source].collection)
+        if coll is None or not coll.sync.enabled:
+            continue
+        _ok(f"exporter [{source}]", f"adapter {target.adapter_version}, {target.describe()}")
+
+
 def doctor_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cairn doctor", description="Check the cairn install")
     parser.add_argument(
@@ -1192,6 +1204,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
     if config is not None:
         _check_invoke(config)
         _check_routines(config)
+        _check_exporters(config)
 
     # embeddings: index-wide counts from the single 'qmd status' probe above.
     # Zero vectors leaves keyword (BM25) search working; only semantic search waits.

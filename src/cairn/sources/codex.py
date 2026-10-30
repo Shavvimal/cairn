@@ -41,6 +41,7 @@ from ..timeutil import today_str
 from .base import ConversationSource
 from .codex_lineage import Lineage, rollout_lineage, spawn_fields
 from .codex_replay import LIVE_CHILD_WINDOW_S, REPLAY_HEURISTIC_VERSION, ReplayCut
+from .spec_targets import SPEC_TARGETS
 
 COLLECTION = "codex-sessions"
 _config = get_config()
@@ -566,6 +567,7 @@ def _subagent_index(refs: list[SubagentRef]) -> list[str]:
 class CodexSource(ConversationSource):
     name = "codex-sessions"
     version = "2.0.0"
+    spec_target = SPEC_TARGETS["codex"]
     output_dir = OUTPUT_DIR
     session_type = "codex-session"
     subagent_type = "codex-subagent"
