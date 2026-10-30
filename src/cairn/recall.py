@@ -49,9 +49,8 @@ def refresh(sources: list[str] | None = None) -> bool:
 
 
 def _owner(fm: dict) -> str | None:
-    """The stored ``owner`` label, or ``None``."""
-    owner = fm.get("owner")
-    return str(owner) if owner else None
+    """The stored ``owner`` label, or ``None`` (blank and ``null`` included)."""
+    return provenance.owner_of(fm)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -323,7 +323,7 @@ def build(
         record.metadata, record.source, record.path, peer_body=opens_with_preamble(frames)
     )
     fields.append(("provenance", value))
-    owner = record.metadata.get("owner") or family.owner
+    owner = provenance_mod.owner_of(record.metadata) or family.owner
     if owner:
         fields.append(("owner", str(owner)))
     fields += [

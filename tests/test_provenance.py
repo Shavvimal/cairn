@@ -80,6 +80,14 @@ class OnRead(unittest.TestCase):
                 fm = {**base, **extra}
                 self.assertEqual(provenance.effective(fm, "codex", "/tmp/x.md"), expected)
 
+    def test_null_or_blank_owner_is_no_owner(self):
+        for owner in ("null", "  ", "", ["x"]):
+            with self.subTest(owner=owner):
+                fm = {"type": "codex-session", "owner": owner}
+                self.assertIsNone(provenance.owner_of(fm))
+                self.assertEqual(provenance.effective(fm, "codex", "/tmp/x.md"), "tool")
+        self.assertEqual(provenance.owner_of({"owner": " routine:x "}), "routine:x")
+
     def test_invalid_stored_value_warns_and_derives(self):
         fm = {"type": "claude-session", "provenance": "robot", "owner": "routine:x"}
         err = io.StringIO()

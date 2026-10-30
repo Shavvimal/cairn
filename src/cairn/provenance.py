@@ -7,7 +7,8 @@ One value per document, from a fixed set of four labels (no order, no rank):
 - ``imported``: mirrored from another application (a Granola meeting).
 - ``user``: a person wrote it by hand.
 
-The key sits in the exporter-owned head, directly before ``status:``, so every
+The key sits in the exporter-owned head (directly before ``status:`` in a session
+document, before ``title:`` in an exchange document), so every
 mutation keeps it byte for byte and every re-render recomputes it. Documents written
 before the key existed get a value derived from their front matter on read
 (:func:`effective`); nothing is backfilled.
@@ -67,13 +68,25 @@ def head_lines(source: str, markdown: str, data: SessionData) -> list[str]:
     return [f"{KEY}: {at_export(source, doc_type, messages_of(data))}"]
 
 
+def owner_of(fm: dict) -> str | None:
+    """The stored ``owner`` label, or ``None`` for an absent, blank or ``null`` one.
+
+    The same test ``preserved_tail`` applies before it carries the key forward
+    (``src/cairn/frontmatter.py``): the parser reads an unquoted ``null`` as a string.
+    """
+    owner = fm.get("owner")
+    if isinstance(owner, str) and owner.strip() and owner.strip() != "null":
+        return owner.strip()
+    return None
+
+
 def derive(fm: dict, source: str) -> str:
     """The value of a document without a valid stored key, from front matter only."""
     if _is_subagent_type(source, fm.get("type")):
         return "agent"
     if source == "granola":
         return "imported"
-    if fm.get("owner"):
+    if owner_of(fm):
         return "agent"
     links = fm.get("links")
     entries = [_bare_link(item) for item in links] if isinstance(links, list) else []

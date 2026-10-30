@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -158,6 +159,37 @@ class TestRecallList(_RecallFixture):
         code, out = self._run([*argv, "agent", "--provenance", "tool"])
         self.assertEqual(len(json.loads(out)), 1)
 
+    def _set_owner(self, line: str) -> None:
+        root = Path(json.loads(Path(os.environ["CAIRN_CONFIG"]).read_text())["data_root"])
+        (doc,) = (root / "claude-code-sessions").rglob("*.md")
+        text = re.sub(r"\nowner: [^\n]*", "", doc.read_text(encoding="utf-8"), count=1)
+        doc.write_text(text.replace("\nstatus: active\n", f"\nstatus: active\n{line}\n", 1))
+
+    def test_owner_in_text_and_json(self):
+        self._set_owner("owner: routine:example-daily")
+        code, out = self._run(["list", "today", "--all-projects", "--json"])
+        self.assertEqual(code, 0)
+        row = json.loads(out)[0]
+        # The stored key wins over the owner: the export wrote ``tool``.
+        self.assertEqual((row["provenance"], row["owner"]), ("tool", "routine:example-daily"))
+        code, out = self._run(["list", "today", "--all-projects"])
+        self.assertEqual(code, 0)
+        self.assertIn("[messages] tool owner=routine:example-daily", out)
+        code, out = self._run(["expand", "abc12345", "--all-projects"])
+        self.assertEqual(code, 0)
+        self.assertIn("\nProvenance: tool (owner routine:example-daily)\n", out)
+
+    def test_null_or_blank_owner_is_no_owner(self):
+        for line in ("owner: null", 'owner: "  "'):
+            with self.subTest(line=line):
+                self._set_owner(line)
+                code, out = self._run(["list", "today", "--all-projects", "--json"])
+                self.assertEqual(code, 0)
+                self.assertIsNone(json.loads(out)[0]["owner"])
+                code, out = self._run(["list", "today", "--all-projects"])
+                self.assertEqual(code, 0)
+                self.assertNotIn("owner=", out)
+
     def test_bad_provenance_exits_2(self):
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit) as raised:
@@ -214,6 +246,21 @@ class TestRecallSubagents(_RecallFixture):
         code, out = self._run(["list", "today", "--all-projects", "--include-subagents"])
         self.assertIn("agent-c0ffee", out)
         self.assertIn("(subagent of abc12345)", out)
+
+    def test_subagent_export_is_agent(self):
+        root = Path(json.loads(Path(os.environ["CAIRN_CONFIG"]).read_text())["data_root"])
+        (doc,) = (root / "claude-code-sessions").rglob("*c0ffee*.md")
+        lines = doc.read_text(encoding="utf-8").split("\n")
+        self.assertEqual(lines[lines.index("status: active") - 1], "provenance: agent")
+
+    def test_provenance_agent_needs_include_subagents(self):
+        argv = ["list", "today", "--all-projects", "--json", "--provenance", "agent"]
+        code, out = self._run(argv)
+        self.assertEqual((code, json.loads(out)), (0, []))
+        code, out = self._run([*argv, "--include-subagents"])
+        rows = json.loads(out)
+        self.assertEqual([(r["session_id"], r["provenance"]) for r in rows],
+                         [("agent-c0ffee", "agent")])  # fmt: skip
 
 
 class TestRecallExpand(_RecallFixture):
