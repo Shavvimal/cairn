@@ -22,10 +22,14 @@ Start from the `example-daily` entry that `cairn config init` writes, or create 
 ```bash
 cairn config set routines.daily '{"peer": "claude", "prompt_file": "~/projects/site/prompts/daily.md", "cd": "~/projects/site", "profile": "scheduled", "at": "05:20", "validate": ["true"]}'
 cairn config set routines.daily.sources claude,codex
-cairn config set routines.daily.prepare '["cairn", "recall", "digest", "{{DAY}}", "--all-projects", "--min-msgs", "1", "--json", "--out", "{{DIGEST_DIR}}"]'
-cairn config set routines.daily.validate '["pnpm", "--dir", "~/projects/site", "validate", "--day", "{{DAY}}"]'
+cairn config set routines.daily.prepare '["cairn", "recall", "digest", "{{DAY}}", "--all-projects", "--json", "--out", "{{DIGEST_DIR}}"]'
+cairn config set routines.daily.validate '["cairn", "recall", "verify", "{{JOURNAL_DIR}}/{{DAY}}.md", "--digest", "{{DIGEST_DIR}}"]'
 cairn config set routines.daily.outputs.inbox_dir "~/projects/site/inbox"
 ```
+
+The `prepare` above writes the day's digest; the `validate` checks the journal's citations
+against it (section 2, "Journal citations"). Any other argv works as `validate`, for example
+`["pnpm", "--dir", "~/projects/site", "validate", "--day", "{{DAY}}"]`.
 
 | Field | Required | Rule |
 | ----- | -------- | ---- |
@@ -48,6 +52,9 @@ A scheduled peer usually needs a config profile with its own permissions. Claude
 ```bash
 cairn config set invoke.claude.profiles.scheduled '{"base": "edit", "extra_args": ["--permission-mode", "dontAsk", "--allowedTools", "Read,Glob,Grep,Edit,Write,Bash(pnpm:*)", "--disallowedTools", "WebFetch,WebSearch,Bash(pnpm publish:*),Bash(git push:*)", "--add-dir", "{{JOURNAL_DIR}}"]}'
 ```
+
+For a journal routine, add `Bash(cairn recall verify *)` to `--allowedTools` so the peer
+can check its own journal before it finishes; the `example-daily` profile does.
 
 `--allowedTools` and `--disallowedTools` each take one comma-joined string. Deny beats
 allow, so the profile above runs pnpm scripts but never publishes or pushes. `Bash(cmd *)`
@@ -90,10 +97,29 @@ The exit codes are the contract:
 
 A timeout is `prepare-timeout` or `validate-timeout`. A missing executable is exit 127.
 
-A digest `prepare` that adds `"--provenance", "tool"` leaves out peer and routine runs,
-so the routine does not digest its own earlier output. The journal entries the peer writes
-are not exported by cairn, so cairn writes no `provenance` key into them. The prompt should
-tell the peer to put `provenance: agent` in each entry's front matter.
+### Journal citations
+
+`cairn recall digest` leaves out sessions owned by a routine (`owner: routine:<name>`), so
+a journal run never becomes input to the next day's journal. `cairn recall verify` exits 0
+when every citation and quote checks, 4 when one fails (the day fails and is retried, up to
+3 counted attempts) and 1 on an error; it never exits 3. Put this block in the prompt file:
+
+> Cite every claim as `[REF fN]`: REF is the `ref` value from the digest file's front
+> matter, N the number in a `<!-- fN ... -->` marker. Quote only text copied exactly from
+> one frame, in double quotes or a `>` block quote, in the same list item as its
+> citation. Write the journal to `{{JOURNAL_DIR}}/{{DAY}}.md`. Before you finish, run
+> `cairn recall verify {{JOURNAL_DIR}}/{{DAY}}.md --digest {{DIGEST_DIR}}` and fix or
+> delete every reported line.
+
+A citation is one frame in brackets, `[claude:3f2a9c1e f11]`: the full id or a unique
+prefix of at least 8 characters. The grammar, the reason codes and the report format are in
+`docs/journal-verify-spec.md`. To keep a journal that fails instead of failing the day, add
+`--fix` to `validate`: it moves each failing block under `## Unverified` and exits 0, so
+read that section after each run.
+
+The journal entries the peer writes are not exported by cairn, so cairn writes no
+`provenance` key into them. The prompt should tell the peer to put `provenance: agent`
+in each entry's front matter.
 
 ## 3. Dry-run
 

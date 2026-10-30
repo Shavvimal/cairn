@@ -513,6 +513,7 @@ cairn recall digest yesterday --all-projects --json
 cairn recall digest yesterday --all-projects --provenance tool --json
 cairn recall frame claude:FULL_ID 12 --frames DIR/claude-SHORTID.frames.jsonl
 cairn recall gaps --json
+cairn recall verify journal.md --digest DIR   # every [SOURCE:ID fN] citation and quote checks
 ```
 
 `cairn recall gaps` reports what recall cannot see right now: export lag per source,
@@ -534,12 +535,16 @@ frames, not ids. `cairn recall frame REF ORDINAL` prints one frame as exported, 
 `--frames` it warns when the frame changed since the digest. Dates are those of the
 exported frames: a Codex tool result that arrives after midnight stays on its call's day.
 
-`--json` prints `{"sessions": [...], "skipped": [...]}`: one row per written session (`ref`,
-`path`, `frames_path`, `role`, `parent`, `provenance`, `owner`, `project`, `cwd`,
-`frames_today`, `chars`, `truncated`), and one `{"ref", "reason"}` per legacy or corrupt
-export left out. Exit 0 means at least one session was written. Exit 3 means an empty
-day: no session qualified, so the directory holds only its marker. This is the routine's
-`prepare` contract, so a digest as `prepare` stamps such a day `empty`.
+`--json` prints `{"sessions": [...], "skipped": [...], "excluded": [...]}`: one row per
+written session (`ref`, `path`, `frames_path`, `role`, `parent`, `provenance`, `owner`,
+`project`, `cwd`, `frames_today`, `chars`, `truncated`), one `{"ref", "reason"}` per legacy or corrupt export
+left out, and one `{"ref", "owner"}` per session a routine owns. A routine's own sessions
+(`owner: routine:<name>`) and their subagents are left out of the digest so a journal run
+never feeds the next journal; `--include-routine-sessions` keeps them. Exit 0
+means at least one session was written. Exit 3 means an empty day: no session qualified,
+so the directory holds only its marker. This is the routine's `prepare` contract, so a
+digest as `prepare` stamps such a day `empty`.
+
 
 Every session document and every peer exchange document carries a `provenance` key in its
 front matter: directly before `status:` in a session document, directly before `title:` in
@@ -566,6 +571,14 @@ invoke preamble). On both commands, the repeatable `--provenance VALUE` keeps on
 documents with that value: `--provenance tool` leaves out peer runs and routine runs.
 Neither filter needs QMD. The `recall list` filter reads front matter only. A digest
 filtered down to no session exits 3, as an empty day does.
+
+`verify` checks a journal written from a digest. A citation is `[SOURCE:ID fN]`, one frame
+per bracket, with the digest's `ref` (full, or a unique prefix of at least 8 characters).
+Each citation must name a frame the digest kept, unchanged since, and each quoted span (in
+double quotes, at least 15 characters, or a `>` block quote) must be in a frame its block
+cites. It prints `FILE:LINE: REASON: DETAIL` per failure and exits 0 when all pass, 4 when
+one fails and 1 on an error; `--json` gives the counts and failures, and `--fix` moves
+failing blocks under `## Unverified`. See `docs/journal-verify-spec.md`.
 
 Dates are UTC and match recorded activity, not every day between start and finish.
 Listing defaults strictly to the current directory; use `--all-projects` to broaden it.
