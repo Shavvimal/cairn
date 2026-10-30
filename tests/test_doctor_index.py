@@ -62,6 +62,7 @@ class TestDoctorIndex(StoreFixture):
         code, out = self.doctor()  # StoreFixture's qmd_binary is /missing/qmd
         self.assertEqual(code, 1)
         self.assertIn("FAIL qmd - '/missing/qmd' not found", out)
+        self.assertIn("(e.g. npm install -g @tobilu/qmd) [QMD_MISSING]\n", out)
 
     def test_version_succeeds_but_runtime_crashes(self):
         self.stub(crash=True)
