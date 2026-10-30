@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 import sys
+import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from cairn import config, hooks
 from cairn.harnesses import get_harness
-from cairn.storage import document_lock, lock_path, locked
+from cairn.storage import (
+    ConcurrentChangeError,
+    atomic_write,
+    document_lock,
+    lock_path,
+    locked,
+)
 from tests.test_shared_store import StoreFixture
 
 
@@ -98,3 +108,67 @@ class TestExternalLocks(StoreFixture):
         with locked(before):
             self.assertTrue(before.is_file())
         self.assertTrue(before.is_file())  # permanent inode, safe for existing waiters
+
+
+class TestAtomicWrite(unittest.TestCase):
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    @staticmethod
+    def mode_of(path: Path) -> int:
+        return stat.S_IMODE(os.stat(path).st_mode)
+
+    def test_atomic_write_default_keeps_original_behaviour(self):
+        target = self.root / "real.txt"
+        target.write_text("old")
+        link = self.root / "nested" / "link.txt"
+        link.parent.mkdir()
+        link.symlink_to(target)
+        atomic_write(link, "new")
+        self.assertFalse(link.is_symlink())  # a symlink is replaced by a regular file
+        self.assertEqual(target.read_text(), "old")
+        self.assertEqual(self.mode_of(link), 0o600)
+        atomic_write(self.root / "a" / "b" / "c.txt", "x")  # parents are created
+        self.assertEqual((self.root / "a/b/c.txt").read_text(), "x")
+
+    def test_atomic_write_applies_mode(self):
+        path = self.root / "mode.txt"
+        atomic_write(path, "one", mode=0o644)
+        self.assertEqual(self.mode_of(path), 0o644)
+        atomic_write(path, "two", mode=0o640)
+        self.assertEqual(self.mode_of(path), 0o640)
+        self.assertEqual(path.read_text(), "two")
+
+    def test_atomic_write_follows_symlink_when_asked(self):
+        dotfiles = self.root / "dotfiles"
+        dotfiles.mkdir()
+        target = dotfiles / "notes.md"
+        target.write_text("old")
+        link = self.root / "notes.md"
+        link.symlink_to(target)
+        atomic_write(link, "new", follow_symlinks=True, mode=0o644)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(target.read_text(), "new")
+        self.assertEqual(sorted(p.name for p in dotfiles.iterdir()), ["notes.md"])
+        dangling = self.root / "dangling.md"
+        dangling.symlink_to(self.root / "missing-dir" / "x.md")
+        with self.assertRaises(FileNotFoundError):
+            atomic_write(dangling, "x", follow_symlinks=True)
+        self.assertFalse((self.root / "missing-dir").exists())
+
+    def test_atomic_write_check_unchanged_aborts_on_a_concurrent_change(self):
+        path = self.root / "race.md"
+        path.write_bytes(b"edited by someone else")
+        with self.assertRaises(ConcurrentChangeError):
+            atomic_write(path, "mine", check_unchanged=True, expected=b"what I read")
+        self.assertEqual(path.read_bytes(), b"edited by someone else")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["race.md"])
+        atomic_write(path, "mine", check_unchanged=True, expected=b"edited by someone else")
+        self.assertEqual(path.read_text(), "mine")
+        fresh = self.root / "fresh.md"
+        atomic_write(fresh, "new", check_unchanged=True, expected=None)
+        self.assertEqual(fresh.read_text(), "new")
+        with self.assertRaises(ConcurrentChangeError):
+            atomic_write(fresh, "again", check_unchanged=True, expected=None)
