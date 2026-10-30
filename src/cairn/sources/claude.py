@@ -967,7 +967,7 @@ class ClaudeSource(ConversationSource):
                 failed = True
         return int(failed)
 
-    # ---- claude-only extras: sync (hook) + resume ----
+    # ---- claude-only extras: sync (hook), resume and memory import ----
     def add_extra_parsers(
         self, subparsers: argparse._SubParsersAction, common: argparse.ArgumentParser
     ) -> None:
@@ -985,6 +985,10 @@ class ClaudeSource(ConversationSource):
         p_resume.add_argument("--all", action="store_true", help="Show all (not just active)")
         p_resume.add_argument("file", nargs="?", help="Markdown file to resume from")
         p_resume.set_defaults(func=self.cmd_resume)
+
+        from ..claude_memory import add_parser as add_memory_parser
+
+        add_memory_parser(subparsers, common, self)
 
     def cmd_sync(self, args: argparse.Namespace) -> int:
         session_id = args.session_id

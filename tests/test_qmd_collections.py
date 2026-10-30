@@ -172,8 +172,10 @@ class TestEnsureCollectionsWiring(_SyncConfigFixture):
             sync._ensure_collections(self.cfg)
 
         # claude+codex enabled; cursor/granola/service-docs disabled by _config_init.
-        # The store-less journal collection is enabled in the template.
-        self.assertEqual(set(seen), {"claude-code-sessions", "codex-sessions", "journal"})
+        # The store-less journal and decisions collections are enabled in the template.
+        self.assertEqual(
+            set(seen), {"claude-code-sessions", "codex-sessions", "journal", "decisions"}
+        )
 
     def test_summary_counts_added_and_skipped(self):
         self._seed_markdown("claude-code-sessions")
@@ -189,7 +191,7 @@ class TestEnsureCollectionsWiring(_SyncConfigFixture):
 
         self.assertIn("registered 1 new", summary)
         self.assertIn("claude-code-sessions", summary)
-        self.assertIn("skipped=2", summary)  # codex-sessions and journal
+        self.assertIn("skipped=3", summary)  # codex-sessions, journal and decisions
 
     def test_failure_raises(self):
         with (

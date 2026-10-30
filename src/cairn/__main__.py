@@ -45,6 +45,7 @@ usage:
 sources (each forwards its remaining args to that source's CLI):
   cairn claude export [--since 7d | --all]   export Claude Code sessions
   cairn claude resume --pick                 resume a Claude session (interactive)
+  cairn claude memory import --dry-run       add Claude auto-memory notes as decision rows
   cairn codex export                         export Codex CLI sessions (last 24h)
   cairn antigravity export [--all]           export Google Antigravity (agy) conversations
   cairn cursor export --all                  export Cursor IDE sessions

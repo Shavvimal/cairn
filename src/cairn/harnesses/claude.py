@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -76,6 +77,40 @@ def claude_home() -> Path:
     """
     home = os.environ.get("CLAUDE_CONFIG_DIR")
     return Path(home).expanduser() if home else Path.home() / ".claude"
+
+
+# Claude Code names a project directory after the working directory: every character
+# outside ``[A-Za-z0-9]`` becomes ``-``. A name longer than this is cut and gets a hash
+# of the full path (the hash is undocumented, so a reader globs the cut prefix).
+PROJECT_DIR_NAME_LIMIT = 200
+_PROJECT_DIR_NAME_ENV_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def claude_project_dir_name(path: Path | str) -> str:
+    """The ``<config dir>/projects/<name>`` directory name for project root ``path``.
+
+    ``CLAUDE_CODE_PROJECT_DIR_NAME`` replaces the name only when ``CLAUDE_CONFIG_DIR``
+    is also set and the value is 1 to 64 letters, digits, ``-`` or ``_``, as Claude
+    Code documents. Otherwise each character outside ``[A-Za-z0-9]`` becomes ``-``.
+    The result can be longer than :data:`PROJECT_DIR_NAME_LIMIT`; the caller then
+    matches the cut prefix. :func:`cairn.config.claude_slug` is a different rule (it
+    replaces only ``/`` and ``.``) and stays as it is for the prefix derivation.
+    """
+    named = os.environ.get("CLAUDE_CODE_PROJECT_DIR_NAME") or ""
+    if os.environ.get("CLAUDE_CONFIG_DIR") and _PROJECT_DIR_NAME_ENV_RE.match(named):
+        return named
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def projects_root(store: Path) -> Path:
+    """Where Claude Code keeps per-project directories (transcripts and auto memory).
+
+    ``claude_home()/projects`` when ``CLAUDE_CONFIG_DIR`` is set, as Claude Code does;
+    otherwise ``store``, the configured ``claude-code-sessions`` store the exporter reads.
+    """
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        return claude_home() / "projects"
+    return store
 
 
 def _clip(text: str, limit: int) -> str:
