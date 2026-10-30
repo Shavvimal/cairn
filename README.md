@@ -515,6 +515,9 @@ and reports pending embeddings. `cairn doctor --strict-index` fails unless the i
 readable and fully embedded; setup uses it. cairn is tested with QMD 2.5.3; a newer
 version is judged by the same runtime and output checks, not by its number.
 
+A doctor line or a failed command names a code such as `[QMD_MISSING]`; `cairn errors CODE`
+prints its meaning, the next step and a read-only verify command (`docs/error-codes.md`).
+
 Recall uses the shared exported Markdown store, independent of the active harness:
 
 ```sh

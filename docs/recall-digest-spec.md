@@ -81,6 +81,8 @@ Exit codes:
 | 2 | argparse usage error (argparse's own exit). |
 | 3 | Empty day: zero sessions were written (no qualifying session, or every candidate was skipped). This matches the routine's `prepare` contract (0 continue, 3 empty day, any other code failed). The output directory still gets its marker and loses stale digest files. |
 
+Exit 1 and exit 3 carry the registry codes `RECALL_FAILED` and `DIGEST_EMPTY_DAY`; see `docs/error-codes.md`.
+
 ### 2.2 `cairn recall frame`
 
 ```

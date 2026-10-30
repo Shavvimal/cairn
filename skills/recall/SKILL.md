@@ -84,6 +84,7 @@ the condensed body, and `SOURCE-SHORTID.frames.jsonl`, one row per frame. A
 lengths, never ids. To dig into a cited line, run `recall frame` with that ordinal: it
 prints the frame as exported and warns on stderr if the export changed since the digest.
 Exit 3 means an empty day: no session was written. A legacy or corrupt export is skipped with a warning and listed under `skipped` in the JSON; the rest still exit 0.
+A failure or an empty day carries a `code` (`DIGEST_EMPTY_DAY`, `RECALL_FAILED`); `cairn errors CODE` gives the next step.
 The digest JSON also has a `coverage` key, in the same shape as `list --coverage`.
 Sessions owned by a routine (`owner: routine:<name>`) and their subagents are left out and
 listed under `excluded`; `--include-routine-sessions` keeps them.

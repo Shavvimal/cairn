@@ -85,6 +85,16 @@ to the user. Do not retry in a loop. `Warning: parser drift:
 `cairn sync` logs them on an `[exporter-drift]` line until a later export of that session
 parses cleanly.
 
+### On failure
+
+On a failure, read `code`, run `cairn errors CODE`, run its verify command, then act. The
+code is the second stderr line (`code: CODE (run 'cairn errors CODE')`), the `code` key of a
+`--json` failure object or result line (next to `fix.next_step` and `fix.verify`), or the
+` [CODE]` suffix of a `cairn doctor` line. A verify command only reads. An exit code alone
+is ambiguous: 2 is both a usage error and a denied invoke round, and 3 is an empty digest
+day, a stalled `agents wait` and a withdrawn decision claim. `cairn errors` lists every
+code; `docs/error-codes.md` is the same table.
+
 ## Enablement is config-driven
 
 Which sources `cairn sync` runs lives in the config file, not in flags. Each collection
