@@ -454,6 +454,7 @@ class TestChecks(VerifyFixture):
                     "failures",
                     "moved",
                     "exit",
+                    "code",
                 ]
             ),
         )
@@ -487,12 +488,14 @@ class TestChecks(VerifyFixture):
         self.journal.write_text(journal(VERIFIED))
         code, _, stderr = self.cli("verify", str(self.journal), "--digest", str(self.root))
         self.assertEqual(code, 1)
+        recall_failed = "code: RECALL_FAILED (run 'cairn errors RECALL_FAILED')\n"
         self.assertEqual(
-            stderr, f"Error: not a digest directory: {self.root} has no .cairn-digest\n"
+            stderr,
+            f"Error: not a digest directory: {self.root} has no .cairn-digest\n" + recall_failed,
         )
         code, _, stderr = self.cli("verify", str(self.root / "none.md"), "--digest", str(self.out))
         self.assertEqual(code, 1)
-        self.assertEqual(stderr, f"Error: no such file: {self.root / 'none.md'}\n")
+        self.assertEqual(stderr, f"Error: no such file: {self.root / 'none.md'}\n" + recall_failed)
 
     def test_exit_code_never_3(self):
         texts = [

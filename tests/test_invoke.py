@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import ClassVar
 from unittest.mock import patch
 
-from cairn import config, invoke, qmd
+from cairn import config, errors, invoke, qmd
 from cairn.catalog import load_catalog
 from cairn.config import PeerPolicy
 from cairn.exchange import ThreadState, render_exchange, validate_head, write_exchange
@@ -265,6 +265,7 @@ class TestCodexRun(InvokeFixture):
         assert data is not None
         self.assertEqual(RESULT_KEYS - set(data), set())
         self.assertEqual(data["status"], "succeeded")
+        self.assertNotIn("code", data)  # a succeeded round names no registry code
         self.assertEqual(data["last_message"], "ANSWER")
         self.assertEqual(data["round"], 1)
         self.assertEqual(data["profile"], "review")
@@ -431,6 +432,8 @@ class TestCodexRun(InvokeFixture):
         assert data is not None
         self.assertEqual(data["status"], "timeout")
         self.assertTrue(data["retryable"])
+        self.assertEqual(data["code"], "INVOKE_TIMEOUT")
+        self.assertEqual(data["fix"]["verify"], ["cairn", "invoke", "status", data["thread_id"]])
         child = next(c["sleep_child"] for c in self.stub_calls() if "sleep_child" in c)
         self.wait_for(lambda: self.gone(child), timeout=10)
 
@@ -608,9 +611,15 @@ class TestCodexRun(InvokeFixture):
         self.assertEqual(self.stub_calls(), [])
 
     def test_depth_guard_and_env_scrub(self):
-        result, _ = self.run_codex(env={"CAIRN_INVOKE_DEPTH": "1"})
+        result, data = self.run_codex(env={"CAIRN_INVOKE_DEPTH": "1"})
         self.assertEqual(result.returncode, 2)
-        self.assertIn("nested", result.stderr)
+        self.assertTrue(result.stderr.startswith("Error: refusing a nested invoke"))
+        self.assertIn("\ncode: INVOKE_NESTED (run 'cairn errors INVOKE_NESTED')\n", result.stderr)
+        assert data is not None
+        self.assertEqual(
+            (data["ok"], data["code"], data["exit"], data["fix"]),
+            (False, "INVOKE_NESTED", 2, {"next_step": errors.entry("INVOKE_NESTED").next_step}),
+        )
         self.assertFalse((self.root / "data/logs/invoke").exists())
         hints = {
             "CLAUDECODE": "1",

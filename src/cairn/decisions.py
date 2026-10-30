@@ -40,7 +40,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from . import withdrawals
+from . import errors, withdrawals
 from .config import get_config
 from .frontmatter import (
     _LINE_BREAKS,
@@ -708,6 +708,8 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
                 on_read=native.append,
             )
         except ClaimWithdrawn:
+            # withdrawals.guard printed the refusal line; the code line follows it.
+            errors.emit("DECISION_CLAIM_WITHDRAWN")
             return 3
         except (withdrawals.LedgerError, OSError) as exc:
             print(f"Error: {exc}", file=sys.stderr)

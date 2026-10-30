@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import errors
 from .config import state_home
 from .harnesses.claude import claude_home
 from .harnesses.codex_models import codex_home
@@ -77,9 +78,12 @@ NO_FILE, ABSENT, CURRENT, STALE, EDITED, DAMAGED = (
 class InstructionsError(Exception):
     """A refusal or failure: the message is printed after ``Error: `` and exits 1."""
 
-    def __init__(self, message: str, path: Path | None = None) -> None:
+    def __init__(
+        self, message: str, path: Path | None = None, code: str = "INSTRUCTIONS_FAILED"
+    ) -> None:
         super().__init__(message)
         self.path = path
+        self.code = code
 
 
 def begin_line(version: int = BLOCK_VERSION) -> str:
@@ -144,6 +148,7 @@ def _require_home(harness: str, path: Path) -> None:
             f"{home} does not exist; is {label} installed? "
             f"cairn edits {path} only inside an existing {label} home",
             path,
+            code="INSTRUCTIONS_HOME_MISSING",
         )
 
 
@@ -349,6 +354,7 @@ def _damaged_error(found: Scan) -> InstructionsError:
         f"{len(found.ends)} end; expected one of each, begin first); "
         "fix or delete them by hand, then re-run",
         found.path,
+        code="INSTRUCTIONS_MARKERS_DAMAGED",
     )
 
 
@@ -650,6 +656,7 @@ def install(harness: str, *, force: bool = False, dry_run: bool = False) -> Resu
                 f"the recall-first block in {path} was edited by hand since cairn wrote it; "
                 "move your text outside the markers, or pass --force to replace it",
                 path,
+                code="INSTRUCTIONS_BLOCK_EDITED",
             )
 
         block = render(harness, found.newline)
@@ -848,9 +855,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _fail(error: InstructionsError, harness: str, as_json: bool) -> int:
     print(f"Error: {error}", file=sys.stderr)
+    errors.emit(error.code)
     if as_json:
         path = str(error.path) if error.path is not None else None
-        print(json.dumps({"harness": harness, "path": path, "error": str(error)}))
+        payload = {"harness": harness, "path": path, "error": str(error)}
+        print(json.dumps(errors.tag(payload, error.code, harness=harness)))
     return 1
 
 

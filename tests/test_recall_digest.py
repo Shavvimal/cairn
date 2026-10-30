@@ -299,13 +299,19 @@ class TestProvenance(DigestFixture):
             "---\ntype: claude-session\nsession_id: legacy\ndate: 2026-03-28\n"
             "---\n## Conversation\nLegacy text",
         )
-        code, data, _, _ = self.digest()
+        code, data, stderr, _ = self.digest()
         self.assertEqual(code, 3)
         self.assertEqual(data["sessions"], [])
         self.assertEqual(data["skipped"], [{"ref": "claude:legacy", "reason": "legacy"}])
         self.assertEqual(data["coverage"]["verdict"], "degraded-miss")
         kinds = [(g["kind"], g["fix"]) for g in data["coverage"]["gaps"]]
         self.assertIn(("unreadable-exports", "cairn claude export --all"), kinds)
+        # The empty day names its registry code in --json and on stderr; the exit stays 3.
+        self.assertEqual(data["code"], "DIGEST_EMPTY_DAY")
+        self.assertEqual(
+            data["fix"]["verify"], ["cairn", "recall", "list", "yesterday", "--all-projects"]
+        )
+        self.assertIn("code: DIGEST_EMPTY_DAY (run 'cairn errors DIGEST_EMPTY_DAY')\n", stderr)
 
 
 class TestRoutineExclusion(DigestFixture):

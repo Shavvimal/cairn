@@ -68,7 +68,14 @@ TEMPLATE_TOKEN_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
 
 
 class ConfigError(RuntimeError):
-    """Configuration is missing or invalid. Deliberately never swallowed."""
+    """Configuration is missing or invalid. Deliberately never swallowed.
+
+    ``code`` names the failure in the error registry (``cairn errors CODE``).
+    """
+
+    def __init__(self, message: str = "", code: str = "CONFIG_INVALID") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +353,10 @@ def _config_path() -> Path:
     if override:
         path = Path(override).expanduser()
         if not path.is_file():
-            raise ConfigError(f"{ENV_OVERRIDE}={override!r} is set but no such file exists.")
+            raise ConfigError(
+                f"{ENV_OVERRIDE}={override!r} is set but no such file exists.",
+                code="CONFIG_NOT_FOUND",
+            )
         return path
 
     user = user_config_path()
@@ -364,7 +374,8 @@ def _config_path() -> Path:
 
     raise ConfigError(
         f"No cairn config found (looked at ${ENV_OVERRIDE}, {user}, and the repo root). "
-        f"Run 'cairn config init' to create {user}."
+        f"Run 'cairn config init' to create {user}.",
+        code="CONFIG_NOT_FOUND",
     )
 
 
@@ -379,7 +390,8 @@ def _parse_collection(name: str, spec: dict) -> Collection:
     if unknown:
         raise ConfigError(
             f"Collection {name!r} has unknown keys: {', '.join(sorted(unknown))}. "
-            f"Allowed keys: {', '.join(sorted(_COLLECTION_KEYS))}."
+            f"Allowed keys: {', '.join(sorted(_COLLECTION_KEYS))}.",
+            code="CONFIG_UNKNOWN_KEY",
         )
     sources = tuple(
         ServiceSource(name=src_name, path=expand(src["path"]), description=src["description"])
@@ -418,7 +430,8 @@ def _parse_billing(peer: str, spec: object) -> BillingPolicy:
     if unknown:
         raise ConfigError(
             f"invoke.{peer}.billing has unknown keys: {', '.join(sorted(unknown))}. "
-            f"Allowed keys: {', '.join(_BILLING_FIELDS)}."
+            f"Allowed keys: {', '.join(_BILLING_FIELDS)}.",
+            code="CONFIG_UNKNOWN_KEY",
         )
     route = values.get("route", "inherit")
     if route not in BILLING_ROUTES:
@@ -449,7 +462,8 @@ def _parse_peer(peer: str, spec: object) -> PeerPolicy:
     if unknown:
         raise ConfigError(
             f"invoke.{peer} has unknown keys: {', '.join(sorted(unknown))}. "
-            f"Allowed keys: {', '.join(_PEER_FIELDS)}."
+            f"Allowed keys: {', '.join(_PEER_FIELDS)}.",
+            code="CONFIG_UNKNOWN_KEY",
         )
     for key in _PEER_NULLABLE & set(values):
         value = values[key]
@@ -503,7 +517,8 @@ def _parse_profile(peer: str, name: str, spec: object) -> ProfileSpec:
     if unknown:
         raise ConfigError(
             f"{where} has unknown keys: {', '.join(sorted(unknown))}. "
-            f"Allowed keys: {', '.join(_PROFILE_KEYS)}."
+            f"Allowed keys: {', '.join(_PROFILE_KEYS)}.",
+            code="CONFIG_UNKNOWN_KEY",
         )
     base = values.get("base")
     if base not in PROFILES:
@@ -754,7 +769,8 @@ def _parse_routine(
     if unknown:
         raise ConfigError(
             f"{where} has unknown keys: {', '.join(sorted(unknown))}. "
-            f"Allowed keys: {', '.join(_ROUTINE_FIELDS)}."
+            f"Allowed keys: {', '.join(_ROUTINE_FIELDS)}.",
+            code="CONFIG_UNKNOWN_KEY",
         )
     missing = [key for key in ROUTINE_REQUIRED if key not in values]
     if missing:
