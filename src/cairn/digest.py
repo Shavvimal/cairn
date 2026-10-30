@@ -408,9 +408,9 @@ def _routine_owned(owner: object) -> bool:
 def _session_owner(record: SessionRecord) -> str | None:
     """A session's owner: front matter ``owner``, else the owner-form preamble; ``None``
     when neither names one or the export cannot be read."""
-    owner = record.metadata.get("owner")
+    owner = provenance_mod.owner_of(record.metadata)
     if owner:
-        return str(owner)
+        return owner
     try:
         _, frames = locate(read_text(record.path))
     except (OSError, ValueError):  # LegacyExport and CorruptExport are ValueErrors
@@ -459,7 +459,7 @@ def run_digest(
     skipped: list[dict[str, str]] = []
     excluded: dict[str, str] = {}  # ref -> owner
     for record in sorted(selected, key=lambda r: r.reference):
-        owner = record.metadata.get("owner")
+        owner = provenance_mod.owner_of(record.metadata)
         if not keep_routine and _routine_owned(owner):
             excluded[record.reference] = str(owner)
             continue
