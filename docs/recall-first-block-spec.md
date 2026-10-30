@@ -231,7 +231,8 @@ bullet. The template lives in one table, `SKILL_NAMES = {"claude": ("/cairn:reca
 11. Write through the resolved path (`Path.resolve()`), so a symlinked `CLAUDE.md` stays a
     symlink. Read the bytes again just before `atomic_write`. If they differ from step 4,
     exit 1 with the race error. Pass `mode=` with the old mode, or 0o644 for a new file.
-12. Update the ledger: `installed`, `block_version`, `block_sha256` of the block written,
+12. Update the ledger: `installed`, `block_version`, `block_sha256` of the block written
+    (newline style ignored: CRLF is hashed as LF, so one sha covers both styles),
     `created_file` (true if this run created the file, or if it was already true), `path`
     and `updated_at`. Print the result line.
 
@@ -324,9 +325,9 @@ goes to stderr.
 | An editor saves during the write | The flock covers other cairn runs only. The bytes are read again before the replace, and the race error exits 1 |
 | CRLF or BOM file | Markers match without `\r` and BOM. The block is written in the file's newline style. The BOM is kept |
 | A marker string pasted elsewhere in the file | It counts as a marker line, so the state is `damaged`. The user fixes it by hand |
-| The user deletes the block, and the update guide re-runs install | Detected as a hand removal, recorded as `declined`, not re-added |
+| The user deletes the block, and a later install runs | Detected as a hand removal, recorded as `declined`, not re-added. `status` and doctor show it as an opt-out |
 | The user edits the text inside the markers | `edited`. install refuses without `--force`, and doctor warns |
-| Codex override appears after an install | install writes the new target and prints `note: a recall-first block is still in OLD_PATH, which Codex no longer loads; run 'cairn instructions remove --harness codex' first to clear it`. remove clears the target and the recorded old path |
+| Codex override appears after an install | install writes the new target and prints `note: a recall-first block is still in OLD_PATH, which Codex no longer loads; delete it there by hand, or 'cairn instructions remove --harness codex' removes both copies and records the opt-out`. remove clears the target and the recorded old path |
 | Harness not installed | Exit 1 on install. Doctor skips the harness |
 | Real home touched by tests | Every test runs under the `StoreFixture` environment (`tests/test_shared_store.py:67-78`) |
 
@@ -375,7 +376,7 @@ Elsewhere:
 - `src/cairn/__main__.py` `_HELP`: one line (section 3.1).
 - `README.md`: a short "Recall-first instructions" paragraph after "Keeping it fresh" (`README.md:408`). Add `cairn instructions remove --harness H` to "Disable or remove" (`README.md:143-158`).
 - `skills/setup/SKILL.md`: step 2 gets a yes/no question, "Add a 10-line recall-first note to your user instruction file?" Step 6 runs `cairn instructions install --harness HOST --dry-run`, shows the diff, then installs on yes or runs `remove` on no, which records the opt-out.
-- `skills/setup/references/updating.md` step 3: `cairn instructions install --harness HOST` upgrades a stale block and keeps an opt-out.
+- `skills/setup/references/updating.md` step 3: `cairn instructions status --harness HOST`, then `install` for a stale block only. An absent block gets setup's separate question first; an opt-out is kept.
 - `skills/cairn/SKILL.md` "Top-level commands" (`:87-101`): one line.
 - `references/harnesses/claude.md` and `references/harnesses/codex.md`: one paragraph each on the target file, the Codex override rule and how to opt out.
 - CHANGELOG and version: the orchestrator writes them.
@@ -384,7 +385,7 @@ Elsewhere:
 
 1. `src/cairn/storage.py`: add the `mode` keyword to `atomic_write`, plus a test (+8 lines).
 2. `src/cairn/harnesses/claude.py`: add `claude_home()` (+6). Optionally point `codex.py:333` and `codex_registration.py:18` at `codex_home()`. Recommendation: leave them, to stay clear of layer 03.
-3. `src/cairn/instructions.py` (new, about 260 lines): the `TARGETS` table, `SKILL_NAMES`, `BLOCK_VERSION`, `render()`, `scan()`, `inspect()`, `install()`, `remove()`, the ledger functions, `main()` with argparse.
+3. `src/cairn/instructions.py` (new, about 260 lines): `target_path()`, `SKILL_NAMES`, `BLOCK_VERSION`, `render()`, `scan()`, `inspect()`, `install()`, `remove()`, the ledger functions, `main()` with argparse.
 4. `src/cairn/__main__.py`: the `_ADMIN` entry and the help line (+2).
 5. `src/cairn/admin.py`: `_check_recall_first` and the call in `doctor_main` (+40).
 6. `tests/test_instructions.py` (about 330 lines), plus the doctor tests (+50).
@@ -427,3 +428,35 @@ Where the implementation departs from sections 1-10:
   file again just before `os.replace` and raise `ConcurrentChangeError` if it changed).
   Existing callers keep the old behaviour.
 - The `note:` line for an old Codex copy goes to stderr, like other cairn warnings.
+- `old_target` stays in the record until `remove` clears that copy. A decline (by `remove` or
+  by a hand deletion) keeps it. An old copy that cairn cannot read, or whose markers are
+  damaged, is named on stderr (`note: cannot check OLD for an old recall-first block: ...`),
+  and its receipt is kept for the next `remove`.
+- `remove --dry-run` previews every file the run would change: the target and an old Codex
+  copy, one diff after the other.
+- `install` on a `current` block writes no file but makes the receipt agree with it: a run
+  whose ledger write failed, `--force` over an opt-out when the block is back, a moved Codex
+  target. The instruction file's mtime stays the same.
+- `created_file` counts only for the record's own path while the record is `installed`, and a
+  decline clears it once that file is gone. A file the user makes later is never deleted.
+- The ledger loader checks every record field it reads (types, `status` value, the nested
+  `old_target`) and fails with the bad-ledger message, for example
+  `(harnesses.codex.status is not one of installed, declined)`.
+- I/O failures exit 1 with the JSON error shape: `Error: cannot take the recall-first lock: ...`,
+  and `Error: cannot write LEDGER: ...; PATH was already changed, and a re-run records it`
+  when the instruction file was written but the ledger was not. The re-run reconciles.
+- A Codex override is empty when its text, after a BOM, is only whitespace (Unicode aware).
+  An override that exists but cannot be read exits 1 with `Error: cannot read PATH: ...`.
+- An old copy exists only inside one Codex home: the other file of the `AGENTS.md` and
+  `AGENTS.override.md` pair. A changed `CLAUDE_CONFIG_DIR` or `CODEX_HOME` is another
+  profile, and cairn neither names nor edits the file there.
+- The STATE column of `status` shows `declined` for an opt-out, including a block deleted by
+  hand that install has not recorded yet, as doctor does. `status --json` keeps the file
+  state. With no `--harness` and no home, `status` prints nothing on stdout and
+  `no Claude Code or Codex home found; nothing to report` on stderr, exit 0.
+- `--force` over a hand edit prints `updated: hand edits in the recall-first block in PATH
+  replaced with v1`. A begin line without a version upgrades as `from an unversioned block`.
+- `remove --dry-run` on a file without a block prints `absent: no recall-first block in PATH;
+  --dry-run recorded nothing`. `remove --dry-run --json` adds a `diff` key when a file
+  changes, as install does.
+- A diff line without a final newline is followed by `\ No newline at end of file`.

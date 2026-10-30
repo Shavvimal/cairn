@@ -604,6 +604,24 @@ class TestDoctorRecallFirst(StoreFixture):
         (codex_home / "AGENTS.override.md").write_text("rules\n")
         self.assertIn("(AGENTS.override.md is the active file)", self.check("codex"))
 
+    def test_doctor_recall_first_hand_deletion_and_unreadable_ledger(self):
+        md = self.claude_md
+        md.write_text("mine\n")
+        with redirect_stdout(io.StringIO()):
+            instructions.main(["install", "--harness", "claude"])
+        md.write_text("mine\n")  # deleted by hand; install has not recorded it yet
+        self.assertEqual(
+            self.check(),
+            "  ok   recall-first [claude] - opted out (block deleted by hand); "
+            "'cairn instructions install --harness claude --force' adds it\n",
+        )
+        ledger = Path(os.environ["XDG_STATE_HOME"]) / "cairn" / "recall-first.json"
+        ledger.write_text("{not json")
+        out = self.check()
+        self.assertTrue(
+            out.startswith(f"  warn recall-first [claude] - {ledger} is not valid JSON")
+        )
+
     def test_doctor_recall_first_runs_without_config(self):
         os.environ["CAIRN_CONFIG"] = str(self.root / "missing.json")
         config.get_config.cache_clear()

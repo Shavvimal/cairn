@@ -20,6 +20,8 @@ import os
 import re
 import stat
 import sys
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -111,10 +113,18 @@ def harness_home(harness: str) -> Path:
 
 
 def _has_text(path: Path) -> bool:
+    """True when ``path`` holds non-whitespace text. Only a missing file counts as empty."""
     try:
-        return bool(path.read_bytes().strip())
-    except OSError:
+        raw = path.read_bytes()
+    except FileNotFoundError:
         return False
+    except OSError as exc:
+        raise InstructionsError(f"cannot read {path}: {exc}", path) from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InstructionsError(f"{path} is not UTF-8 text; cairn will not edit it", path) from exc
+    return bool(text.lstrip("\ufeff").strip())
 
 
 def target_path(harness: str) -> Path:
@@ -160,7 +170,55 @@ def load_ledger() -> dict[str, Any]:
     harnesses = data.get("harnesses")
     if not isinstance(harnesses, dict) or not all(isinstance(v, dict) for v in harnesses.values()):
         raise _bad_ledger(path, "'harnesses' is not an object of objects")
+    for name, record in harnesses.items():
+        problem = _record_problem(name, record)
+        if problem:
+            raise _bad_ledger(path, problem)
     return data
+
+
+_STATUSES = ("installed", "declined")
+# key -> (allowed types, nullable); bool is checked apart from int.
+_RECORD_FIELDS: dict[str, tuple[type, bool]] = {
+    "block_sha256": (str, True),
+    "block_version": (int, True),
+    "created_file": (bool, False),
+    "old_target": (dict, True),
+    "path": (str, False),
+    "reason": (str, True),
+    "status": (str, False),
+    "updated_at": (str, True),
+}
+
+
+def _type_ok(value: Any, kind: type, nullable: bool) -> bool:
+    if value is None:
+        return nullable
+    if kind is int and isinstance(value, bool):
+        return False
+    return isinstance(value, kind)
+
+
+def _record_problem(name: str, record: dict[str, Any]) -> str | None:
+    """Why a ledger record cannot be used, or None. Every key the code reads is checked."""
+    where = f"harnesses.{name}"
+    if name not in HARNESSES:
+        return f"{where}: unknown harness"
+    for key in ("path", "status"):
+        if key not in record:
+            return f"{where}.{key} is missing"
+    for key, (kind, nullable) in _RECORD_FIELDS.items():
+        if key in record and not _type_ok(record[key], kind, nullable):
+            return f"{where}.{key} is not a {kind.__name__}{' or null' if nullable else ''}"
+    if record["status"] not in _STATUSES:
+        return f"{where}.status is not one of {', '.join(_STATUSES)}"
+    old = record.get("old_target")
+    if old is not None:
+        if not isinstance(old.get("path"), str):
+            return f"{where}.old_target.path is not a str"
+        if not isinstance(old.get("created_file", False), bool):
+            return f"{where}.old_target.created_file is not a bool"
+    return None
 
 
 def _bad_ledger(path: Path, detail: str) -> InstructionsError:
@@ -169,8 +227,26 @@ def _bad_ledger(path: Path, detail: str) -> InstructionsError:
     )
 
 
-def save_ledger(data: dict[str, Any]) -> None:
-    atomic_write(ledger_path(), json.dumps(data, indent=2, sort_keys=True) + "\n")
+def save_ledger(data: dict[str, Any], *, changed: Path | None = None) -> None:
+    """Write the ledger. ``changed`` names an instruction file this run already wrote."""
+    path = ledger_path()
+    try:
+        atomic_write(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        done = f"; {changed} was already changed, and a re-run records it" if changed else ""
+        raise InstructionsError(f"cannot write {path}: {exc}{done}", changed) from exc
+
+
+@contextmanager
+def _ledger_lock() -> Iterator[None]:
+    """The per-user recall-first lock; a failure to take it is an exit-1 error."""
+    with ExitStack() as stack:
+        try:
+            lock = lock_path(ledger_path(), "recall-first")
+            stack.enter_context(locked(lock))
+        except OSError as exc:
+            raise InstructionsError(f"cannot take the recall-first lock: {exc}") from exc
+        yield
 
 
 def _now() -> str:
@@ -349,19 +425,25 @@ class Result:
 
 
 def _diff(path: Path, before: str, after: str) -> str:
-    return "".join(
-        difflib.unified_diff(
-            _split_lines(before),
-            _split_lines(after),
-            fromfile=f"a/{path}",
-            tofile=f"b/{path}",
-        )
-    )
+    """A unified diff; a line without a final newline gets the usual marker line."""
+    out: list[str] = []
+    for line in difflib.unified_diff(
+        _split_lines(before), _split_lines(after), fromfile=f"a/{path}", tofile=f"b/{path}"
+    ):
+        out.append(line)
+        if not line.endswith("\n"):
+            out.append("\n\\ No newline at end of file\n")
+    return "".join(out)
 
 
 def _write(found: Scan, text: str) -> None:
     """Write ``text`` through a symlink, keep the mode, abort if the file changed."""
-    current_mode = stat.S_IMODE(os.stat(found.path).st_mode) if found.exists else 0o644
+    try:
+        current_mode = stat.S_IMODE(os.stat(found.path).st_mode) if found.exists else 0o644
+    except FileNotFoundError as exc:
+        raise _race(found.path) from exc
+    except OSError as exc:
+        raise InstructionsError(f"cannot write {found.path}: {exc}", found.path) from exc
     try:
         atomic_write(
             found.path,
@@ -392,14 +474,36 @@ def _skipped(harness: str, record: dict[str, Any]) -> str:
     )
 
 
-def _decline(ledger: dict[str, Any], harness: str, path: Path, reason: str) -> None:
+@dataclass
+class OldCopy:
+    """A block in a file the harness no longer loads (a Codex override moved the target).
+
+    ``found`` is the scan when the block can be removed. ``problem`` says why it cannot
+    be checked or removed (unreadable, not UTF-8, damaged markers); the ledger then keeps
+    the receipt so a later ``remove`` can try again.
+    """
+
+    path: Path
+    created: bool
+    found: Scan | None = None
+    problem: str | None = None
+
+    def receipt(self) -> dict[str, Any]:
+        return {"created_file": self.created, "path": str(self.path)}
+
+
+def _decline(
+    ledger: dict[str, Any], harness: str, path: Path, reason: str, old: OldCopy | None
+) -> None:
+    """Record an opt-out. ``old`` is a copy elsewhere that still needs clearing, or None."""
     record = dict(ledger["harnesses"].get(harness) or {})
+    owned = bool(record.get("created_file")) and _same_path(record, path) and path.exists()
     record.update(
         {
             "block_sha256": record.get("block_sha256"),
             "block_version": record.get("block_version"),
-            "created_file": bool(record.get("created_file")),
-            "old_target": None,
+            "created_file": owned,
+            "old_target": None if old is None else old.receipt(),
             "path": str(path),
             "reason": reason,
             "status": "declined",
@@ -414,40 +518,100 @@ def _same_path(record: dict[str, Any] | None, path: Path) -> bool:
     return (record or {}).get("path") == str(path)
 
 
-def _old_target(record: dict[str, Any] | None, path: Path) -> tuple[Path, bool] | None:
-    """A Codex block left in a file Codex no longer loads, with its ``created_file`` flag.
+def _owned(record: dict[str, Any] | None, path: Path) -> bool:
+    """cairn created ``path`` and has held it as ``installed`` since then."""
+    record = record or {}
+    return (
+        record.get("status") == "installed"
+        and bool(record.get("created_file"))
+        and _same_path(record, path)
+    )
 
-    An ``AGENTS.override.md`` that gains text moves the target. The previous target is
-    the record's ``path``, or ``old_target`` once a later install has moved the record.
+
+CODEX_FILES = ("AGENTS.md", "AGENTS.override.md")
+
+
+def _sibling(raw: str, path: Path) -> bool:
+    """``raw`` is the other Codex file in the same home as ``path``.
+
+    Only an override move inside one Codex home leaves an old copy. A changed
+    ``CLAUDE_CONFIG_DIR`` or ``CODEX_HOME`` points at another profile, which cairn
+    leaves alone.
     """
+    other = Path(raw)
+    return other != path and other.parent == path.parent and other.name in CODEX_FILES
+
+
+def _old_copy(harness: str, record: dict[str, Any] | None, path: Path) -> OldCopy | None:
+    """A Codex block left in a file Codex no longer loads, or one cairn cannot check.
+
+    The previous target is the record's ``path``, or ``old_target`` once a later run has
+    moved the record. A candidate that no longer holds a block is dropped.
+    """
+    if harness != "codex":
+        return None
     record = record or {}
     candidates: list[tuple[str, bool]] = []
-    if record.get("path") and record["path"] != str(path):
-        candidates.append((record["path"], bool(record.get("created_file"))))
+    if record.get("path") and _sibling(record["path"], path):
+        candidates.append((record["path"], _owned(record, Path(record["path"]))))
     old = record.get("old_target")
-    if isinstance(old, dict) and old.get("path") and old["path"] != str(path):
+    if old and _sibling(old["path"], path) and old["path"] != record.get("path"):
         candidates.append((old["path"], bool(old.get("created_file"))))
     for raw, created in candidates:
         try:
             found = scan(Path(raw))
-        except InstructionsError:
-            continue
+        except InstructionsError as exc:
+            return OldCopy(Path(raw), created, problem=str(exc))
+        if found.damaged:
+            return OldCopy(Path(raw), created, problem=str(_damaged_error(found)))
         if found.present:
-            return Path(raw), created
+            return OldCopy(Path(raw), created, found=found)
     return None
+
+
+def _old_note(harness: str, old: OldCopy) -> str:
+    if old.problem:
+        return f"note: cannot check {old.path} for an old recall-first block: {old.problem}"
+    return (
+        f"note: a recall-first block is still in {old.path}, which Codex no longer loads; "
+        "delete it there by hand, or 'cairn instructions remove --harness codex' removes "
+        "both copies and records the opt-out"
+    )
+
+
+def _installed_record(
+    record: dict[str, Any] | None, path: Path, block: str, created: bool, old: OldCopy | None
+) -> dict[str, Any]:
+    return {
+        "block_sha256": block_sha256(block),
+        "block_version": BLOCK_VERSION,
+        "created_file": created or _owned(record, path),
+        "old_target": None if old is None else old.receipt(),
+        "path": str(path),
+        "reason": None,
+        "status": "installed",
+        "updated_at": _now(),
+    }
+
+
+def _receipt_matches(record: dict[str, Any] | None, wanted: dict[str, Any]) -> bool:
+    keys = ("block_sha256", "block_version", "old_target", "path", "status")
+    return record is not None and all(record.get(key) == wanted[key] for key in keys)
 
 
 def install(harness: str, *, force: bool = False, dry_run: bool = False) -> Result:
     path = target_path(harness)
     _require_home(harness, path)
     load_ledger()  # fail on an unreadable ledger before taking the lock
-    with locked(lock_path(ledger_path(), "recall-first")):
+    with _ledger_lock():
         ledger = load_ledger()
         record = ledger["harnesses"].get(harness)
         found = scan(path)
         state = classify(found, harness, record)
         if state == DAMAGED:
             raise _damaged_error(found)
+        old = _old_copy(harness, record, path)
+        notes = [] if old is None else [_old_note(harness, old)]
 
         def result(state_after: str, action: str, message: str, **extra: Any) -> Result:
             version = BLOCK_VERSION if state_after == CURRENT else found.version
@@ -459,7 +623,7 @@ def install(harness: str, *, force: bool = False, dry_run: bool = False) -> Resu
         if state in (ABSENT, NO_FILE) and installed and _same_path(record, path):
             # The user deleted the block by hand: that is an opt-out.
             if not dry_run:
-                _decline(ledger, harness, path, REASON_DELETED)
+                _decline(ledger, harness, path, REASON_DELETED, old)
                 save_ledger(ledger)
                 record = ledger["harnesses"][harness]
             else:
@@ -469,10 +633,17 @@ def install(harness: str, *, force: bool = False, dry_run: bool = False) -> Resu
         if (record or {}).get("status") == "declined" and not force:
             return result(state, "skipped", _skipped(harness, record or {}))
         if state == CURRENT:
+            # The file is right; make the receipt agree (an interrupted run, a block
+            # pasted back after an opt-out with --force, a moved Codex target).
+            wanted = _installed_record(record, path, found.block, False, old)
+            if not dry_run and not _receipt_matches(record, wanted):
+                ledger["harnesses"][harness] = wanted
+                save_ledger(ledger)
             return result(
                 CURRENT,
                 "unchanged",
                 f"unchanged: recall-first block v{BLOCK_VERSION} in {path} is current",
+                notes=notes,
             )
         if state == EDITED and not force:
             raise InstructionsError(
@@ -507,32 +678,18 @@ def install(harness: str, *, force: bool = False, dry_run: bool = False) -> Resu
             was = f"v{found.version}" if found.version is not None else "an unversioned block"
             message = (
                 f"updated: recall-first block in {path} upgraded from {was} to v{BLOCK_VERSION}"
+                if state == STALE
+                else f"updated: hand edits in the recall-first block in {path} replaced "
+                f"with v{BLOCK_VERSION}"
             )
 
         before = found.text(found.lines) if found.exists else ""
-        notes = []
-        old = _old_target(record, path)
-        if old is not None:
-            notes.append(
-                f"note: a recall-first block is still in {old[0]}, which Codex no longer "
-                f"loads; run 'cairn instructions remove --harness {harness}' first to clear it"
-            )
         if dry_run:
             return result(CURRENT, action, message, diff=_diff(path, before, new_text), notes=notes)
 
         _write(found, new_text)
-        previous_created = bool((record or {}).get("created_file")) and _same_path(record, path)
-        ledger["harnesses"][harness] = {
-            "block_sha256": block_sha256(block),
-            "block_version": BLOCK_VERSION,
-            "created_file": state == NO_FILE or previous_created,
-            "old_target": None if old is None else {"path": str(old[0]), "created_file": old[1]},
-            "path": str(path),
-            "reason": None,
-            "status": "installed",
-            "updated_at": _now(),
-        }
-        save_ledger(ledger)
+        ledger["harnesses"][harness] = _installed_record(record, path, block, state == NO_FILE, old)
+        save_ledger(ledger, changed=path)
         return result(CURRENT, action, message, notes=notes)
 
 
@@ -556,68 +713,87 @@ def _remove_file(found: Scan) -> None:
         raise InstructionsError(f"cannot delete {found.path}: {exc}", found.path) from exc
 
 
+@dataclass
+class _Edit:
+    """One file a removal changes: its scan and the new text, or None to delete it."""
+
+    found: Scan
+    text: str | None
+
+    @classmethod
+    def strip(cls, found: Scan, created: bool) -> _Edit:
+        lines = _strip_block(found)
+        if created and not "".join(lines).strip() and not found.path.is_symlink():
+            return cls(found, None)
+        return cls(found, found.text(lines))
+
+    def diff(self) -> str:
+        return _diff(self.found.path, self.found.text(self.found.lines), self.text or "")
+
+    def apply(self) -> None:
+        if self.text is None:
+            _remove_file(self.found)
+        else:
+            _write(self.found, self.text)
+
+
 def remove(harness: str, *, dry_run: bool = False) -> Result:
     path = target_path(harness)
     _require_home(harness, path)
     load_ledger()
-    with locked(lock_path(ledger_path(), "recall-first")):
+    with _ledger_lock():
         ledger = load_ledger()
         record = ledger["harnesses"].get(harness)
         found = scan(path)
         state = classify(found, harness, record)
         if state == DAMAGED:
             raise _damaged_error(found)
-        notes: list[str] = []
-        old = _old_target(record, path)
-        if not found.present:
-            if not dry_run:
-                if old is not None:
-                    notes.append(_clear_old(*old))
-                _decline(ledger, harness, path, REASON_REMOVED)
-                save_ledger(ledger)
-            message = f"absent: no recall-first block in {path}; opt-out recorded"
-            return Result(
-                harness, path, state, state, "absent", None, dry_run, message, notes=notes
-            )
+        old = _old_copy(harness, record, path)
+        # One plan for the preview and the run: the target, then an old Codex copy.
+        edits: list[_Edit] = []
+        if found.present:
+            edits.append(_Edit.strip(found, _owned(record, path)))
+        if old is not None and old.found is not None:
+            edits.append(_Edit.strip(old.found, old.created))
+        leftover = old if old is not None and old.problem else None
+        notes = [] if leftover is None else [_old_note(harness, leftover)]
 
-        lines = _strip_block(found)
-        created = bool((record or {}).get("created_file"))
-        delete = created and not "".join(lines).strip() and not found.path.is_symlink()
-        new_text = "" if delete else found.text(lines)
-        message = (
-            f"removed: recall-first block from {path}; opt-out recorded, "
-            "install will not add it back without --force"
-        )
-        if delete:
-            message += " (file deleted: cairn created it and nothing else was in it)"
-        state_after = NO_FILE if delete else ABSENT
-        if dry_run:
-            diff = _diff(path, found.text(found.lines), new_text)
-            return Result(
-                harness, path, state, state_after, "removed", None, True, message, diff=diff
-            )
-        if delete:
-            _remove_file(found)
+        main_edit = edits[0] if found.present else None
+        if main_edit is None:
+            action, state_after = "absent", state
+            recorded = "--dry-run recorded nothing" if dry_run else "opt-out recorded"
+            message = f"absent: no recall-first block in {path}; {recorded}"
         else:
-            _write(found, new_text)
-        if old is not None:
-            notes.append(_clear_old(*old))
-        _decline(ledger, harness, path, REASON_REMOVED)
-        save_ledger(ledger)
-        return Result(
-            harness, path, state, state_after, "removed", None, False, message, notes=notes
-        )
-
-
-def _clear_old(old_path: Path, created: bool) -> str:
-    """Remove the block from a file the harness no longer loads (Codex override moves)."""
-    found = scan(old_path)
-    lines = _strip_block(found)
-    if created and not "".join(lines).strip() and not old_path.is_symlink():
-        _remove_file(found)
-        return f"removed: recall-first block from {old_path} (file deleted)"
-    _write(found, found.text(lines))
-    return f"removed: recall-first block from {old_path}"
+            action = "removed"
+            state_after = NO_FILE if main_edit.text is None else ABSENT
+            message = (
+                f"removed: recall-first block from {path}; opt-out recorded, "
+                "install will not add it back without --force"
+            )
+            if main_edit.text is None:
+                message += " (file deleted: cairn created it and nothing else was in it)"
+        if dry_run:
+            diff = "".join(edit.diff() for edit in edits) if edits else None
+            return Result(
+                harness,
+                path,
+                state,
+                state_after,
+                action,
+                None,
+                True,
+                message,
+                diff=diff,
+                notes=notes,
+            )
+        for edit in edits:
+            edit.apply()
+            if edit is not main_edit:
+                deleted = " (file deleted)" if edit.text is None else ""
+                notes.append(f"removed: recall-first block from {edit.found.path}{deleted}")
+        _decline(ledger, harness, path, REASON_REMOVED, leftover)
+        save_ledger(ledger, changed=path if edits else None)
+        return Result(harness, path, state, state_after, action, None, False, message, notes=notes)
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +802,8 @@ def _clear_old(old_path: Path, created: bool) -> str:
 
 
 def _status_line(view: Inspection) -> str:
-    state = "declined" if view.state in (ABSENT, NO_FILE) and view.declined else view.state
+    opted_out = view.declined or view.deleted_by_hand
+    state = "declined" if view.state in (ABSENT, NO_FILE) and opted_out else view.state
     version = f"v{view.version}" if view.version is not None else "-"
     return f"{view.harness} {state} {version} {view.path}"
 
@@ -707,6 +884,8 @@ def main(argv: list[str] | None = None) -> int:
             result = remove(args.harness, dry_run=args.dry_run)
     except InstructionsError as error:
         return _fail(error, args.harness, as_json)
+    except OSError as error:  # a failure no step above names; still exit 1 with the JSON shape
+        return _fail(InstructionsError(str(error)), args.harness, as_json)
     for note in result.notes:
         print(note, file=sys.stderr)
     if as_json:

@@ -255,7 +255,8 @@ class TestInstall(InstructionsFixture):
         self.assertEqual(
             err,
             f"note: a recall-first block is still in {self.agents_md}, which Codex no longer "
-            "loads; run 'cairn instructions remove --harness codex' first to clear it\n",
+            "loads; delete it there by hand, or 'cairn instructions remove --harness codex' "
+            "removes both copies and records the opt-out\n",
         )
         self.assertEqual(self.remove("codex")[0], 0)
         self.assertEqual(override.read_text(), "override rules\n")
@@ -271,8 +272,11 @@ class TestInstall(InstructionsFixture):
         other = self.root / "other-claude"
         other.mkdir()
         with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(other)}):
-            self.install("claude", "--force")
-        self.assertEqual((other / "CLAUDE.md").read_text(), render("claude"))
+            code, _, err = self.install("claude", "--force")
+            self.assertEqual((code, err), (0, ""))  # another profile is not an old copy
+            self.assertEqual(self.remove("claude")[0], 0)
+        self.assertFalse((other / "CLAUDE.md").exists())
+        self.assertEqual(self.claude_md.read_text(), render("claude"))
 
     def test_concurrent_change_aborts_without_writing(self):
         self.claude_md.write_text("mine\n")
@@ -371,6 +375,7 @@ class TestRemoveAndOptOut(InstructionsFixture):
         self.assertIn("(block deleted by hand); pass --force to add it back", out)
         self.assertEqual(self.claude_md.read_text(), "mine\n")
         self.assertEqual(self.ledger_record()["reason"], "block deleted by hand")
+        self.assertEqual(self.cli("status", "--harness", "claude")[1].split()[1], "declined")
 
     def test_force_overrides_opt_out(self):
         self.claude_md.write_text("mine\n")
@@ -441,3 +446,225 @@ class TestStatusAndCli(InstructionsFixture):
         result = self.run_cli("instructions", "show", "--harness", "claude")
         self.assertEqual(result.stdout, render("claude"))
         self.assertIn("cairn instructions install", self.run_cli("help").stdout)
+
+
+class TestReviewFindings(InstructionsFixture):
+    """Receipts, Codex target moves, previews and the error contract."""
+
+    def move_to_override(self) -> Path:
+        override = self.codex_home / "AGENTS.override.md"
+        override.write_text("override rules\n")
+        self.assertEqual(self.install("codex")[0], 0)
+        return override
+
+    def test_old_codex_copy_kept_through_hand_delete_and_cleared_by_remove(self):
+        self.agents_md.write_text("mine\n")
+        self.install("codex")
+        override = self.move_to_override()
+        override.write_text("override rules\n")  # the user deletes the new copy by hand
+        code, out, _ = self.install("codex")
+        self.assertIn("(block deleted by hand)", out)
+        self.assertEqual(self.ledger_record("codex")["old_target"]["path"], str(self.agents_md))
+        code, _, err = self.remove("codex")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.agents_md.read_text(), "mine\n")
+        self.assertIn(f"removed: recall-first block from {self.agents_md}", err)
+        self.assertIsNone(self.ledger_record("codex")["old_target"])
+
+    def test_damaged_old_codex_copy_is_reported_and_its_receipt_kept(self):
+        self.agents_md.write_text("mine\n")
+        self.install("codex")
+        self.move_to_override()
+        self.agents_md.write_text(self.agents_md.read_text() + END_LINE + "\n")
+        code, _, err = self.remove("codex")
+        self.assertEqual(code, 0)
+        self.assertIn(f"note: cannot check {self.agents_md} for an old recall-first block", err)
+        self.assertIn("damaged", err)
+        self.assertEqual(self.ledger_record("codex")["old_target"]["path"], str(self.agents_md))
+
+    def test_remove_dry_run_previews_every_file_it_changes(self):
+        self.agents_md.write_text("mine\n")
+        self.install("codex")
+        override = self.codex_home / "AGENTS.override.md"
+        override.write_text("override rules\n")  # moves the target; no install since
+        before = self.ledger.read_bytes()
+        code, out, _ = self.remove("codex", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn(f"--- a/{self.agents_md}\n", out)
+        self.assertIn("-<!-- cairn:recall-first:end -->\n", out)
+        self.assertEqual(self.ledger.read_bytes(), before)
+        self.assertIn("cairn:recall-first:begin", self.agents_md.read_text())
+        code, out, _ = self.remove("codex", "--dry-run", "--json")
+        self.assertIn(str(self.agents_md), json.loads(out)["diff"])
+
+    def test_ledger_write_failure_exits_1_and_a_retry_records_the_receipt(self):
+        self.claude_md.write_text("mine\n")
+        real = instructions.atomic_write
+
+        def fail_ledger(path, text, **kwargs):
+            if Path(path) == self.ledger:
+                raise OSError(28, "No space left on device")
+            return real(path, text, **kwargs)
+
+        with patch.object(instructions, "atomic_write", fail_ledger):
+            code, out, err = self.install("claude", "--json")
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith(f"Error: cannot write {self.ledger}: "))
+        self.assertIn(f"{self.claude_md} was already changed, and a re-run records it", err)
+        self.assertEqual(json.loads(out)["path"], str(self.claude_md))
+        self.assertFalse(self.ledger.exists())
+        os.utime(self.claude_md, (1_000_000, 1_000_000))
+        code, out, _ = self.install()
+        self.assertTrue(out.startswith("unchanged: "))
+        self.assertEqual(self.claude_md.stat().st_mtime, 1_000_000)
+        self.assertEqual(self.ledger_record()["status"], "installed")
+        self.claude_md.write_text("mine\n")  # now a hand deletion is an opt-out
+        self.assertIn("(block deleted by hand)", self.install()[1])
+
+    def test_force_on_a_current_block_with_a_declined_receipt_reinstalls(self):
+        self.claude_md.write_text("mine\n")
+        self.install()
+        self.remove()
+        self.claude_md.write_text("mine\n\n" + render("claude"))
+        self.assertTrue(self.install()[1].startswith("skipped: "))
+        _, out, _ = self.install("claude", "--force")
+        self.assertTrue(out.startswith("unchanged: "))
+        self.assertEqual(self.ledger_record()["status"], "installed")
+
+    def test_created_file_is_per_path_and_dropped_with_the_file(self):
+        self.install("codex")  # cairn creates AGENTS.md
+        override = self.codex_home / "AGENTS.override.md"
+        override.write_text(render("codex"))  # the user pastes the block into an override
+        self.assertEqual(self.remove("codex")[0], 0)
+        self.assertEqual(override.read_text(), "")
+        self.assertFalse(self.agents_md.exists())
+        self.install()  # cairn creates CLAUDE.md, then remove deletes it
+        self.remove()
+        self.assertFalse(self.ledger_record()["created_file"])
+        self.claude_md.write_text("")  # the user makes a new file
+        self.install("claude", "--force")
+        self.remove()
+        self.assertTrue(self.claude_md.exists())
+
+    def test_lock_failure_exits_1_with_the_json_error(self):
+        with patch.object(instructions, "locked", side_effect=PermissionError(13, "denied")):
+            code, out, err = self.install("claude", "--json")
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("Error: cannot take the recall-first lock: "))
+        self.assertEqual(json.loads(out)["harness"], "claude")
+
+    def test_codex_override_whitespace_is_unicode_aware_and_read_errors_surface(self):
+        override = self.codex_home / "AGENTS.override.md"
+        override.write_text("\ufeff\u2003\n")  # BOM, EM SPACE
+        self.assertEqual(instructions.target_path("codex"), self.agents_md)
+        override.unlink()
+        override.mkdir()
+        code, _, err = self.install("codex")
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith(f"Error: cannot read {override}: "))
+
+    def test_dry_run_diff_marks_a_missing_final_newline(self):
+        self.claude_md.write_text("mine")
+        _, out, _ = self.install("claude", "--dry-run")
+        self.assertIn("-mine\n\\ No newline at end of file\n+mine\n", out)
+
+    def test_malformed_ledger_record_fails_loud(self):
+        self.ledger.parent.mkdir(parents=True)
+        base = {"path": str(self.agents_md), "status": "installed"}
+        for record, detail in (
+            ({**base, "old_target": {"path": 123}}, "harnesses.codex.old_target.path is not"),
+            ({**base, "status": "maybe"}, "harnesses.codex.status is not one of"),
+            ({**base, "created_file": "yes"}, "harnesses.codex.created_file is not a bool"),
+            ({"status": "installed"}, "harnesses.codex.path is missing"),
+        ):
+            with self.subTest(detail=detail):
+                self.ledger.write_text(
+                    json.dumps({"schema_version": 1, "harnesses": {"codex": record}})
+                )
+                code, _, err = self.install("codex")
+                self.assertEqual(code, 1)
+                self.assertIn(detail, err)
+                self.assertFalse(self.agents_md.exists())
+
+
+class TestAntigravityFindings(InstructionsFixture):
+    """Second-review gaps: other Codex homes, dry-run wording, races, status and markers."""
+
+    def test_changed_codex_home_is_not_an_old_copy(self):
+        self.agents_md.write_text("mine\n")
+        self.install("codex")
+        other = self.root / "other-codex"
+        other.mkdir()
+        with patch.dict(os.environ, {"CODEX_HOME": str(other)}):
+            code, _, err = self.install("codex")
+            self.assertEqual((code, err), (0, ""))
+            self.remove("codex")
+        self.assertEqual(self.agents_md.read_text(), "mine\n\n" + render("codex"))
+
+    def test_remove_dry_run_on_an_absent_block_records_nothing_and_says_so(self):
+        self.claude_md.write_text("mine\n")
+        code, out, _ = self.remove("claude", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            out, f"absent: no recall-first block in {self.claude_md}; --dry-run recorded nothing\n"
+        )
+        self.assertFalse(self.ledger.exists())
+
+    def test_forced_replace_of_a_hand_edit_says_so(self):
+        self.claude_md.write_text("mine\n")
+        self.install()
+        self.claude_md.write_text(self.claude_md.read_text().replace("this machine", "my laptop"))
+        _, out, _ = self.install("claude", "--force")
+        self.assertEqual(
+            out,
+            f"updated: hand edits in the recall-first block in {self.claude_md} replaced with v1\n",
+        )
+
+    def test_unversioned_begin_marker_is_upgraded(self):
+        self.claude_md.write_text(
+            "mine\n<!-- cairn:recall-first:begin -->\nold\n<!-- cairn:recall-first:end -->\n"
+        )
+        _, out, _ = self.install()
+        self.assertEqual(
+            out,
+            f"updated: recall-first block in {self.claude_md} upgraded from an unversioned "
+            "block to v1\n",
+        )
+        self.assertEqual(self.claude_md.read_text(), "mine\n" + render("claude"))
+
+    def test_remove_keeps_a_symlink_even_when_cairn_created_the_file(self):
+        self.install()  # created_file is true for CLAUDE.md
+        real = self.root / "dotfiles-claude.md"
+        real.write_text(render("claude"))
+        self.claude_md.unlink()
+        self.claude_md.symlink_to(real)
+        self.assertEqual(self.remove()[0], 0)
+        self.assertTrue(self.claude_md.is_symlink())
+        self.assertEqual(real.read_text(), "")
+
+    def test_concurrent_change_aborts_remove(self):
+        self.install()  # cairn created the file, so remove would delete it
+        real_scan = instructions.scan
+
+        def scan_then_edit(path):
+            found = real_scan(path)
+            if path == self.claude_md:
+                path.write_text("an editor saved this\n")
+            return found
+
+        with patch.object(instructions, "scan", scan_then_edit):
+            code, _, err = self.remove()
+        self.assertEqual(code, 1)
+        self.assertIn("changed while cairn was updating it", err)
+        self.assertEqual(self.claude_md.read_text(), "an editor saved this\n")
+        self.assertEqual(self.ledger_record()["status"], "installed")
+
+    def test_status_for_a_missing_home(self):
+        self.codex_home.rmdir()
+        code, _, err = self.cli("status", "--harness", "codex")
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith(f"Error: {self.codex_home} does not exist; "))
+        self.claude_home.rmdir()
+        code, out, err = self.cli("status")
+        self.assertEqual((code, out), (0, ""))
+        self.assertEqual(err, "no Claude Code or Codex home found; nothing to report\n")
