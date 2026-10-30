@@ -601,7 +601,8 @@ def _parse_invoke(spec: object) -> InvokePolicy:
     if unknown:
         raise ConfigError(
             f"invoke has unknown peers: {', '.join(sorted(unknown))}. "
-            f"Allowed peers: {', '.join(INVOKE_PEERS)}."
+            f"Allowed peers: {', '.join(INVOKE_PEERS)}.",
+            code="CONFIG_UNKNOWN_KEY",
         )
     return InvokePolicy(**{peer: _parse_peer(peer, value) for peer, value in peers.items()})
 

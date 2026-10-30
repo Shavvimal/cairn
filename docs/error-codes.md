@@ -115,7 +115,7 @@ exit; the command decides it.
 - Exit: 1 (cairn routine: 2)
 - Retryable: no
 - Shown in: stderr code line; --json failure object; doctor [CODE] suffix
-- Raised at: `src/cairn/config.py:_parse_collection`, `src/cairn/config.py:_parse_billing`, `src/cairn/config.py:_parse_peer`, `src/cairn/config.py:_parse_profile`, `src/cairn/config.py:_parse_routine`
+- Raised at: `src/cairn/config.py:_parse_collection`, `src/cairn/config.py:_parse_billing`, `src/cairn/config.py:_parse_invoke`, `src/cairn/config.py:_parse_peer`, `src/cairn/config.py:_parse_profile`, `src/cairn/config.py:_parse_routine`
 
 ## DECISION_CLAIM_WITHDRAWN
 

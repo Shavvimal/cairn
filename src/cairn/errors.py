@@ -122,6 +122,7 @@ _ENTRIES = (
         (
             "src/cairn/config.py:_parse_collection",
             "src/cairn/config.py:_parse_billing",
+            "src/cairn/config.py:_parse_invoke",
             "src/cairn/config.py:_parse_peer",
             "src/cairn/config.py:_parse_profile",
             "src/cairn/config.py:_parse_routine",

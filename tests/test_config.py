@@ -17,6 +17,8 @@ from unittest import mock
 from cairn import config
 from cairn.timeutil import parse_since
 
+REPO = Path(__file__).resolve().parents[1]
+
 
 class TestConfigPrecedence(unittest.TestCase):
     def setUp(self):
@@ -68,6 +70,32 @@ class TestConfigPrecedence(unittest.TestCase):
                 config.load_config_from(p)
         self.assertEqual(caught.exception.code, "CONFIG_UNKNOWN_KEY")
         self.assertIn("has unknown keys: efort", str(caught.exception))
+
+    def test_unknown_key_code_at_every_parser_site(self):
+        # One unknown key at each of the six parser sites (collection, invoke peer, peer,
+        # billing, profile, routine): each raises CONFIG_UNKNOWN_KEY, not CONFIG_INVALID.
+        base = json.loads((REPO / "src" / "cairn" / "config.example.json").read_text())
+        sites = {
+            "collection": lambda d: d["collections"][next(iter(d["collections"]))],
+            "invoke": lambda d: d["invoke"],
+            "peer": lambda d: d["invoke"]["codex"],
+            "billing": lambda d: d["invoke"]["antigravity"]["billing"],
+            "profile": lambda d: d["invoke"]["claude"]["profiles"]["scheduled"],
+            "routine": lambda d: d["routines"]["example-daily"],
+        }
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "my.json"
+            p.write_text(json.dumps(base))
+            config.load_config_from(p)  # the example itself loads
+            for site, pick in sites.items():
+                with self.subTest(site=site):
+                    data = json.loads(json.dumps(base))
+                    pick(data)["zzunknown"] = 1
+                    p.write_text(json.dumps(data))
+                    with self.assertRaises(config.ConfigError) as caught:
+                        config.load_config_from(p)
+                    self.assertIn("zzunknown", str(caught.exception))
+                    self.assertEqual(caught.exception.code, "CONFIG_UNKNOWN_KEY")
 
     def test_invalid_json_carries_default_code(self):
         with tempfile.TemporaryDirectory() as d:
