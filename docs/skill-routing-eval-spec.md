@@ -6,7 +6,7 @@ where the implementation departs from the text below; where they differ, section
 Every claim about current behaviour cites `path:line` on `main` at 2.9.0. The fixtures in
 Appendix A were run against a prototype of the test (a copy of the seven `SKILL.md`
 files with the search description change from section 3.3), and again against the
-shipped test on top of layers 01-09 (section 11). Result: 74 rows,
+shipped test on top of layers 01-10 (section 11). Result: 77 rows,
 0 failures, 4 declared overlap pairs.
 
 **Dependencies:** none for code. The test reads whatever skill descriptions exist at the
@@ -92,7 +92,7 @@ not with `parse_frontmatter`.
 
 | Path | Kind |
 |---|---|
-| `skills/{cairn,recall,search,setup,invoke-codex,invoke-claude,invoke-antigravity}/routing-eval.jsonl` | new, 74 rows in total |
+| `skills/{cairn,recall,search,setup,invoke-codex,invoke-claude,invoke-antigravity}/routing-eval.jsonl` | new, 77 rows in total |
 | `tests/test_skill_routing.py` | new |
 | `skills/search/SKILL.md` | line 3 changed |
 | `CONTRIBUTING.md` | new section |
@@ -126,6 +126,14 @@ negative row "search the web for the python 3.13 release notes".
 - Problem strings, exact: `missed`, `also matched: <skill>[, <skill>]`,
   `ambiguous_with not matched: <skill>`, `copied from trigger: <skill> "<trigger>"`,
   `unknown skill: <name>`, `bad row: <reason>`, `duplicate intent (also <file>:<line>)`.
+- `bad row` reasons for the shape checks, exact: `blank line`, `not a JSON object`,
+  `unknown keys [...]`, `intent must be a non-empty string`, `expected is required`,
+  `expected must be a skill name or null`, `ambiguous_with must be a list of strings`,
+  `ambiguous_with has duplicates`, `ambiguous_with contains expected`,
+  `ambiguous_with must be empty when expected is null or not routable`,
+  `note must be a string`.
+- `skill <name>: no row matches "<trigger>" alone` and
+  `skill <name>: "<trigger>" has the tokens of another trigger` (section 4.8).
 - `undeclared overlap pairs` followed by a table
   `skill A | skill B | rows | example intent | triggers`.
 - `skill <name>: description has no quoted trigger after "Use when the user says"`.
@@ -207,9 +215,10 @@ trigger.
 ### 4.5 Route check, per row
 
 1. Shape: keys within `{intent, expected, ambiguous_with, note}`; `intent` a non-empty
-   string; `expected` a skill name or `null`; `expected` is the owning directory or
-   `null`; `ambiguous_with` a list of known skills, no duplicates, not containing
-   `expected`.
+   string; `expected` a skill name (a string) or `null`; `expected` is the owning
+   directory or `null`; `ambiguous_with` a list of known skills, no duplicates, not
+   containing `expected`, and empty when `expected` is `null` or not routable; `note`, if
+   present, a string. A blank line before the last row is a bad row.
 2. Normalised intents are unique across all files.
 3. Copy lint (4.4).
 4. If `expected` is routable: `expected` must match, else `missed`.
@@ -218,7 +227,8 @@ trigger.
 6. Every other matched skill must be in `ambiguous_with`, else `also matched`.
 7. Every `ambiguous_with` entry must match, else `ambiguous_with not matched`. A stale
    exemption fails.
-8. `expected: null`: no routable skill may match.
+8. `expected: null`: no routable skill may match. For a `null` or `setup` row the check
+   ignores `ambiguous_with`, so an exemption cannot turn a negative row into a pass.
 
 ### 4.6 Overlap report
 
@@ -239,6 +249,21 @@ and the constant.
 ### 4.7 Count check
 
 Each skill has 8 to 15 rows whose `expected` is that skill. `null` rows do not count.
+
+### 4.8 Trigger coverage
+
+Section 6 row F1 holds only if each quoted phrase has a row that reaches its skill
+through that phrase alone. For every routable skill, every trigger must be the only
+trigger of that skill that matches some row naming the skill (`expected` or
+`ambiguous_with`); deleting it then makes that row fail `missed` or
+`ambiguous_with not matched`. Two exceptions:
+
+- A trigger whose tokens hold all the tokens of another trigger of the same skill is
+  subsumed: every intent it matches also matches the shorter trigger, so no row can
+  isolate it and its deletion changes no route. At this layer: "sync service docs"
+  (subsumed by "sync docs") and "search past sessions" (subsumed by "search my sessions").
+- Two triggers of one skill with the same tokens fail with `has the tokens of another
+  trigger`, because each hides the other.
 
 ---
 
@@ -264,7 +289,7 @@ One JSON object per line, UTF-8, no comments, no blank lines inside the file:
 
 | ID | Cause | Result |
 |---|---|---|
-| F1 | A description drops a quoted phrase | rows for it fail `missed` |
+| F1 | A description drops a quoted phrase that no other trigger of the skill subsumes | its isolating row fails `missed` or `ambiguous_with not matched` (4.8) |
 | F2 | A description adds a phrase another skill's rows contain | `also matched`, and a new pair in the overlap table |
 | F3 | A routable skill loses its "Use when the user says" clause | `description has no quoted trigger` |
 | F4 | A row is a trigger copy | `copied from trigger` |
@@ -272,6 +297,7 @@ One JSON object per line, UTF-8, no comments, no blank lines inside the file:
 | F6 | A new skill directory without a fixture | `0 fixture rows, need 8 to 15` |
 | F7 | A lower layer adds triggers | rerun; fix rows or declare the overlap |
 | F8 | Frontmatter not closed by `---` | `skill <name>: frontmatter not closed` |
+| F9 | A trigger gains a phrase but no row reaches the skill through it alone | `no row matches "<trigger>" alone` |
 
 The test never touches `~/.local/state/cairn` or `~/.cache/cairn`. It reads repo files
 only.
@@ -296,6 +322,13 @@ Module docstring states the limit from section 1.2 in two sentences.
 | `TestRoutingEval.test_each_row_routes_to_its_skill` | 4.5 steps 4 to 8, one table of all offenders |
 | `TestRoutingEval.test_overlap_pairs_are_declared` | 4.6 |
 | `TestRoutingEval.test_fixture_counts` | 4.7 |
+| `TestRoutingEval.test_every_trigger_has_its_own_row` | 4.8 on the repository rows |
+| `TestRowChecks.test_parse_rejects_each_bad_shape` | every `bad row` reason of 4.5 step 1, inline rows |
+| `TestRowChecks.test_blank_line_inside_a_fixture_is_a_bad_row` | blank line rule, temp directory |
+| `TestRowChecks.test_route_problems` | `missed`, `also matched`, stale exemption, null and setup rows that try an exemption |
+| `TestRowChecks.test_read_head_needs_both_delimiters` | `frontmatter not opened`, `frontmatter not closed`, temp file |
+| `TestRowChecks.test_overlap_problems` | an undeclared pair and a stale declared pair |
+| `TestRowChecks.test_uncovered_triggers` | uncovered trigger, subsumed trigger exempt, twin triggers |
 
 The `TestMatcher` cases use inline data so a description edit cannot break them. Use
 `self.fail(table)` once per test with every offender, not one assertion per row, so one
@@ -354,8 +387,9 @@ Where the implementation departs from sections 1-10:
 
 - Layers 05 to 09 changed the bodies of `recall`, `search`, `cairn` and `setup`, and the
   unquoted part of the `cairn` description (`decide/supersede/forget`). No quoted trigger
-  changed, so the 74 rows in Appendix A ship unchanged. The test was run on top of those
-  layers: 13 tests, 74 rows, 0 failures, the 4 declared pairs in section 4.6.
+  changed, so the original 74 rows in Appendix A shipped unchanged. Review added three
+  rows (section 4.8) for 77 in total. The test was run on top of layers 01-10: 20 tests,
+  77 rows, 0 failures, the 4 declared pairs in section 4.6.
 - The new `cairn` subcommands (`decide`, `supersede`, `forget`, `instructions`, `routine
   pause`) have no quoted trigger, so no row routes to them. Adding a row would need a
   `cairn` description change, which this layer does not make (section 1.3).
@@ -368,12 +402,14 @@ Where the implementation departs from sections 1-10:
   table carries a `status` column (`declared` or `UNDECLARED`).
 - A row whose `expected` names another skill's directory fails as `bad row: expected
   '<skill>' in the fixture of '<owner>'`.
+- Review added section 4.8, the `TestRowChecks` class with inline skills, and the shape
+  rules for `expected` type, `note` type, blank lines and exemptions on negative rows.
 - The helpers live in the test module, not in `src/cairn`: this is test infrastructure and
   nothing ships to the runtime.
 
 ---
 
-## Appendix A: fixture files (verified, 74 rows, 0 failures)
+## Appendix A: fixture files (verified, 77 rows, 0 failures)
 
 ### skills/recall/routing-eval.jsonl
 
@@ -425,6 +461,7 @@ Where the implementation departs from sections 1-10:
 {"intent": "pull in the transcripts from today's meetings", "expected": "cairn"}
 {"intent": "is my scheduled journal routine still running", "expected": "cairn"}
 {"intent": "resume my last codex session", "expected": "cairn", "ambiguous_with": ["invoke-codex"]}
+{"intent": "sync the docs listed in my config", "expected": "cairn"}
 ```
 
 ### skills/setup/routing-eval.jsonl
@@ -449,6 +486,7 @@ an install or update request.
 {"intent": "have codex take a look at this diff and review it", "expected": "invoke-codex"}
 {"intent": "can you ask the codex agent whether this migration is safe", "expected": "invoke-codex"}
 {"intent": "invoke a headless codex run on the plan", "expected": "invoke-codex"}
+{"intent": "invoke a headless codex process on the plan", "expected": "invoke-codex"}
 {"intent": "run this prompt through codex in the background", "expected": "invoke-codex"}
 {"intent": "get codex to audit the hook installer", "expected": "invoke-codex"}
 {"intent": "I want a second opinion on the schema from codex", "expected": "invoke-codex"}
@@ -471,6 +509,7 @@ an install or update request.
 {"intent": "ask a fresh claude to poke holes in this migration", "expected": "invoke-claude"}
 {"intent": "send the plan to claude for review", "expected": "invoke-claude"}
 {"intent": "let claude pick up and resume where the peer review stopped", "expected": "invoke-claude"}
+{"intent": "resume the claude conversation from earlier", "expected": "invoke-claude"}
 ```
 
 ### skills/invoke-antigravity/routing-eval.jsonl
@@ -497,8 +536,13 @@ quoted phrases after "Use when the user says" are the trigger list.
 
 1. If you add, remove or reword a quoted phrase, update `skills/<name>/routing-eval.jsonl`.
    Each line is `{"intent": ..., "expected": ..., "ambiguous_with": [...]}`. Write the
-   intent as a user would type it. Never copy a trigger phrase into it.
-2. Run `uv run python -m unittest tests.test_skill_routing -v`.
+   intent as a user would type it. Never copy a phrase of two or more words into it; a
+   single-word trigger such as "recall" may appear inside a longer request. Each phrase
+   needs one row that matches it and no other phrase of the same skill, unless it holds
+   every word of a shorter phrase of that skill.
+2. Run `uv run python -m unittest tests.test_skill_routing -v`. If you add or remove a
+   `recall` phrase on purpose, also update the count in
+   `test_quoted_phrases_after_marker_only`.
 3. If the test reports a new overlap pair, decide whether the overlap is real. If it is,
    add the skill to the row's `ambiguous_with` and the pair to `DECLARED_OVERLAPS`. If it
    is not, reword the trigger.

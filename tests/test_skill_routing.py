@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -182,8 +183,12 @@ def load_rows(skills: dict[str, Skill], root: Path = SKILLS_ROOT) -> tuple[list[
     bad: list[Row] = []
     for path in sorted(root.glob(f"*/{FIXTURE_NAME}")):
         owner = path.parent.name
-        for number, raw in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+        lines = path.read_text(encoding="utf-8").split("\n")
+        last = max((n for n, raw in enumerate(lines, 1) if raw.strip()), default=0)
+        for number, raw in enumerate(lines, 1):
             if not raw.strip():
+                if number < last:
+                    bad.append(Row(path=path, line=number, intent="bad row: blank line"))
                 continue
             row = Row(path=path, line=number)
             reason = _parse_row(raw, owner, skills, row)
@@ -211,6 +216,8 @@ def _parse_row(raw: str, owner: str, skills: dict[str, Skill], row: Row) -> str:
     if "expected" not in data:
         return "expected is required"
     expected = data["expected"]
+    if expected is not None and not isinstance(expected, str):
+        return "expected must be a skill name or null"
     if expected is not None and expected not in skills:
         return f"unknown skill: {expected}"
     if expected is not None and expected != owner:
@@ -225,6 +232,10 @@ def _parse_row(raw: str, owner: str, skills: dict[str, Skill], row: Row) -> str:
         return "ambiguous_with has duplicates"
     if expected in ambiguous:
         return "ambiguous_with contains expected"
+    if ambiguous and (expected is None or not skills[expected].routable):
+        return "ambiguous_with must be empty when expected is null or not routable"
+    if not isinstance(data.get("note", ""), str):
+        return "note must be a string"
     row.intent, row.expected, row.ambiguous_with = intent, expected, list(ambiguous)
     return ""
 
@@ -261,6 +272,46 @@ def overlap_table(rows: list[Row], skills: dict[str, Skill], only_undeclared: bo
     return table(["skill A", "skill B", "rows", "example intent", "triggers", "status"], body)
 
 
+def overlap_problems(
+    pairs: dict[tuple[str, str], list[tuple[Row, dict[str, list[str]]]]],
+    declared: frozenset[tuple[str, str]] = DECLARED_OVERLAPS,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Pairs no declaration covers, and declared pairs no row exercises."""
+    return sorted(set(pairs) - declared), sorted(declared - set(pairs))
+
+
+def uncovered_triggers(rows: list[Row], skills: dict[str, Skill]) -> list[str]:
+    """Triggers whose deletion no row would notice.
+
+    A trigger is covered when a row that names its skill (``expected`` or
+    ``ambiguous_with``) matches that skill through this trigger alone, so deleting the
+    trigger makes the row fail ``missed`` or ``ambiguous_with not matched``. A trigger
+    whose tokens hold all the tokens of another trigger of the same skill is subsumed:
+    every intent it matches also matches the shorter one, so no row can isolate it.
+    Two triggers of one skill with the same tokens are reported, because each hides
+    the other.
+    """
+    problems = []
+    for name, skill in sorted(skills.items()):
+        if not skill.routable:
+            continue
+        sole: set[str] = set()
+        for row in rows:
+            if name != row.expected and name not in row.ambiguous_with:
+                continue
+            hits = [t for t in skill.triggers if trigger_matches(t, row.intent)]
+            if len(hits) == 1:
+                sole.add(hits[0])
+        for trig in skill.triggers:
+            tokens = trigger_tokens(trig)
+            others = [trigger_tokens(t) for t in skill.triggers if t != trig]
+            if tokens in others:
+                problems.append(f'skill {name}: "{trig}" has the tokens of another trigger')
+            elif not any(o < tokens for o in others) and trig not in sole:
+                problems.append(f'skill {name}: no row matches "{trig}" alone')
+    return problems
+
+
 def _describe(hits: dict[str, list[str]]) -> str:
     return "; ".join(f'{n} <- "{t}"' for n, ts in sorted(hits.items()) for t in ts) or "-"
 
@@ -271,7 +322,10 @@ def route_problems(row: Row, skills: dict[str, Skill]) -> list[str]:
     expected = row.expected
     if expected is not None and skills[expected].routable and expected not in hits:
         problems.append("missed")
-    extra = sorted(set(hits) - {expected} - set(row.ambiguous_with))
+    # A null or non-routable row may match no routable skill; no exemption applies.
+    routable = expected is not None and skills[expected].routable
+    allowed = set(row.ambiguous_with) if routable else set()
+    extra = sorted(set(hits) - {expected} - allowed)
     if extra:
         problems.append("also matched: " + ", ".join(extra))
     for name in row.ambiguous_with:
@@ -356,6 +410,159 @@ class TestMatcher(unittest.TestCase):
         self.assertFalse(copied("re-export sessions", "port sessions"))
 
 
+# Inline skills for the synthetic checks below, so a description edit cannot break them.
+_SYN = {
+    "alpha": Skill("alpha", ("export widgets", "widget report", "export widgets daily"), True),
+    "beta": Skill("beta", ("ask beta",), True),
+    "setup": Skill("setup", ("install gadget",), False),
+}
+
+
+def _row(intent: str, expected: str | None, ambiguous: list[str] | None = None) -> Row:
+    return Row(
+        path=Path("/tmp/x.jsonl"),
+        line=1,
+        intent=intent,
+        expected=expected,
+        ambiguous_with=ambiguous or [],
+    )
+
+
+class TestRowChecks(unittest.TestCase):
+    def test_parse_rejects_each_bad_shape(self) -> None:
+        cases = [
+            ("[1]", "alpha", "not a JSON object"),
+            ('{"intent": "x", "expected": null, "why": 1}', "alpha", "unknown keys ['why']"),
+            ('{"intent": " ", "expected": null}', "alpha", "intent must be a non-empty string"),
+            ('{"intent": 3, "expected": null}', "alpha", "intent must be a non-empty string"),
+            ('{"intent": "x"}', "alpha", "expected is required"),
+            ('{"intent": "x", "expected": []}', "alpha", "expected must be a skill name or null"),
+            ('{"intent": "x", "expected": {}}', "alpha", "expected must be a skill name or null"),
+            ('{"intent": "x", "expected": "gamma"}', "alpha", "unknown skill: gamma"),
+            (
+                '{"intent": "x", "expected": "beta"}',
+                "alpha",
+                "expected 'beta' in the fixture of 'alpha'",
+            ),
+            (
+                '{"intent": "x", "expected": "alpha", "ambiguous_with": "beta"}',
+                "alpha",
+                "ambiguous_with must be a list of strings",
+            ),
+            (
+                '{"intent": "x", "expected": "alpha", "ambiguous_with": ["gamma"]}',
+                "alpha",
+                "unknown skill: gamma",
+            ),
+            (
+                '{"intent": "x", "expected": "alpha", "ambiguous_with": ["beta", "beta"]}',
+                "alpha",
+                "ambiguous_with has duplicates",
+            ),
+            (
+                '{"intent": "x", "expected": "alpha", "ambiguous_with": ["alpha"]}',
+                "alpha",
+                "ambiguous_with contains expected",
+            ),
+            (
+                '{"intent": "x", "expected": null, "ambiguous_with": ["beta"]}',
+                "alpha",
+                "ambiguous_with must be empty when expected is null or not routable",
+            ),
+            (
+                '{"intent": "x", "expected": "setup", "ambiguous_with": ["beta"]}',
+                "setup",
+                "ambiguous_with must be empty when expected is null or not routable",
+            ),
+            ('{"intent": "x", "expected": null, "note": 5}', "alpha", "note must be a string"),
+        ]
+        for raw, owner, want in cases:
+            row = _row("", None)
+            self.assertEqual(_parse_row(raw, owner, _SYN, row), want, raw)
+        self.assertTrue(_parse_row("{", "alpha", _SYN, _row("", None)))
+        good = _row("", None)
+        self.assertEqual(
+            _parse_row('{"intent": "x", "expected": null, "note": "n"}', "alpha", _SYN, good), ""
+        )
+        self.assertEqual((good.intent, good.expected), ("x", None))
+
+    def test_blank_line_inside_a_fixture_is_a_bad_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "alpha" / FIXTURE_NAME
+            fixture.parent.mkdir()
+            first = '{"intent": "x", "expected": "alpha"}'
+            second = '{"intent": "y", "expected": "alpha"}'
+            fixture.write_text(f"{first}\n\n{second}\n\n", encoding="utf-8")
+            rows, bad = load_rows(_SYN, root=Path(tmp))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([(r.line, r.intent) for r in bad], [(2, "bad row: blank line")])
+
+    def test_route_problems(self) -> None:
+        cases = [
+            (_row("send me the widget numbers", "alpha"), ["missed"]),
+            (_row("export the widgets", "alpha"), []),
+            (_row("export the widgets then ask beta", "alpha"), ["also matched: beta"]),
+            (_row("export the widgets then ask beta", "alpha", ["beta"]), []),
+            (_row("export the widgets", "alpha", ["beta"]), ["ambiguous_with not matched: beta"]),
+            (_row("ask beta about the weather", None), ["also matched: beta"]),
+            (_row("ask beta about the weather", None, ["beta"]), ["also matched: beta"]),
+            (_row("install the gadget and ask beta", "setup", ["beta"]), ["also matched: beta"]),
+            (_row("install the gadget", "setup"), []),
+        ]
+        for row, want in cases:
+            self.assertEqual(route_problems(row, _SYN), want, row.intent)
+
+    def test_read_head_needs_both_delimiters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "SKILL.md"
+            for text, want in (
+                ("name: x\n---\n", "frontmatter not opened"),
+                ("---\nname: x\nbody\n", "frontmatter not closed"),
+            ):
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaisesRegex(FrontmatterError, want):
+                    read_head(path)
+            path.write_text("---\nname: x\n  indented: y\n---\nbody\n", encoding="utf-8")
+            self.assertEqual(read_head(path), {"name": "x"})
+
+    def test_overlap_problems(self) -> None:
+        rows = [_row("export the widgets then ask beta", "alpha", ["beta"])]
+        pairs = overlap_pairs(rows, _SYN)
+        self.assertEqual(list(pairs), [("alpha", "beta")])
+        self.assertEqual(overlap_problems(pairs, frozenset()), ([("alpha", "beta")], []))
+        self.assertEqual(overlap_problems(pairs, frozenset({("alpha", "beta")})), ([], []))
+        self.assertEqual(
+            overlap_problems({}, frozenset({("alpha", "beta")})), ([], [("alpha", "beta")])
+        )
+
+    def test_uncovered_triggers(self) -> None:
+        both = _row("export a widget report", "alpha")
+        self.assertEqual(
+            uncovered_triggers([both], _SYN),
+            [
+                'skill alpha: no row matches "export widgets" alone',
+                'skill alpha: no row matches "widget report" alone',
+                'skill beta: no row matches "ask beta" alone',
+            ],
+        )
+        rows = [
+            both,
+            _row("export the widgets", "alpha"),
+            _row("show the widget report", "alpha"),
+            _row("export widgets then ask beta", "alpha", ["beta"]),
+        ]
+        # "export widgets daily" holds the tokens of "export widgets": subsumed, exempt.
+        self.assertEqual(uncovered_triggers(rows, _SYN), [])
+        twins = {"alpha": Skill("alpha", ("export widgets", "widgets export"), True)}
+        self.assertEqual(
+            uncovered_triggers([_row("export the widgets", "alpha")], twins),
+            [
+                'skill alpha: "export widgets" has the tokens of another trigger',
+                'skill alpha: "widgets export" has the tokens of another trigger',
+            ],
+        )
+
+
 class TestRoutingEval(_RepoCase):
     def _fail_with(self, problems: list[list[str]]) -> None:
         if not problems:
@@ -417,8 +624,7 @@ class TestRoutingEval(_RepoCase):
         self._fail_with(problems)
 
     def test_overlap_pairs_are_declared(self) -> None:
-        pairs = overlap_pairs(self.rows, self.skills)
-        undeclared = [pair for pair in pairs if pair not in DECLARED_OVERLAPS]
+        undeclared, stale = overlap_problems(overlap_pairs(self.rows, self.skills))
         if undeclared:
             self.fail(
                 "undeclared overlap pairs\n"
@@ -426,8 +632,12 @@ class TestRoutingEval(_RepoCase):
                 + "\n\nall overlap pairs\n"
                 + overlap_table(self.rows, self.skills, only_undeclared=False)
             )
-        stale = sorted(DECLARED_OVERLAPS - set(pairs))
         self.assertEqual(stale, [], "DECLARED_OVERLAPS lists a pair no row exercises")
+
+    def test_every_trigger_has_its_own_row(self) -> None:
+        problems = uncovered_triggers(self.rows, self.skills)
+        if problems:
+            self.fail("\n".join(problems))
 
     def test_fixture_counts(self) -> None:
         counts = {name: 0 for name in self.skills}

@@ -57,8 +57,13 @@ quoted phrases after "Use when the user says" are the trigger list.
 
 1. If you add, remove or reword a quoted phrase, update `skills/<name>/routing-eval.jsonl`.
    Each line is `{"intent": ..., "expected": ..., "ambiguous_with": [...]}`. Write the
-   intent as a user would type it. Never copy a trigger phrase into it.
-2. Run `uv run python -m unittest tests.test_skill_routing -v`.
+   intent as a user would type it. Never copy a phrase of two or more words into it; a
+   single-word trigger such as "recall" may appear inside a longer request. Each phrase
+   needs one row that matches it and no other phrase of the same skill, unless it holds
+   every word of a shorter phrase of that skill.
+2. Run `uv run python -m unittest tests.test_skill_routing -v`. If you add or remove a
+   `recall` phrase on purpose, also update the count in
+   `test_quoted_phrases_after_marker_only`.
 3. If the test reports a new overlap pair, decide whether the overlap is real. If it is,
    add the skill to the row's `ambiguous_with` and the pair to `DECLARED_OVERLAPS`. If it
    is not, reword the trigger.

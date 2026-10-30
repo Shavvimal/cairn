@@ -7,3 +7,4 @@
 {"intent": "ask a fresh claude to poke holes in this migration", "expected": "invoke-claude"}
 {"intent": "send the plan to claude for review", "expected": "invoke-claude"}
 {"intent": "let claude pick up and resume where the peer review stopped", "expected": "invoke-claude"}
+{"intent": "resume the claude conversation from earlier", "expected": "invoke-claude"}

@@ -11,3 +11,4 @@
 {"intent": "pull in the transcripts from today's meetings", "expected": "cairn"}
 {"intent": "is my scheduled journal routine still running", "expected": "cairn"}
 {"intent": "resume my last codex session", "expected": "cairn", "ambiguous_with": ["invoke-codex"]}
+{"intent": "sync the docs listed in my config", "expected": "cairn"}
