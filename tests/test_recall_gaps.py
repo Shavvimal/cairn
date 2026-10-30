@@ -566,6 +566,28 @@ class TestGather(GapsFixture):
         codex = self.by_name(self.gather(index=False), "codex-sessions")
         self.assertEqual(len(codex.unexported or ()), 1)
 
+    def test_cursor_and_granola_probes_read_the_store_files(self):
+        from cairn.config import Collection
+
+        cursor = self.root / "cursor-store"
+        (cursor / "globalStorage").mkdir(parents=True)
+        (cursor / "globalStorage" / "state.vscdb").write_text("x")
+        (cursor / "globalStorage" / "state.vscdb-wal").write_text("x")
+        self.touch(cursor / "globalStorage" / "state.vscdb", 600)
+        granola = self.root / "granola-store"
+        granola.mkdir()
+        (granola / "cache-v3.json").write_text("{}")
+        (granola / "other.json").write_text("{}")
+        self.touch(granola / "other.json", -60)
+        for source, store, newest in (
+            ("cursor", cursor, cursor / "globalStorage" / "state.vscdb-wal"),
+            ("granola", granola, granola / "cache-v3.json"),
+        ):
+            native = gaps._native(source, Collection(name=source, store=store))
+            self.assertEqual(native.basis, "store", source)
+            self.assertIsNone(native.files, source)
+            self.assertEqual(native.newest_at, gaps._from_ns(newest.stat().st_mtime_ns), source)
+
     def test_unreadable_store_exists(self):
         self.claude.chmod(0)
         self.addCleanup(self.claude.chmod, 0o700)
