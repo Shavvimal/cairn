@@ -456,6 +456,35 @@ class TestInstall(TrustFixture):
                     self.assertEqual(groups, [])
                 self.assertFalse(legacy.exists())
 
+    def test_stale_v1_file_beside_an_installed_receipt_owns_nothing(self):
+        self.run_configure()
+        legacy = self.root / "xdg/cairn/codex-hook-registration.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"path": str(self.hooks_path), "commands": [self.command()]}))
+        data = json.loads(self.hooks_path.read_text())
+        data["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] = 99
+        self.hooks_path.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "changed since cairn wrote it"):
+            self.run_configure()
+        _, warning = self.run_configure(remove=True)
+        self.assertIn("SessionEnd group 0", warning)
+        self.assertEqual(json.loads(self.hooks_path.read_text()), data)
+        self.assertFalse(legacy.exists())
+
+    def test_bundled_refusal_leaves_the_launchers_alone(self):
+        self.receipt.write_text("[1]")
+        self.inspect_mock.return_value = [{"pluginId": "cairn@cairn", "eventName": "sessionEnd"}]
+        for launcher in hooks.launcher_paths():
+            launcher.parent.mkdir(parents=True, exist_ok=True)
+            launcher.write_text("# before\n")
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            code = hooks.main(["install", "--harness", "codex"])
+        self.assertEqual(code, 1)
+        self.assertIn("is not a JSON object", err.getvalue())
+        for launcher in hooks.launcher_paths():
+            self.assertEqual(launcher.read_text(), "# before\n")
+
     def test_refused_install_leaves_the_launchers_alone(self):
         self.run_configure()
         data = json.loads(self.hooks_path.read_text())

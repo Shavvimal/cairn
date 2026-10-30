@@ -163,6 +163,11 @@ def _read_receipt(path: Path) -> dict:
 
 
 def _legacy_commands(state: _State) -> set[str]:
+    """v1 commands that still own their groups: with no receipt, or beside a receipt
+    still ``prepared`` (an interrupted migration). After an installed receipt, a leftover
+    v1 file only needs deleting, and the receipt's sha256 values decide."""
+    if state.receipt and state.receipt.get("status") != "prepared":
+        return set()
     return set(state.legacy.get("commands", []))
 
 
@@ -268,7 +273,7 @@ def _index_shift(groups: list, removed: list[int]) -> None:
 # --- uninstall ----------------------------------------------------------------------
 
 
-def _uninstall(*, dry_run: bool) -> list[str]:
+def _uninstall(*, dry_run: bool, before_write: Callable[[], None] | None = None) -> list[str]:
     """Remove owned, unchanged entries in reverse order; return dry-run plan lines."""
     hooks_path = _paths()[0]
     # A dry run reads only, so it takes no lock: the lock file is state too.
@@ -301,7 +306,8 @@ def _uninstall(*, dry_run: bool) -> list[str]:
             elif not group_entries or _owned_handlers(group, _legacy_commands(state)):
                 # v1 ownership, by exact command, while the v1 file exists (also beside the
                 # prepared receipt of an interrupted migration)
-                handlers = [h for h in _handlers(group) if h.get("command") not in state.commands]
+                legacy = state.commands if not group_entries else _legacy_commands(state)
+                handlers = [h for h in _handlers(group) if h.get("command") not in legacy]
                 if handlers:
                     retained.append({**group, "hooks": handlers})
                 else:
@@ -341,6 +347,8 @@ def _uninstall(*, dry_run: bool) -> list[str]:
             plan.append(f"would remove {state.legacy_path}")
         if dry_run:
             return plan
+        if before_write is not None:
+            before_write()  # the removal plan passed its checks
         if config_text is not None:
             trust.write_config(state.config, config_text)
         if hooks_changed:
@@ -701,9 +709,7 @@ def configure(
         h.get("pluginId") == "cairn@cairn" and h.get("eventName") == "sessionEnd" for h in observed
     )
     if bundled:
-        if before_write is not None and not dry_run:
-            before_write()
-        plan = _uninstall(dry_run=dry_run)
+        plan = _uninstall(dry_run=dry_run, before_write=before_write)
         message = (
             "Bundled Codex SessionEnd discovered; no fallback registered. Review trust in /hooks."
         )
