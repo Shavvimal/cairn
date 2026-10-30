@@ -90,7 +90,7 @@ listed under `excluded`; `--include-routine-sessions` keeps them.
 The JSON also has `overdue`: the active `## Decisions` rows whose `revisit_by` is on or
 before the digest day, from any session outside a routine's (a routine's sessions and
 their subagents give none unless `--include-routine-sessions`; `--provenance` filters them
-too). Mention them in the One Thing when they bear on the day's work.
+too). Withdrawn rows are never listed. Mention them in the One Thing when they bear on the day's work.
 An overdue row never changes the exit code.
 
 ### Decisions ("what did we decide about X")
@@ -103,8 +103,12 @@ cairn recall decisions --overdue [--as-of YYYY-MM-DD]  # active rows with revisi
 
 Each session's `## Decisions` table holds claims with `kind` (decision, fact, commitment,
 hunch), `confidence` (high, medium, low), `since`, `revisit_by` and a `source` cell of
-frame citations. Rows are `<source>:<native_id>#<n>`. Struck rows (superseded, or struck
-with any other marker) are hidden unless `--include-struck`. `--project`, `--all-projects`
+frame citations. Rows are `<source>:<native_id>#<n>`. Struck rows (superseded, withdrawn
+with `forget`, or struck with any other marker) are hidden unless `--include-struck`. So
+is an unstruck row whose claim was withdrawn in another session: cairn keeps a ledger of
+withdrawn claims. With `--include-struck` such a row ends in `[withdrawn: <reason>]`, and
+each JSON row has `withdrawn`, `withdrawn_reason` and `withdrawn_via` (`row` or `ledger`).
+Do not repeat a withdrawn claim as fact. `--project`, `--all-projects`
 and `--source` work as in `list`; the default is the current directory's project. A row
 that does not parse is skipped with a `Warning:` on stderr and listed under `problems` in
 the JSON.

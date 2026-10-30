@@ -1,7 +1,8 @@
 # Cursor IDE Sessions
 
 Export Cursor IDE composer conversations to markdown. Shared verbs (`export`, `list`,
-`context`, `note`, `close`, `log`, `decide`, `supersede`) work as documented in `../SKILL.md`. Windowed -
+`context`, `note`, `close`, `log`, `decide`, `supersede`, `forget`) work as documented in
+`../SKILL.md`. Windowed -
 `export` defaults to the last 24h; use `--since` / `--all`.
 
 ## Data source

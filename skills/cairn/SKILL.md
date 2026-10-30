@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: Exports, lists, annotates, and resumes local AI coding sessions (Claude Code, Codex, Cursor) plus Granola meetings and service docs to searchable markdown via the cairn CLI. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "resume session", "add session note", "close session", "log session", "sync docs", "sync service docs", "meeting transcripts", or "scheduled routine". Covers per-source export/list/context/note/close/log/decide/supersede, Claude and Codex resume, the top-level sync/doctor/config/cron/routine commands, and the config-driven enablement model. Requires the cairn CLI - install via /cairn:setup.
+description: Exports, lists, annotates, and resumes local AI coding sessions (Claude Code, Codex, Cursor) plus Granola meetings and service docs to searchable markdown via the cairn CLI. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "resume session", "add session note", "close session", "log session", "sync docs", "sync service docs", "meeting transcripts", or "scheduled routine". Covers per-source export/list/context/note/close/log/decide/supersede/forget, Claude and Codex resume, the top-level sync/doctor/config/cron/routine commands, and the config-driven enablement model. Requires the cairn CLI - install via /cairn:setup.
 allowed-tools: Bash, Read
 ---
 
@@ -34,7 +34,7 @@ For the live set of configured integrations and their enabled state, run `cairn 
 
 The four conversation sources (claude, codex, cursor, granola) accept the same verbs.
 **service-docs is a file mirror - it supports only `export` / `list` / `context`** (no
-`note` / `close` / `log` / `decide` / `supersede`, no time window; see `reference/service-docs.md`).
+`note` / `close` / `log` / `decide` / `supersede` / `forget`, no time window; see `reference/service-docs.md`).
 
 | Verb        | Does                                    | Example                                                       |
 | ----------- | --------------------------------------- | ------------------------------------------------------------- |
@@ -46,6 +46,7 @@ The four conversation sources (claude, codex, cursor, granola) accept the same v
 | `log`       | Annotate status/tags/rating (+ comment) | `cairn cursor log --status done --tags "x,y" --rating 8`      |
 | `decide`    | Add a row to the `## Decisions` table   | `cairn claude decide "Ship one PR per layer" --kind decision` |
 | `supersede` | Strike row N, add its replacement       | `cairn claude supersede 3 "Keep three words until grading"`   |
+| `forget`    | Withdraw row N so it stays withdrawn    | `cairn claude forget 3 --reason hallucination`                |
 
 Use `cairn resume SOURCE:ID` for either Claude or Codex: it prints the appropriate native
 command. Show that command for the user's terminal. Claude also retains its legacy picker.
@@ -179,7 +180,7 @@ Re-exporting never clobbers your annotations. Across all sources, exports preser
 `## My Notes` section, a `## Decisions` table directly after it (a table cairn wrote stays
 byte for byte; a hand edit keeps its text, with LF endings), and these
 frontmatter fields: `comments`, `status`, `tags`, `rating`, `title`, `projects`, `links`.
-`decide` and `supersede` are described in `workflows/log-session.md`.
+`decide`, `supersede` and `forget` are described in `workflows/log-session.md`.
 
 ## Per-source reference
 
