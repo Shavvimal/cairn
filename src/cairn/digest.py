@@ -405,12 +405,26 @@ def _routine_owned(owner: object) -> bool:
     return isinstance(owner, str) and owner.startswith(ROUTINE_OWNER_PREFIX)
 
 
+def _session_owner(record: SessionRecord) -> str | None:
+    """A session's owner: front matter ``owner``, else the owner-form preamble; ``None``
+    when neither names one or the export cannot be read."""
+    owner = record.metadata.get("owner")
+    if owner:
+        return str(owner)
+    try:
+        _, frames = locate(read_text(record.path))
+    except (OSError, ValueError):  # LegacyExport and CorruptExport are ValueErrors
+        return None
+    return lineage(record, frames).owner
+
+
 def run_digest(
     args: argparse.Namespace,
     records: list[SessionRecord],
     window: tuple[datetime, datetime],
     *,
     coverage: Callable[[bool, list[dict[str, str]]], dict] | None = None,
+    family: list[SessionRecord] | None = None,
 ) -> int:
     """Digest every qualifying session.
 
@@ -424,7 +438,10 @@ def run_digest(
 
     Sessions owned by a routine (``owner: routine:<name>``, in front matter or in the
     owner-form preamble) and their subagents are left out and listed in ``excluded``,
-    unless ``--include-routine-sessions`` is given.
+    unless ``--include-routine-sessions`` is given. A subagent's parent is looked up in
+    ``family`` (every record, before the project filter; default ``records``), so the
+    child is left out even when its parent is outside the day, the project or
+    ``--min-msgs``.
     """
     start, end = window
     out = Path(args.out).expanduser().absolute() if args.out else default_out(start)
@@ -466,14 +483,21 @@ def run_digest(
             excluded[record.reference] = str(digest.owner)
             continue
         digests.append(digest)
-    if excluded:
+    if not keep_routine:
+        parents = {r.reference: r for r in (records if family is None else family)}
+        owners: dict[str, str | None] = dict(excluded)
+        owners.update((d.record.reference, d.owner) for d in digests)
         kept = []
         for digest in digests:
             parent = digest.row["parent"]
-            if digest.row["role"] == "subagent" and parent in excluded:
-                excluded[digest.record.reference] = excluded[parent]
-            else:
-                kept.append(digest)
+            if digest.row["role"] == "subagent" and parent:
+                if parent not in owners:
+                    found = parents.get(parent)
+                    owners[parent] = _session_owner(found) if found else None
+                if _routine_owned(owner := owners[parent]):
+                    excluded[digest.record.reference] = str(owner)
+                    continue
+            kept.append(digest)
         digests = kept
     if getattr(args, "provenance", None):
         digests = [d for d in digests if d.row["provenance"] in args.provenance]

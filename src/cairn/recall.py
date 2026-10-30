@@ -182,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("--min-msgs must be nonnegative")
             if args.refresh and not refresh(sources):
                 return 1
-        records = store.records(sources)
+        records = family = store.records(sources)
         # An explicit ID is global unless a project filter is requested. Listing and
         # digest default strictly to cwd; absence of project metadata never broadens it.
         project = args.project or (
@@ -204,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
                     skipped=skipped,
                     named=args.source,
                 ),
+                family=family,
             )
         if args.command == "frame":
             return digest.run_frame(args, store.resolve(args.session_id, records))

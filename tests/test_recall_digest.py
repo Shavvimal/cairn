@@ -19,6 +19,7 @@ from typing import Any
 from cairn import recall
 from cairn.frames import MARKER, CorruptExport, LegacyExport, locate, read_text
 from cairn.frontmatter import notes_block, preserved_tail
+from cairn.invoke import preamble
 from cairn.rendering import render_artifacts, render_conversation
 from cairn.store import metadata_lines
 from tests.test_shared_store import StoreFixture
@@ -375,6 +376,80 @@ class TestRoutineExclusion(DigestFixture):
                 {"ref": "claude:run-0001", "owner": "routine:daily"},
             ],
         )
+
+    def child(self, parent: str) -> None:
+        child = document(
+            "agent-0009",
+            self.messages,
+            doc_type="claude-subagent",
+            head_extra=(f"parent_session_id: {parent}",),
+        )
+        self.write_doc("child.md", child)
+
+    def child_refs(self, *args: str) -> tuple[list[str], list[dict]]:
+        code, data, _, _ = self.digest("--include-subagents", *args)
+        self.assertEqual(code, 0)
+        return [r["ref"] for r in data["sessions"]], data["excluded"]
+
+    def test_subagent_excluded_when_routine_parent_is_out_of_window(self):
+        """The routine ran before midnight; its subagent was still active after it."""
+        late = [
+            msg("user", "2026-03-27T23:50:00Z", "Write the journal."),
+            msg("assistant", "2026-03-27T23:51:00Z", "Started."),
+        ]
+        tail = ('owner: "routine:daily"',)
+        self.write_doc("run-0001.md", document("run-0001", late, tail_extra=tail))
+        self.child("run-0001")
+        refs, excluded = self.child_refs()
+        self.assertEqual(refs, ["claude:fixture-0001"])
+        self.assertEqual(excluded, [{"ref": "claude:agent-0009", "owner": "routine:daily"}])
+
+    def test_subagent_excluded_when_min_msgs_drops_routine_parent(self):
+        self.owned("run-0001", "routine:daily")
+        self.child("run-0001")
+        refs, excluded = self.child_refs("--min-msgs", "2")
+        self.assertEqual(refs, ["claude:fixture-0001"])
+        self.assertEqual(excluded, [{"ref": "claude:agent-0009", "owner": "routine:daily"}])
+
+    def test_subagent_excluded_when_routine_parent_is_in_another_project(self):
+        tail = ('owner: "routine:daily"',)
+        parent = document("run-0001", self.messages, tail_extra=tail, cwd="/tmp/elsewhere")
+        self.write_doc("run-0001.md", parent)
+        self.child("run-0001")
+        out = self.root / "out" / "project"
+        code, stdout, _ = self.cli(
+            "digest", DAY, "--project", "/tmp/demo", "--include-subagents", "--json",
+            "--out", str(out),
+        )  # fmt: skip
+        self.assertEqual(code, 0)
+        data = json.loads(stdout)
+        self.assertNotIn("claude:agent-0009", [r["ref"] for r in data["sessions"]])
+        self.assertEqual(data["excluded"], [{"ref": "claude:agent-0009", "owner": "routine:daily"}])
+
+    def test_subagent_excluded_by_out_of_window_parent_preamble(self):
+        """The parent has no ``owner`` key, only the owner-form preamble, and is not
+        digested itself."""
+        head = preamble("claude", None, 1, 1800, "routine:daily")
+        late = [
+            msg("user", "2026-03-27T23:50:00Z", head + "\n\n---\n\nWrite the journal."),
+            msg("assistant", "2026-03-27T23:51:00Z", "Started."),
+        ]
+        self.write_doc("run-0001.md", document("run-0001", late))
+        self.child("run-0001")
+        refs, excluded = self.child_refs()
+        self.assertEqual(refs, ["claude:fixture-0001"])
+        self.assertEqual(excluded, [{"ref": "claude:agent-0009", "owner": "routine:daily"}])
+
+    def test_subagent_of_other_out_of_window_parent_kept(self):
+        late = [
+            msg("user", "2026-03-27T23:50:00Z", "Start the work."),
+            msg("assistant", "2026-03-27T23:51:00Z", "Started."),
+        ]
+        self.write_doc("run-0001.md", document("run-0001", late, tail_extra=('owner: "review"',)))
+        self.child("run-0001")
+        refs, excluded = self.child_refs()
+        self.assertEqual(refs, ["claude:agent-0009", "claude:fixture-0001"])
+        self.assertEqual(excluded, [])
 
     def test_only_routine_sessions_is_empty_day(self):
         (self.root / "data" / "claude-code-sessions" / "fixture.md").unlink()
