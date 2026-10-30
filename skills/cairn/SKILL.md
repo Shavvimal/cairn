@@ -146,7 +146,8 @@ Everything a session spawned sits in a folder named after its document:
 to the peer sessions it spawned or was spawned by.
 
 Every session and exchange document also carries `provenance: tool|agent|imported|user`
-in its head, directly before `status:`: who produced the body text. The exporter writes it
+in its head (before `status:` in a session, before `title:` in an exchange): who produced
+the body text. The exporter writes it
 on every re-render, so it is not an annotation; `cairn recall list --provenance VALUE`
 filters on it.
 

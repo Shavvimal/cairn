@@ -654,7 +654,7 @@ Front matter keys, in this order. Scalars are written as `key: "value"` with
 | `role` | `primary`, `peer` or `subagent` |
 | `parent` | `source:id` or `null` |
 | `orphan_peer` | `true` or `false` |
-| `provenance` | `user`, `agent`, `tool` or `imported` (added by the provenance layer, `docs/provenance-spec.md`): the stored key, else the value derived from front matter, else `agent` when the role is `peer` or `orphan_peer` is true |
+| `provenance` | `user`, `agent`, `tool` or `imported` (added by the provenance layer, `docs/provenance-spec.md`): a valid stored key; otherwise `agent` when the first user frame with text starts with the invoke preamble; otherwise the value derived from front matter |
 | `owner` | copied from the session front matter when present; the key is omitted otherwise |
 | `date` | the window day, `YYYY-MM-DD` |
 | `session_started_at` | `record.started_at` in UTC, or `null` |
@@ -792,7 +792,8 @@ then `ref`:
 
 `path` and `frames_path` are absolute in real output (the `~` above is for the
 example). `chars` is the digest body length. `provenance` and `owner` were added by the
-provenance layer (`docs/provenance-spec.md`): `owner` is the front-matter value, or `null`.
+provenance layer (`docs/provenance-spec.md`): `owner` is the front-matter value, else the
+owner label of the invoke preamble that `lineage` found, or `null`.
 `--provenance VALUE` (repeatable) drops sessions outside the set before anything is
 written; a dropped session is not listed in `skipped`. Skipped sessions (legacy, corrupt) are not
 rows; they are stderr warnings and entries of `skipped[]`. With `--json`, stdout is one

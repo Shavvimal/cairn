@@ -24,7 +24,9 @@ provenance: tool
 
 `cairn recall list --json` and `cairn recall digest --json` show it, with the existing
 `owner` label beside it. A repeatable `--provenance VALUE` flag on both commands filters
-on it. The filter reads front matter only, so it is deterministic and needs no QMD.
+on it. The `recall list` filter reads front matter only, so it is deterministic and needs
+no QMD. The digest filter also reads the first user message of a document without a stored
+key (4.5), because the digest parses the body anyway.
 
 ### 1.2 The value set (decision)
 
@@ -125,7 +127,7 @@ the filter is set membership.
 
 | Key | Where | Values | Written by |
 |---|---|---|---|
-| `provenance` | head, last line of the metadata block, directly before `status:` | `user`, `agent`, `tool`, `imported` | `export_one` for every session document; `render_exchange` for every exchange document |
+| `provenance` | session documents: head, last line of the metadata block, directly before `status:`; exchange documents: head, directly before `title:` (4.1) | `user`, `agent`, `tool`, `imported` | `export_one` for every session document; `render_exchange` for every exchange document |
 
 Unquoted scalar, for example `provenance: agent`. Not a preserved-tail key: it is not
 added to `PRESERVED_FIELDS` or `_TAIL_KEYS`.
@@ -138,7 +140,7 @@ added to `PRESERVED_FIELDS` or `_TAIL_KEYS`.
 | `cairn recall digest` | `--provenance VALUE` (repeatable, same choices) | keep only sessions whose digest value is in the set; `--provenance tool` excludes all agent-produced sessions |
 
 No new config key. No new exit code: a bad value is argparse exit 2; a digest filtered
-to nothing is the existing exit 3 (`src/cairn/digest.py:418`).
+to nothing is the existing exit 3 (`src/cairn/digest.py:446`).
 
 ### 3.3 Messages
 
@@ -219,14 +221,19 @@ after `"parent"`. Each text row becomes
 
 ### 4.5 `cairn recall digest`
 
-In `build` (`src/cairn/digest.py:256-337`): the value is `effective(...)`; but when the
-document has no stored key and `lineage` returns role `peer` or `orphan_peer` true, the
-value is `agent`. This uses the body evidence that the digest already parses
-(`src/cairn/digest.py:120-126`). Front matter gains `("provenance", value)` after
-`orphan_peer`, before `owner`. The JSON row gains `"provenance"` and `"owner"` (the same
-value as the front matter, or `null`) after `"parent"`.
+In `build` (`src/cairn/digest.py:273-363`): the value is
+`effective(..., peer_body=opens_with_preamble(frames))`. When the document has no valid
+stored key and its first user frame with text starts with the invoke preamble, the value
+is `agent`. This is the export test of 4.1 on the frames the digest already parses
+(`src/cairn/digest.py:131-144`): a preamble pasted later in a session a person drove does
+not count, although `lineage` still reads it for `role` and `parent`. A `parent` link is
+front-matter evidence and `derive` already reads it (4.2). Front matter gains
+`("provenance", value)` after `orphan_peer`, before `owner`. The JSON row gains
+`"provenance"` and `"owner"` after `"parent"`, with the same values as the front matter.
+`owner` is the stored `owner` label, else the owner label of the invoke preamble that
+`lineage` found (`src/cairn/digest.py:127`), else `null`.
 
-In `run_digest` (`src/cairn/digest.py:364-418`), drop built digests outside the
+In `run_digest` (`src/cairn/digest.py:389-446`), drop built digests outside the
 `--provenance` set before `_stems` and `write`. A filtered session is not listed in
 `skipped`; that list stays for legacy and corrupt exports. If nothing remains, exit 3.
 The text line becomes `<ref>  <role>  <provenance>  frames_today=N  chars=N[  owner=X][  [truncated N]]`.
@@ -373,9 +380,11 @@ the push, grep the diff for home paths and private names (CLAUDE.md hygiene rule
 - `metadata_lines` is unchanged. The key comes from `provenance.head_lines`, and
   `export_one` changes only the line that joins the head block, so other changes to that
   block merge with at most a one-line conflict.
-- `provenance.effective` takes a keyword `peer_body`. The digest passes the lineage
-  result (role `peer` or `orphan_peer`), so a document without a valid stored key reads
-  `agent`, and the warning for an invalid stored value names that value.
+- `provenance.effective` takes a keyword `peer_body`. The digest passes
+  `opens_with_preamble(frames)` (the first user frame with text starts with the invoke
+  preamble), so a document without a valid stored key reads `agent`, and the warning for
+  an invalid stored value names that value. A present but empty value (`provenance:` or
+  `provenance: ""`) is invalid and warns too; only an absent key is silent.
 - `recall list` text rows put the value after the precision label:
   `<ref>  <time>  <title>  [<precision>] <provenance>[ owner=<owner>][ (subagent of X)]`.
   Digest text rows put `owner=X` after `chars=N`.

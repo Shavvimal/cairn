@@ -500,7 +500,8 @@ day: no session qualified, so the directory holds only its marker. This is the r
 `prepare` contract, so a digest as `prepare` stamps such a day `empty`.
 
 Every session document and every peer exchange document carries a `provenance` key in its
-front matter, directly before `status:`. The key says who produced the body text. It is
+front matter: directly before `status:` in a session document, directly before `title:` in
+an exchange document. The key says who produced the body text. It is
 not the digest's frame citations, which this README also calls provenance.
 
 | Value | Meaning |
@@ -514,13 +515,14 @@ The exporter owns the key and writes it again on every re-render, so a hand edit
 last; use `tags` to label a document yourself. A document exported before the key existed
 gets a value from its front matter when it is read: a subagent type reads `agent`, Granola
 reads `imported`, an `owner` label or a `parent` link reads `agent`, and the rest read
-`tool`. The digest also reads `agent` when the body starts with the invoke preamble. A
-stored value outside the four prints a warning on stderr and reads as the derived value.
+`tool`. The digest also reads `agent` when the first user message with text starts with
+the invoke preamble. A stored value outside the four prints a warning on stderr and reads as the derived value.
 
 `cairn recall list --json` and `cairn recall digest --json` rows carry `provenance` and
-`owner` (the stored owner label, or `null`). On both commands, the repeatable
-`--provenance VALUE` keeps only documents with that value: `--provenance tool` leaves out
-peer runs and routine runs. The filter reads front matter only and needs no QMD. A digest
+`owner` (the stored owner label, or `null`; the digest also takes the label from the
+invoke preamble). On both commands, the repeatable `--provenance VALUE` keeps only
+documents with that value: `--provenance tool` leaves out peer runs and routine runs.
+Neither filter needs QMD. The `recall list` filter reads front matter only. A digest
 filtered down to no session exits 3, as an empty day does.
 
 Dates are UTC and match recorded activity, not every day between start and finish.
