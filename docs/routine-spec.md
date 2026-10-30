@@ -260,6 +260,9 @@ routines.<n>.<prepare|validate> must be a non-empty array of strings (an argv li
 The `{{<K>}}` collision covers `DAY`, `DATA_ROOT`, `ATTEMPT_DIR` and `DIGEST_DIR`, so the
 keys `day`, `data_root`, `attempt_dir` and `digest_dir` are rejected.
 
+Note: `docs/routine-hardening-spec.md` section 3 adds the `terminal_hook` and
+`stale_sources` keys and their messages, and the `--reason` message of `routine pause`.
+
 Profiles:
 
 ```text
@@ -1044,6 +1047,10 @@ Example:
 2026-10-28T05:20:41+00:00 routine=daily run=20261028T052003Z-1a2b3c4d event=invoke day=2026-10-27 exit=0 thread=6f0c1e2a-... outcome=succeeded cost_usd=0.84 seconds=612.3
 ```
 
+Note: `docs/routine-hardening-spec.md` section 5 adds the events `skipped-paused`,
+`skipped-disabled`, `stale-source`, `hook` and `disabled`. With `run --json` the log
+lines are never echoed to stdout, which then holds the run report alone.
+
 On a failure, the event line is followed by up to 20 lines of the failing child's
 stderr tail, each prefixed with `      [stderr] `, as `sync.py:144-145` does.
 
@@ -1119,6 +1126,11 @@ Reasons: `incomplete-input`, `render-error`, `budget-exhausted`, `prepare-exit-<
 {"run_id": "...", "started_at": "...", "finished_at": "...", "exit": 0, "days": ["2026-10-27"], "done": 1, "empty": 0, "failed": 0, "deferred": 0, "cost_usd": 0.84, "error": null}
 ```
 
+Note: since `docs/routine-hardening-spec.md`, `last-run.json` is the run report of that
+spec's section 5: these keys keep their names and meanings, and `schema_version`,
+`routine`, `status`, `reason`, `stale_sources`, `breaker` and per-day `rows` are added.
+`stale-source` joins the uncounted reasons.
+
 Cost: Claude's result line has `usage.total_cost_usd` (`claude.py:156`, surfaced in the
 result at `invoke.py:1211`). Codex usage is token counts with no cost
 (`codex.py:209-217`), so a Codex routine always records `cost_usd: null` and the log
@@ -1164,6 +1176,12 @@ Prints:
 7. Log tail: the last `N` lines (default 20).
 
 `--json` prints one object with those sections. Exit 0, or 2 for an unknown routine.
+
+Note: `docs/routine-hardening-spec.md` section 3 replaces this exit rule. `status` now
+exits 0 when the routine is fresh or running, 1 when it needs attention (never run,
+stale, a failed day, a non-zero last run), and 2 when it is paused or disabled, or for
+an unknown routine. The JSON gains `schema_version`, `state`, `exit`, `attention`,
+`paused`, `disabled`, `last_run_age_s` and `stale_after_s`.
 
 ### 6.5 `cairn routine uninstall NAME`
 

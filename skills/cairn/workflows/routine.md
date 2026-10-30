@@ -13,6 +13,7 @@ under `routines`; `cairn routine` installs, runs and reports it. Scheduling is l
   run `cairn invoke <peer> --owner routine:NAME`, run `validate`
 - A day is done only after `validate` passes
 - One run at a time per routine; a second start logs `skipped-lock` and exits 0
+- A paused or disabled routine skips every run until `cairn routine resume NAME`
 
 ## 1. Define the routine
 
@@ -39,6 +40,8 @@ cairn config set routines.daily.outputs.inbox_dir "~/projects/site/inbox"
 | `budget_usd_per_day` | no | Claude only; the remainder goes to `--max-budget-usd` |
 | `outputs` | no | named directories; `journal_dir` defaults to `{{DATA_ROOT}}/journal` |
 | `prepare` | no | argv list, or null |
+| `terminal_hook` | no | argv list with an absolute first element, or null; no template variables |
+| `stale_sources` | no | `warn` (default), `refuse` or `ignore` |
 
 A scheduled peer usually needs a config profile with its own permissions. Claude:
 
@@ -128,10 +131,30 @@ run opens a new attempt for the same day. Not loaded: exit 1, run `install`.
 
 ```bash
 cairn routine status daily          # --json, --lines N
-cairn routine list                  # one line per routine
+cairn routine list                  # one line per routine, ending in state=<state>
 ```
 
-`status` prints the config, the resolved paths (state dir, log, plist), the install state,
+`status` names one state and exits with a code a script can gate on:
+
+| State | When | Exit |
+| ----- | ---- | ---- |
+| `fresh` | the last run finished under 48 h ago | 0, or 1 with an attention code |
+| `running` | a run is in progress (its process is alive) | 0, or 1 with an attention code |
+| `never_run` | no `last-run.json` yet | 1 |
+| `stale` | the last run finished over 48 h ago | 1 |
+| `paused` | `cairn routine pause` wrote a marker | 2 |
+| `disabled` | the breaker stopped the routine | 2 |
+
+The attention codes are `failed-day`, `attempts-exhausted`, `corrupt-stamp`,
+`last-run-exit-<n>`, `interrupted-run`, `launchd-missing` (macOS only) and `stale-source`.
+The state comes from files only, so `status` answers while launchd is wedged. An unknown
+routine is also exit 2, but prints no JSON on stdout:
+
+```bash
+cairn routine status daily --json > /tmp/daily-status.json || echo "routine daily needs a look"
+```
+
+`status` also prints the config, the resolved paths (state dir, log, plist), the install state,
 the last run, one line per day (`done attempt 2 cost 0.84`, `failed (validate-exit-1)
 attempts 3/3`, `pending`, `expired`), the last cost and the log tail. Codex reports no cost,
 so its cost is `null`.
@@ -148,7 +171,57 @@ Where to look after a failure:
 
 A failed day is retried on the next run, up to 3 counted attempts. A run stops at its first
 failed day and defers the rest. `incomplete-input` (a source refresh failed),
-`render-error` and `budget-exhausted` do not count as attempts.
+`render-error`, `budget-exhausted` and `stale-source` do not count as attempts.
+
+After 3 consecutive runs that each end failed with a counted failure, the routine
+disables itself: it writes `disabled.json`, and every later run logs `skipped-disabled`
+and exits 0 without spending a peer round. Fix the cause, then run
+`cairn routine resume daily`. A run with a done or empty day resets the count.
+
+`cairn routine run daily --json` prints one report object on stdout (`schema_version`,
+`status` of `ok`, `partial`, `failed`, `clean` or `skipped`, the counts, `failures`,
+`stale_sources`, `breaker` and one row per day). The same object is `last-run.json`.
+
+After the refresh, each run checks the digest sources that are enabled but not in
+`sources`. A source with no successful export in the last 24 h gives one warning:
+
+```text
+warning: routine daily: source cursor was last exported 2026-10-27T10:00:00+00:00 (71.2 h ago); add it to routines.daily.sources or run 'cairn sync'
+```
+
+`stale_sources: "refuse"` (or `run --stale-sources refuse`) fails the days with
+`stale-source` instead, before any peer round; `ignore` skips the check. Each
+`cairn <source> export` writes `<state_home>/cairn/exports/<source>.json`; a store
+exported before this version falls back to its catalog's modification time.
+
+## Pause and resume
+
+```bash
+cairn routine pause daily --reason "moving house"
+cairn routine resume daily
+```
+
+`pause` writes `paused.json` in the state dir; the reason is one line of at most 200
+characters. Each run then prints `routine daily: paused since ... (moving house); run
+'cairn routine resume daily' to resume` on stderr and exits 0, with no stamp, no
+`last-run.json` and no hook. `--force` does not bypass a pause or a disabled routine;
+`--dry-run` still works. `resume` removes `paused.json`, `disabled.json` and
+`breaker.json`. `install` and `kickstart` keep the markers and print a `note:` line.
+
+## Notify on each day
+
+```bash
+cairn config set routines.daily.terminal_hook '["/usr/bin/osascript", "-e", "display notification \"cairn routine finished a day\""]'
+```
+
+The hook runs once each time a day's done or failed stamp is written, with a 10 s
+timeout, `cd` as its working directory and the day's report row as one JSON line on
+stdin. Its environment adds `CAIRN_ROUTINE`, `CAIRN_ROUTINE_DAY`,
+`CAIRN_ROUTINE_OUTCOME` (`done`, `empty` or `failed`), `CAIRN_ROUTINE_REASON`,
+`CAIRN_ROUTINE_ATTEMPT`, `CAIRN_ROUTINE_ATTEMPT_DIR` and `CAIRN_ROUTINE_RUN_ID`. The
+first element must be an absolute path, because launchd runs with the recorded `PATH`.
+The run logs `event=hook` with the exit (`timeout`, `missing` or a number) and never
+retries it; a hook failure changes no stamp, count or exit code.
 
 ## 7. Re-run a day
 

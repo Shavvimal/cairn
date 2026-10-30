@@ -90,8 +90,9 @@ orchestration / admin:
   cairn config add-service-doc NAME PATH     mirror a docs folder into service-docs
   cairn cron install | uninstall             manage the hourly sync crontab entry
   cairn routine install | uninstall NAME     add / remove the launchd job (macOS)
-  cairn routine run NAME [--day D] [--force] [--dry-run]   run due days now
-  cairn routine list | status NAME [--json]  routines, stamps, last run, cost, log tail
+  cairn routine run NAME [--day D] [--force] [--dry-run] [--json]   run due days now
+  cairn routine list | status NAME [--json]  state, stamps, last run; status exits 0/1/2
+  cairn routine pause NAME --reason TEXT | resume NAME   skip runs until resumed
   cairn routine kickstart NAME [--force-restart]   ask launchd to start the job now
 
 other:
