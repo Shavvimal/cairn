@@ -280,7 +280,10 @@ the file ends:
 
 <!-- cairn:unverified line=5 reason=quote-not-found -->
 - The user asked to "fix the retry test before the release" [claude:3f2a9c1e f8]
+
 ```
+
+The blank line after each moved block is part of the format (4.5 step 3).
 
 ## 5. Data formats
 
@@ -328,7 +331,7 @@ The new key is additive; `sessions` and `skipped` keep their shape
 | Codex ids share their first 8 characters (UUIDv7, `docs/recall-digest-spec.md:633-640`) | `ambiguous-session`; the prompt asks for the full ref |
 | Export re-rendered after the digest (Codex result attached late) | `hash-mismatch`; re-run `prepare` and the peer |
 | Journal written with CRLF | Lines are split with `keepends=True`; `--fix` keeps each line's ending |
-| Quote contains Markdown escapes (`\*`) | Fails; the prompt says copy text exactly. Open question 2 |
+| Quote contains Markdown escapes (`\*`) | Fails; the prompt says copy text exactly. Decision 2 in section 10 |
 | `--fix` on a read-only file | exit 1, file unchanged |
 
 ## 7. Tests
@@ -443,5 +446,25 @@ About 900 lines in all, half of them tests: one day of work.
   owner-form preamble. A routine's subagent is excluded even when the routine session
   itself is not digested (it ran the day before, sits in another project, or has too few
   user messages).
+- An indented `>` line under a list item belongs to the item: each run of such lines is
+  one block quote, checked at any length against the item's own citations (before or
+  after it), so "in the same list item as its citation" verifies. Inline quotes inside
+  that run are not checked separately.
+- A code fence that never closes runs to the end of the file, as in CommonMark, and
+  verify warns `Warning: FILE:N: code fence never closes; the lines after it are not
+  checked` on stderr. The exit code does not change.
+- `NEAR_CITATION_RE` stays on one line and inside one bracket pair, so an unclosed `[f1`
+  does not swallow a later valid citation, and a report line never holds a newline.
+- Failures are reported in line order. A quote checked against the same frame cited twice
+  names that frame once and keeps its `ref` and `ordinal`.
+- Lines end at `\n` only (`\r\n` stays on its line), so a form feed or U+2028 in the
+  journal does not shift line numbers.
+- `sidecar-missing` also covers a sidecar that exists but cannot be read or parsed; the
+  detail is then `cannot read NAME: ERROR`.
+- `hash-mismatch` also covers a cited ordinal past the end of a re-rendered export; the
+  detail is then `REF frame N changed since the digest (the export now has M frames); the
+  export was re-rendered`.
+- `--fix` adds no second blank line before `## Unverified` when the text already ends
+  with one, and none at all when every block moved.
 - The prompt block in `skills/cairn/workflows/routine.md` also tells the peer the journal
   path. The example `scheduled` profile allows `Bash(cairn recall verify *)`.
