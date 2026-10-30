@@ -156,6 +156,9 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual(errors.exit_for("INVOKE_BUSY"), invoke.EXIT_BUSY)
         self.assertEqual(errors.exit_for("INVOKE_FAILED"), invoke.EXIT_FATAL)
         self.assertEqual(errors.exit_for("INVOKE_USAGE"), invoke.EXIT_USAGE)
+        # Adoption decides these two terminal outcomes; EXIT_BY_OUTCOME has no row for them.
+        for status in ("failed", "aborted", "unknown"):
+            self.assertEqual(errors.outcome_code(status), "INVOKE_FAILED", status)
         self.assertIsNone(errors.outcome_code("running"))
         self.assertIsNone(errors.outcome_code(None))
 

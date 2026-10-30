@@ -516,7 +516,8 @@ _ENTRIES = (
     ),
     ErrorCode(
         "INVOKE_FAILED",
-        "The peer exited non-zero or without a final event.",
+        "The peer exited non-zero or without a final event, or its runner died and the round "
+        "was adopted without one (outcome 'aborted' or 'unknown').",
         "The peer's own error decides whether a retry can help.",
         "Read 'error' and 'stderr_path'; retry when 'retryable' is true.",
         ("cairn", "invoke", "status", "{thread_id}"),
@@ -538,6 +539,9 @@ _OUTCOMES = MappingProxyType(
         "idle_timeout": "INVOKE_IDLE_TIMEOUT",
         "cancelled": "INVOKE_CANCELLED",
         "failed": "INVOKE_FAILED",
+        # An adopted round whose stream has no final event, or cannot be read.
+        "aborted": "INVOKE_FAILED",
+        "unknown": "INVOKE_FAILED",
     }
 )
 

@@ -41,7 +41,7 @@ exit; the command decides it.
 | `INVOKE_BUSY` | 75 | yes | Another round of the thread holds the lock. |
 | `INVOKE_CANCELLED` | 130 | no | A signal stopped the round. |
 | `INVOKE_DENIED` | 2 | yes | The peer's tool calls were refused and nothing it did stands. |
-| `INVOKE_FAILED` | the peer's exit code when it is positive, else 1 | no | The peer exited non-zero or without a final event. |
+| `INVOKE_FAILED` | the peer's exit code when it is positive, else 1 | no | The peer exited non-zero or without a final event, or its runner died and the round was adopted without one (outcome 'aborted' or 'unknown'). |
 | `INVOKE_IDLE_TIMEOUT` | 125 | yes | The round showed no activity for idle_timeout_s. |
 | `INVOKE_NESTED` | 2 | no | invoke started inside a peer run without --allow-nested. |
 | `INVOKE_TIMEOUT` | 124 | yes | The round hit its wall-clock timeout. |
@@ -262,7 +262,7 @@ exit; the command decides it.
 
 ## INVOKE_FAILED
 
-- Meaning: The peer exited non-zero or without a final event.
+- Meaning: The peer exited non-zero or without a final event, or its runner died and the round was adopted without one (outcome 'aborted' or 'unknown').
 - Why: The peer's own error decides whether a retry can help.
 - Next step: Read 'error' and 'stderr_path'; retry when 'retryable' is true.
 - Verify: `cairn invoke status {thread_id}`

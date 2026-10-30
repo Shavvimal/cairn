@@ -1651,6 +1651,28 @@ class TestStatusAndPublish(InvokeFixture):
         self.assertIn("result file missing", " ".join(data["warnings"]))
         self.assertTrue(self.thread(tid)["rounds"][0]["adopted_at"])
 
+    def test_wait_on_an_aborted_round_names_its_code(self):
+        # Runner and peer both killed before a final event: adoption records 'aborted',
+        # and the result 'wait' prints carries the registry code and fix.
+        runner = self.spawn(
+            "codex", "--json", "--cd", self.cwd, "--prompt", "x", env=self.hold_env()
+        )
+        state = self.started_round()
+        tid = state["thread_id"]
+        peer_pid = state["rounds"][0]["peer_pid"]
+        self.wait_ready()
+        os.kill(runner.pid, signal.SIGKILL)
+        runner.wait()
+        os.kill(peer_pid, signal.SIGKILL)
+        self.wait_for(lambda: self.gone(runner.pid))
+        self.wait_for(lambda: self.gone(peer_pid))
+        result, data = self.invoke("wait", tid, "--json")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "aborted")
+        self.assertEqual(data["code"], "INVOKE_FAILED")
+        self.assertEqual(data["fix"]["verify"], ["cairn", "invoke", "status", tid])
+
     def test_status_shows_progress_midway(self):
         runner = self.spawn(
             "codex",
