@@ -92,6 +92,57 @@ class TestClassify(RoutineFixture):
         plist.write_text("x")
         self.assertEqual(self.classify(macos=True).attention, [])
 
+    def test_unknown_identity_is_neither_running_nor_interrupted(self):
+        self.last_run(1)
+        marker = self.state / "running.json"
+        marker.write_text(json.dumps({"pid": os.getpid(), "start_token": None}))
+        verdict = self.classify()
+        self.assertEqual((verdict.state, verdict.attention, verdict.exit), ("fresh", [], 0))
+        marker.write_text(json.dumps({"pid": os.getpid(), "start_token": "x"}))
+        with patch("cairn.routine_state.process_identity", return_value=None):  # ps failed
+            verdict = self.classify()
+        self.assertEqual((verdict.state, verdict.attention), ("fresh", []))
+        identity = process_identity(os.getpid())
+        assert identity is not None
+        marker.write_text(json.dumps({"pid": os.getpid(), "start_token": identity[1]}))
+        self.assertEqual(self.classify().state, "running")
+
+    def test_now_sets_the_stamp_window(self):
+        self.last_run(1)
+        (self.state / "failed-2026-11-21.json").write_text(json.dumps({"attempts": 1}))
+        self.assertEqual(self.classify().attention, [])
+        later = self.classify(now=NOW + timedelta(days=10))
+        self.assertIn("failed-day", later.attention)
+
+    def test_last_run_exit_that_is_not_an_integer_is_unknown(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        finished = NOW.isoformat(timespec="seconds")
+        for body in ({}, {"exit": None}, {"exit": False}, {"exit": "1"}):
+            with self.subTest(body=body):
+                (self.state / "last-run.json").write_text(
+                    json.dumps({"finished_at": finished, **body})
+                )
+                self.assertEqual(self.classify().attention, ["last-run-exit-unknown"])
+
+    def test_age_falls_back_to_mtime_when_finished_at_is_unreadable(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        path = self.state / "last-run.json"
+        path.write_text(json.dumps({"exit": 0, "finished_at": "not a time"}))
+        old = NOW.timestamp() - 3 * 86_400
+        os.utime(path, (old, old))
+        verdict = self.classify()
+        self.assertEqual((verdict.state, verdict.last_run_age_s), ("stale", 259_200.0))
+
+    def test_strike_ignores_a_malformed_runs_value(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        breaker = self.state / "breaker.json"
+        for runs in (1, ["bad"], {"a": 1}):
+            with self.subTest(runs=runs):
+                breaker.write_text(json.dumps({"consecutive_failed_runs": 2, "runs": runs}))
+                marker = routine_state.strike(self.state, "r3", "t3", "validate-exit-1")
+                assert marker is not None
+                self.assertEqual([r["run_id"] for r in marker["runs"]], ["r3"])
+
     def test_interrupted_run_when_identity_dead(self):
         child = subprocess.Popen([sys.executable, "-c", "pass"])
         child.wait()

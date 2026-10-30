@@ -582,8 +582,11 @@ class Run:
             output_dir = self.config.output_dir(collection)
             receipt = export_receipt.read(source, output_dir)
             if receipt is not None:
-                last, basis = parse_time(receipt.get("last_ok_at")), "receipt"
+                last = parse_time(receipt.get("last_ok_at"))
+            if last is not None:
+                basis = "receipt"
             else:
+                # No receipt, or one with no successful export yet: the catalog's mtime.
                 try:
                     mtime = catalog_path(output_dir).stat().st_mtime
                 except OSError:
@@ -703,6 +706,10 @@ class Run:
             self.row(skipped_day, "skipped", reason)
         if not days:
             self.log.event("nothing-due")
+            if self.stale_mode != "ignore":
+                # Nothing to refuse, but the report still says which sources are stale,
+                # so a clean run neither hides nor keeps a stale-source attention.
+                self.stale = self.stale_sources()
             return self.finish(0, end_line=False)
         self.days = days
         self.log.event(

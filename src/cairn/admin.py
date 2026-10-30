@@ -180,6 +180,9 @@ def _routine_view(cfg: CairnConfig, spec: RoutineSpec) -> dict:
         "prompt_file": str(spec.prompt_file),
         "cd": str(spec.cd),
         "outputs": {key: str(path) for key, path in spec.outputs.items()},
+        # As the run uses them: ~ expanded in the hook argv, the default policy filled in.
+        "terminal_hook": list(spec.terminal_hook) if spec.terminal_hook else None,
+        "stale_sources": spec.stale_sources,
     }
     resolved.update({key: str(value) for key, value in routine_paths(cfg, spec.name).items()})
     return {**spec.raw, "resolved": resolved}

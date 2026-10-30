@@ -162,8 +162,9 @@ stderr is the routine log (`routine.py:117-119`).
 
 ### 4.1 Status classification
 
-`classify(config, spec, now) -> Classification` lives in a new module
-`src/cairn/routine_state.py`. It reads files only: no database, no network, no `launchctl`.
+`classify(config, spec, now=None, *, macos) -> Classification` lives in a new module
+`src/cairn/routine_state.py`. It reads files only: no database, no network, no `launchctl`. The stamp window and the
+age both come from `now` when it is given, else from the current UTC day and time.
 The `installed` field keeps calling `launchctl print` (`routine.py:227-234`), bounded by
 `LAUNCHCTL_PROBE_S` = 5 s. A probe that does not answer in time reads `installed: unknown`
 (doctor warns `'launchctl print' did not answer in 5 s; launchd may be wedged`). The exit
@@ -173,7 +174,9 @@ States, first match wins:
 
 1. `disabled`: `disabled.json` exists.
 2. `paused`: `paused.json` exists.
-3. `running`: `running.json` exists and `health.identity_alive(pid, start_token)` is true.
+3. `running`: `running.json` exists and its `(pid, start_token)` is the live process.
+   When the pid is alive but its identity cannot be read (no `ps`, or a null token), the
+   marker is `unknown`: neither `running` nor `interrupted-run`.
 4. `never_run`: `last-run.json` is missing.
 5. `stale`: the age of the last run is over `STALE_AFTER_S` = 2 × 86 400 s. The age comes
    from `finished_at` in `last-run.json`, or from the file mtime when that key cannot be
@@ -193,8 +196,8 @@ reasoning ("about 2 × the healthy gap") gives 2 here.
 | `failed-day` | A window day has a failed stamp under the cap |
 | `attempts-exhausted` | A window day has a failed stamp at the cap |
 | `corrupt-stamp` | A window day has an unreadable failed stamp (as `routine_plan.py:240-244`) |
-| `last-run-exit-<n>` | `last-run.json` has `exit` other than 0 |
-| `interrupted-run` | `running.json` exists, but its process is gone |
+| `last-run-exit-<n>` | `last-run.json` has an integer `exit` other than 0. A missing, boolean or non-integer `exit` gives `last-run-exit-unknown`, as a corrupt file does |
+| `interrupted-run` | `running.json` exists, but its process is gone, or the run raised (`interrupted` is set) |
 | `launchd-missing` | On macOS, the plist file is absent |
 | `stale-source` | The last run report lists a stale source |
 
@@ -244,8 +247,10 @@ and the dead identity gives the same result. The next run overwrites the file.
    `{reason, disabled_at, runs}` and log `event=disabled reason=...`.
 4. Any other run (`clean`, uncounted failures only, `skipped`) leaves `breaker.json` as it is.
 
-Cost bound: with a broken validator, the routine spends at most 3 peer rounds before it
-stops, instead of one round per day.
+Cost bound: with a broken validator, the routine spends at most 3 peer rounds in a row of
+wholly failed runs before it stops, instead of one round per day. A run with a done or empty
+day resets the count, so a validator that fails only some days is not stopped by the breaker
+(the per-day cap of 3 attempts still applies).
 
 ### 4.5 Stale-source check
 
@@ -253,13 +258,17 @@ stops, instead of one round per day.
    is in config and enabled. They are not the routine's `sources`: those were just refreshed,
    so they cannot be stale.
 2. The check runs once per run, after the refresh succeeds and before the first day
-   (between `routine_run.py:508` and `:512`). Mode: `--stale-sources` if given, else
-   `spec.stale_sources`. `ignore` skips the check.
+   (between `routine_run.py:508` and `:512`). A run with nothing due runs it too, so its
+   `clean` report still lists the stale sources (there is nothing to refuse). Mode:
+   `--stale-sources` if given, else `spec.stale_sources`. `ignore` skips the check.
+   Status reads `stale-source` from the last run report, so it clears with the next run
+   after an export, not at the moment of the export.
 3. For each source, the last export is `last_ok_at` from `exports/<source>-<key>.json`, for the
-   output directory of the current config. When that file is missing, or records another
-   output directory, (a store exported before this version), the fallback is the mtime of
-   `catalog_path(output_dir)`, with `basis: "catalog-mtime"`. With neither, the basis is
-   `none` and the source is stale.
+   output directory of the current config. When that file is missing, records another
+   output directory, or has no successful export yet (`last_ok_at` null, for example a store
+   exported before this version whose first export since then failed), the fallback is the
+   mtime of `catalog_path(output_dir)`, with `basis: "catalog-mtime"`. With neither, the
+   basis is `none` and the source is stale.
 4. A source whose last export is older than `STALE_SOURCE_S` = 24 h is stale. Each stale
    source gives one `warning:` line on stderr, one `event=stale-source source= age_h= basis=`
    log line and one entry in the report's `stale_sources`.
@@ -282,8 +291,8 @@ warning, because a receipt must never fail an export.
 
 ### 4.6 Terminal hook
 
-1. `Run.fail_day` and `Run.done_day` call `self.hook(day, outcome, reason, attempt, where, cost)`
-   after the stamp write. Every stamp write gives exactly one call. `incomplete-input` and
+1. `Run.fail_day` and `Run.done_day` build the day's row with `self.row(...)` and call
+   `self.hook(row)` after the stamp write. Every stamp write gives exactly one call. `incomplete-input` and
    `stale-source` give one call per day with `attempt: null`. Deferred and skipped days get
    no call.
 2. Environment: `child_environment(name, day, where)` (`routine_plan.py:292-306`), plus
@@ -383,7 +392,7 @@ Markers:
 
 ```json
 {"reason": "moving house", "paused_at": "2026-10-30T09:12:00+00:00", "cairn_version": "2.10.0"}
-{"reason": "3 consecutive failed runs: validate-exit-1, validate-exit-1, validate-exit-1", "disabled_at": "...", "runs": [{"run_id": "...", "finished_at": "...", "reason": "validate-exit-1"}]}
+{"reason": "3 consecutive failed runs: validate-exit-1, validate-exit-1, validate-exit-1", "disabled_at": "...", "runs": [{"run_id": "...", "finished_at": "...", "reason": "validate-exit-1"}], "cairn_version": "2.10.0"}
 ```
 
 Hook stdin: one row object from `rows`, plus `"routine"` and `"run_id"`.
@@ -400,7 +409,8 @@ Each follows the format of `routine_run.py:137-139` and passes `LOG_LINE` in
 | `last-run.json` is corrupt | `never_run` plus `last-run-exit-unknown` in attention. Exit 1 |
 | `running.json` from a crashed or raising run | `interrupted-run`. The next run overwrites the file |
 | `launchctl print` hangs | Killed after 5 s. `installed` is `unknown`; state and exit are unchanged |
-| `ps` is missing (identity probe fails) | `process_identity` returns `None`, so `running` is not reported. The run's own lock still protects it |
+| `ps` is missing (identity probe fails) | `process_identity` returns `None`, so neither `running` nor `interrupted-run` is reported while the pid lives. The run's own lock still protects it |
+| `breaker.json` holds a malformed `runs` value | Read as an empty list; the count still comes from `consecutive_failed_runs` |
 | The hook hangs | Killed at 10 s with its process group (`procs.py:96-100`). Logged `exit=timeout` |
 | The hook binary is gone | Exit 127, logged `exit=missing`. The run is unaffected |
 | The hook writes into the state dir | Not prevented. It runs as the user, like `validate` |
@@ -418,6 +428,11 @@ Each follows the format of `routine_run.py:137-139` and passes `LOG_LINE` in
 - `test_attention_codes_from_stamps`: `failed-day`, `attempts-exhausted`, `corrupt-stamp`.
 - `test_launchd_missing_only_on_macos`: patch `is_macos`.
 - `test_interrupted_run_when_identity_dead`: `running.json` with a dead pid.
+- `test_unknown_identity_is_neither_running_nor_interrupted`: a live pid with a null token, or with `ps` failing.
+- `test_now_sets_the_stamp_window`: a failed stamp outside today's window counts for a later `now`.
+- `test_last_run_exit_that_is_not_an_integer_is_unknown`: `{}`, null, false and `"1"`.
+- `test_age_falls_back_to_mtime_when_finished_at_is_unreadable`.
+- `test_strike_ignores_a_malformed_runs_value`.
 - `test_status_exit_codes_0_1_2`: CLI exits for `fresh`, a failed day, and paused.
 - `test_status_never_calls_launchctl_for_exit`: a `Launchctl` fake that raises still gives an exit code.
 - `test_status_answers_when_launchctl_print_hangs`: `subprocess.run` raises `TimeoutExpired`; `status --json` exits 0 with `installed: unknown`, and doctor warns.
@@ -440,6 +455,11 @@ Each follows the format of `routine_run.py:137-139` and passes `LOG_LINE` in
 - `test_stale_source_refuse_fails_days_uncounted_without_invoke`.
 - `test_stale_source_ignores_routine_sources_and_disabled_collections`.
 - `test_stale_source_falls_back_to_catalog_mtime`.
+- `test_receipt_without_a_successful_export_falls_back_to_catalog_mtime`.
+- `test_clean_run_reports_stale_sources_too`.
+- `test_hook_refused_or_broken_never_changes_stamp_or_exit`: exit 126 and `"error"`.
+- `test_lock_held_json_report_keeps_last_run`.
+- `test_running_marker_names_this_process_while_body_runs`.
 - `test_run_json_report_status_values`: `clean`, `ok`, `partial`, `failed`, `skipped`.
 - `test_run_json_stdout_is_one_object_on_tty`: patch `isatty` to true.
 - `test_last_run_json_keeps_legacy_keys`.
@@ -456,11 +476,14 @@ Each follows the format of `routine_run.py:137-139` and passes `LOG_LINE` in
 - `test_receipt_written_after_export_ok_and_failed`: `last_ok_at` moves only on exit 0.
 - `test_receipt_write_error_is_warning`.
 - `test_noop_sync_and_targeted_export_write_no_receipt`: `claude sync` with `{}` on stdin and `claude export FILE` write none; `export --all` does.
+- `test_export_with_an_error_finding_keeps_last_ok_at`: `run_export` returns 0, an error finding makes it exit 1.
 - `test_receipt_of_another_output_dir_is_not_read`: two output directories, two paths; a copied receipt is ignored.
 
 `tests/test_procs.py`:
 
 - `test_run_capped_input_reaches_stdin`.
+- `test_run_capped_input_child_that_never_reads_times_out`.
+- `test_run_capped_interrupt_closes_the_stdin_pipe`: `finish` closes stdin with stdout and stderr.
 
 ## 8. Docs to update
 
@@ -515,10 +538,14 @@ Commit order follows the steps. Each commit passes `make check`.
   process that cannot be reaped) is logged with `exit=error`. The run is unaffected.
 - `run --json --dry-run` is refused with exit 2 and
   `cairn routine: --json does not combine with --dry-run`, because the dry run prints text.
-- A deferred row carries no attempt fields; a skipped row carries only its reason.
+- Every row has the same keys. A deferred row has `attempt`, `attempts`, `cost_usd`,
+  `attempt_dir` and `hook` null; a skipped row has them null too, with its reason in
+  `reason`.
 - `status` prints a `state: <state> (exit <n>)` line, with the attention codes, as its
   first line after the routine name, and the paused or disabled line under it. The
   status `config` section gains `terminal_hook` and `stale_sources`.
 - `doctor` adds a `routine [<name>] paused` or `routine [<name>] disabled` warning line,
   whose detail is the skip line without the `routine <name>: ` prefix.
 - The new test of `run_capped` is `tests/test_procs.py`, a new module.
+- `config show --json` lists `terminal_hook` (with `~` expanded) and `stale_sources` (with
+  the default filled in) under each routine's `resolved`.

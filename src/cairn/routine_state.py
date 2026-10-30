@@ -11,12 +11,12 @@ from __future__ import annotations
 import contextlib
 import os
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from . import __version__, routine_plan
 from .config import CairnConfig, RoutineSpec, routine_paths
-from .health import identity_alive, process_identity
+from .health import process_identity
 from .routine_plan import ATTEMPT_CAP, RoutineError, read_json, stamp_path, write_json
 
 SCHEMA_VERSION = 1
@@ -149,10 +149,31 @@ def mark_interrupted(path: Path, cause: str) -> None:
         write_json(path, marker)
 
 
-def running_alive(marker: dict) -> bool:
+def running_liveness(marker: dict) -> str:
+    """``alive``, ``dead`` or ``unknown`` for a ``running.json`` marker.
+
+    ``unknown``: the pid exists but its identity cannot be read (no ``ps``, or a marker
+    written without a start token). Status then reports neither ``running`` nor
+    ``interrupted-run``; the run's own lock still protects it.
+    """
+    if marker.get("interrupted"):
+        return "dead"
     pid = marker.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return "dead"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except PermissionError:
+        pass  # alive, owned by someone else
+    except OSError:
+        return "dead"
     token = marker.get("start_token")
-    return identity_alive(pid if isinstance(pid, int) else None, token if token else None)
+    identity = process_identity(pid)
+    if identity is None or not token:
+        return "unknown"
+    return "alive" if identity[1] == token else "dead"
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +195,8 @@ def strike(sdir: Path, run_id: str, finished_at: str, reason: str) -> dict | Non
     """Add one failed run to ``breaker.json``; the ``disabled.json`` marker when the
     count reaches :data:`BREAKER_RUNS`, else ``None``."""
     count = breaker_count(sdir) + 1
-    runs = list((read_json(sdir / BREAKER_FILE) or {}).get("runs") or [])
+    raw = (read_json(sdir / BREAKER_FILE) or {}).get("runs")
+    runs = [run for run in raw if isinstance(run, dict)] if isinstance(raw, list) else []
     runs = [*runs, {"run_id": run_id, "finished_at": finished_at, "reason": reason}]
     runs = runs[-BREAKER_RUNS:]
     write_json(sdir / BREAKER_FILE, {"consecutive_failed_runs": count, "runs": runs})
@@ -226,9 +248,9 @@ class Classification:
         }
 
 
-def _stamp_attention(spec: RoutineSpec, sdir: Path) -> list[str]:
+def _stamp_attention(spec: RoutineSpec, sdir: Path, today: date) -> list[str]:
     found: set[str] = set()
-    for day in routine_plan.window(routine_plan.utc_today(), spec.catch_up_days):
+    for day in routine_plan.window(today, spec.catch_up_days):
         if stamp_path(sdir, "done", day).is_file():
             continue
         failed = stamp_path(sdir, "failed", day)
@@ -248,10 +270,11 @@ def classify(
     config: CairnConfig, spec: RoutineSpec, now: datetime | None = None, *, macos: bool
 ) -> Classification:
     """Name the routine's state (first match wins) and every attention code."""
+    today = routine_plan.utc_today() if now is None else now.astimezone(UTC).date()
     now = now or datetime.now(UTC)
     paths = routine_paths(config, spec.name)
     sdir = Path(paths["state_dir"])
-    attention = _stamp_attention(spec, sdir)
+    attention = _stamp_attention(spec, sdir, today)
 
     last_path = sdir / LAST_RUN_FILE
     last = read_json(last_path)
@@ -259,8 +282,11 @@ def classify(
     if last is None and last_path.exists():
         attention.append("last-run-exit-unknown")
     elif last is not None:
-        if last.get("exit") != 0:
-            attention.append(f"last-run-exit-{last.get('exit')}")
+        code = last.get("exit")
+        if not isinstance(code, int) or isinstance(code, bool):
+            attention.append("last-run-exit-unknown")
+        elif code != 0:
+            attention.append(f"last-run-exit-{code}")
         finished = parse_time(last.get("finished_at"))
         if finished is not None:
             age = (now - finished).total_seconds()
@@ -273,8 +299,9 @@ def classify(
             age = round(max(age, 0.0), 1)  # a clock skew never reads as stale
 
     running = read_marker(sdir / RUNNING_FILE)
-    alive = running is not None and running_alive(running)
-    if running is not None and not alive:
+    liveness = None if running is None else running_liveness(running)
+    alive = liveness == "alive"
+    if liveness == "dead":
         attention.append("interrupted-run")
     if macos and not Path(paths["plist"]).is_file():
         attention.append("launchd-missing")

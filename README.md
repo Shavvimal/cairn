@@ -318,7 +318,8 @@ A digest does not skip these sessions: it copies `owner` into each one's front m
 the consumer decides what to do with them. One run at a time per routine: a second
 start logs `skipped-lock` and exits 0. `routine run` refuses to start inside a peer run.
 After 3 consecutive failed runs with a counted failure the routine disables itself, so a
-broken validator costs at most 3 peer rounds; `cairn routine resume NAME` clears it.
+broken validator costs at most 3 peer rounds in a row (a run with a done or empty day resets
+the count); `cairn routine resume NAME` clears it.
 `cairn routine run NAME --json` prints the run report, which is also `last-run.json`. A
 run warns about a digest source that is enabled, not in `sources` and not exported in
 the last 24 h (`stale_sources`: `warn`, `refuse` or `ignore`). To be told about each day,

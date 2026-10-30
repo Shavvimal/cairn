@@ -347,6 +347,13 @@ class TestConfigSetRoutines(_ConfigFixture):
         self.assertEqual(resolved["outputs"], {"journal_dir": "/tmp/ctx/journal"})
         self.assertEqual(resolved["log"], "/tmp/ctx/logs/routine-daily.log")
         self.assertEqual(resolved["label"], "dev.cairn.routine.daily")
+        self.assertEqual((resolved["terminal_hook"], resolved["stale_sources"]), (None, "warn"))
+        hook = ["~/bin/notify", "--quiet"]
+        rc, _, err = _quiet(admin._config_set, "routines.daily.terminal_hook", json.dumps(hook))
+        self.assertEqual(rc, 0, err)
+        resolved = self._show_json()["routines"]["daily"]["resolved"]
+        home = str(Path.home())
+        self.assertEqual(resolved["terminal_hook"], [f"{home}/bin/notify", "--quiet"])
         self.assertTrue(resolved["plist"].endswith("dev.cairn.routine.daily.plist"))
         self.assertTrue(resolved["state_dir"].endswith("cairn/routines/daily"))
         # The template's example routine is listed too.

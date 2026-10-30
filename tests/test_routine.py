@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cairn import config, routine, routine_plan, routine_run
+from cairn.procs import ProcessCleanupError
 from cairn.storage import lock_path
 from tests.test_shared_store import StoreFixture
 
@@ -1148,6 +1149,22 @@ class TestTerminalHook(HardeningFixture):
         for line in self.log.read_text().splitlines():
             self.assertRegex(line, LOG_LINE)
 
+    def test_hook_refused_or_broken_never_changes_stamp_or_exit(self):
+        script = self.root / "not-executable"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o644)
+        self.write_config(terminal_hook=[str(script)])
+        code, report, _err = self.json_run("--day", "2026-11-11")
+        self.assertEqual((code, report["rows"][0]["hook"]["exit"]), (0, 126))
+        self.assertIsNotNone(self.stamp("done", "2026-11-11"))
+        broken = ProcessCleanupError("cleanup incomplete: pid 1 was not reaped 2s after SIGKILL")
+        with patch("cairn.routine_run.run_hook", side_effect=broken):
+            code, report, _err = self.json_run("--day", "2026-11-10")
+        self.assertEqual((code, report["rows"][0]["hook"]["exit"]), (0, "error"))
+        self.assertIn("exit=error", self.events("hook")[-1])
+        self.assertIn("ProcessCleanupError: cleanup incomplete", self.log.read_text())
+        self.assertIsNotNone(self.stamp("done", "2026-11-10"))
+
     def test_hook_runs_per_day_on_incomplete_input(self):
         calls = self.hook_config()
         code, _report, _err = self.json_run(children=Children(refresh=1))
@@ -1245,6 +1262,39 @@ class TestStaleSources(HardeningFixture):
         code, report, err = self.json_run("--day", "2026-11-10")
         self.assertEqual((code, err, report["stale_sources"]), (0, "", []))
 
+    def test_receipt_without_a_successful_export_falls_back_to_catalog_mtime(self):
+        from cairn import export_receipt
+        from cairn.catalog import catalog_path
+
+        output_dir = self.cfg.output_dir("antigravity-sessions")
+        export_receipt.write("antigravity", output_dir, "export", 1)  # last_ok_at: null
+        catalog = catalog_path(output_dir)
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        catalog.write_text("{}")
+        code, report, err = self.json_run("--day", "2026-11-11")
+        self.assertEqual((code, err, report["stale_sources"]), (0, "", []))
+        old = catalog.stat().st_mtime - 3 * 86_400
+        os.utime(catalog, (old, old))
+        code, report, err = self.json_run("--day", "2026-11-10")
+        self.assertEqual(report["stale_sources"][0]["basis"], "catalog-mtime")
+
+    def test_clean_run_reports_stale_sources_too(self):
+        self.receipt("antigravity", 1)
+        code, report, _err = self.json_run(children=Children())
+        self.assertEqual((code, report["status"], report["stale_sources"]), (0, "ok", []))
+        self.receipt("antigravity", 30)
+        code, report, err = self.json_run()
+        self.assertEqual((code, report["status"]), (0, "clean"))
+        self.assertEqual(report["stale_sources"][0]["source"], "antigravity")
+        self.assertIn("source antigravity was last exported ", err)
+        code, out, _err = self.cli("status", "daily", "--json")
+        self.assertIn("stale-source", json.loads(out)["attention"])
+        self.receipt("antigravity", 1)  # the user ran 'cairn sync'
+        code, report, err = self.json_run()
+        self.assertEqual((report["status"], report["stale_sources"], err), ("clean", [], ""))
+        code, out, _err = self.cli("status", "daily", "--json")
+        self.assertEqual((code, json.loads(out)["attention"]), (0, []))
+
     def test_stale_source_falls_back_to_catalog_mtime(self):
         from cairn.catalog import catalog_path
 
@@ -1291,7 +1341,7 @@ class TestRunReport(HardeningFixture):
             code = routine.main(["run", "daily", "--json"])
         self.assertEqual(code, 1)
         report = json.loads(out.getvalue())
-        self.assertEqual(report["run_id"], self.last_run()["run_id"])
+        self.assertEqual(report, self.last_run())
         out = TtyStringIO()
         with (
             patch("cairn.routine_run.run_command", Children()),
@@ -1299,6 +1349,46 @@ class TestRunReport(HardeningFixture):
         ):
             routine.main(["run", "daily", "--day", "2026-11-10", "--force"])
         self.assertIn(" event=start ", out.getvalue())  # without --json a TTY still echoes
+
+    def test_lock_held_json_report_keeps_last_run(self):
+        self.json_run(children=Children())
+        before = self.last_run()
+
+        def held(*_args, **_kwargs):
+            raise BlockingIOError
+
+        out = TtyStringIO()
+        children = Children()
+        with (
+            patch("cairn.routine_run.locked", held),
+            patch("cairn.routine_run.run_command", children),
+            redirect_stdout(out),
+            redirect_stderr(io.StringIO()),
+        ):
+            code = routine.main(["run", "daily", "--json", "--day", "2026-11-10", "--force"])
+        report = json.loads(out.getvalue())  # one object, no TTY skip line
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            (report["status"], report["reason"], report["exit"], report["rows"]),
+            ("skipped", "lock-held", 0, []),
+        )
+        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(children.calls, [])
+        self.assertEqual(self.last_run(), before)
+
+    def test_running_marker_names_this_process_while_body_runs(self):
+        seen: list[dict] = []
+
+        def body(run, today, day, force):
+            seen.append(json.loads((run.sdir / "running.json").read_text()))
+            return run.finish(0)
+
+        with patch.object(routine_run.Run, "body", autospec=True, side_effect=body):
+            code, _out, _err = self.cli("run", "daily")
+        self.assertEqual(code, 0)
+        self.assertEqual(seen[0]["pid"], os.getpid())
+        self.assertEqual(seen[0]["run_id"], self.last_run()["run_id"])
+        self.assertFalse((self.state / "running.json").exists())
 
     def test_last_run_json_keeps_legacy_keys(self):
         self.cli("run", "daily", children=Children(validate=[0, 1]))

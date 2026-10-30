@@ -11,6 +11,7 @@ from cairn import cli, export_receipt
 from cairn.sources.base import ConversationSource
 from cairn.sources.claude import ClaudeSource
 from cairn.sources.codex import CodexSource
+from cairn.sources.guards import ERROR, Finding
 from tests.test_shared_store import StoreFixture
 
 
@@ -80,6 +81,28 @@ class TestExportReceipt(StoreFixture):
             export_receipt.receipt_path("codex", here).read_text()
         )
         self.assertIsNone(export_receipt.read("codex", there))
+
+    def test_export_with_an_error_finding_keeps_last_ok_at(self):
+        source = CodexSource()
+        self.assertEqual(self.export(0), (0, ""))
+        first = export_receipt.read("codex", source.output_dir)
+        assert first is not None
+
+        def drift(_args):
+            source.report.findings.append(
+                Finding("codex", "x", "/tmp/x.jsonl", "parser-drift", ERROR, "drift")
+            )
+            return 0
+
+        with (
+            patch("cairn.export_receipt.datetime") as clock,
+            patch.object(source, "run_export", side_effect=drift),
+        ):
+            clock.now.return_value.isoformat.return_value = "2099-01-01T00:00:00+00:00"
+            self.assertEqual(self.run_source(source, ["export", "--all", "-q"]), 1)
+        second = export_receipt.read("codex", source.output_dir)
+        assert second is not None
+        self.assertEqual((second["last_exit"], second["last_ok_at"]), (1, first["last_ok_at"]))
 
     def test_receipt_write_error_is_warning(self):
         blocker = self.root / "state" / "cairn" / "exports"

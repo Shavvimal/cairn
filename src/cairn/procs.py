@@ -55,7 +55,7 @@ def finish(process: subprocess.Popen[str], grace_s: float = KILL_GRACE_S) -> Non
     Raises :class:`ProcessCleanupError` ("cleanup incomplete") when the leader is
     still not reaped after ``grace_s``, instead of waiting without a bound.
     """
-    for stream in (process.stdout, process.stderr):
+    for stream in (process.stdin, process.stdout, process.stderr):
         if stream is not None:
             with contextlib.suppress(OSError):
                 stream.close()
