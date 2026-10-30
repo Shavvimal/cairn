@@ -1121,8 +1121,11 @@ def _check_gaps(config: CairnConfig) -> None:
                 f"{refs(source, found.missing)}; run 'cairn sync'",
             )
             continue
-        held = f"; {found.held_on_disk} held by parser drift" if found.held_on_disk else ""
-        _ok(label, f"{total} sessions on disk {days}, all exported{held}")
+        if found.held_on_disk:
+            held = f"no unexplained gaps; {found.held_on_disk} held by parser drift"
+            _ok(label, f"{total} sessions on disk {days}, {held}")
+            continue
+        _ok(label, f"{total} sessions on disk {days}, all exported")
 
 
 def _check_drift(config: CairnConfig) -> None:

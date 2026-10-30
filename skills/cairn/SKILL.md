@@ -73,10 +73,11 @@ has no `--since`/`--all`**; instead `export` takes an optional `--clean` (full r
 `Error: parser drift: SOURCE:ID KIND: ...` means the source file holds records but the
 adapter rendered no user or assistant message (`zero-messages`), no line parsed as JSON
 (`unreadable-lines`) or a Codex rollout has no session id (`no-session-id`). The export
-wrote nothing for that session, kept the last good document and exits 1. It is a host
-format change or a corrupt file, not a cairn bug to work around: report the line, the
-`spec target` it names and the installed host version (`claude --version`, `codex
---version`, `agy --version`) to the user. Do not retry in a loop. `Warning: parser drift:
+wrote nothing for that session, kept the last good document and exits 1. The cause is a
+host format change, a corrupt file or a cairn parser regression. Treat the line as a
+diagnostic signal, not something to work around: report it, the `spec target` it names
+and the installed host version (`claude --version`, `codex --version`, `agy --version`)
+to the user. Do not retry in a loop. `Warning: parser drift:
 ... no-user-turns` writes the document anyway. `cairn doctor` lists open findings and
 `cairn sync` logs them on an `[exporter-drift]` line until a later export of that session
 parses cleanly.

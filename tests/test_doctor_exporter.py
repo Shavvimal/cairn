@@ -53,7 +53,7 @@ class TestDoctorExporter(StoreFixture):
         )
         self.assertIn(
             "  ok   gap check [codex-sessions] - 1 sessions on disk in the last 30 days, "
-            "all exported; 1 held by parser drift",
+            "no unexplained gaps; 1 held by parser drift",
             text,
         )
         for line in text.splitlines():

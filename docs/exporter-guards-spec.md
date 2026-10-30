@@ -77,7 +77,7 @@ Non-goals:
 |---|---|
 | `src/cairn/sources/spec_targets.py` | new, constants only, no config read |
 | `src/cairn/sources/guards.py` | new: `Finding`, `check_parse`, `FindingsStore`, `ParserDrift` |
-| `src/cairn/gaps.py` | new: enumerators, `scan`, `heal_plan` |
+| `src/cairn/gaps.py` | new: enumerators, `scan`, `refs`, `gap_sources` |
 | `<data_root>/exporter/findings.json` | new state file (user data, not tracked) |
 | `tests/fixtures/<source>/` for `claude`, `codex`, `antigravity`, `cursor` | new fixtures |
 
@@ -126,6 +126,7 @@ re-export.
 | doctor | `ok   exporter [{source}] - adapter {version}, spec target {checked} ({harness} {harness_version})` |
 | doctor | `warn parser drift - {ref} {kind}: {detail}; first seen {iso}` (at most 5), then `warn parser drift - +{k} more; see {findings path}` |
 | doctor | `ok   gap check [{collection}] - {n} sessions on disk in the last 30 days, all exported` |
+| doctor | `ok   gap check [{collection}] - {n} sessions on disk in the last 30 days, no unexplained gaps; {h} held by parser drift` when drift findings hold ids with no document |
 | doctor | `warn gap check [{collection}] - {m} of {n} sessions in the last 30 days have no document: {refs}; run 'cairn sync'` |
 
 `{ref}` is `source:<first 8 chars of the id>`. `{path}` is printed as found. It goes
@@ -259,6 +260,8 @@ no new file.
      the name (`codex.py:763`).
    - agy: `brain/<id>/` folders with a transcript (`antigravity.py:559-571`,
      `harnesses/antigravity.py:231-238`).
+     Its time is the index's `last_modified` when present, else the transcript mtime
+     (section 11).
 
    A candidate file has `now - 30d <= mtime <= now - GAP_SETTLE_S`.
 2. **Exported ids**: `load_catalog(config.output_dir(collection))`, then
@@ -354,6 +357,8 @@ A `drifted` case asserts that `check_parse` gives `zero-messages`.
 | A host renames the user record type | `zero-messages` (unknown types, 0 messages). No write. Exit 1. |
 | A legitimate control-only file | `empty` (info). Doctor is silent. The gap check skips it. |
 | A drift on an already-exported session | The last good document is kept (no write). The finding stays open until a parse passes. |
+| A Codex session with a drifted fragment and a healthy one | The whole session is held: no fragment is exported, so an older fragment never replaces the document a newer one wrote. The finding clears only when every fragment of the session parses without an error or warn finding. |
+| `findings.json` parses but has the wrong shape (not an object, another `schema_version`, an entry that is not an object or a field of the wrong type) | Same as corrupt: treated as empty with one stderr warning. |
 | The worker retries a deterministic drift | It fails 3 times, then `exhausted` (`hooks.py:252-256`). After an upgrade, `cairn hook retry SOURCE:ID`. No state-machine change. |
 | A Codex filename UUID differs from `session_meta.id` | It shows as still missing after heal and is named in the log. It is fixed in the enumerator, not hidden. |
 | The user deletes a document on purpose | The gap check re-exports it while the source file is under 30 days old. This is documented, and no tombstone is added. |
@@ -456,7 +461,10 @@ What shipped differs from the sections above in these places.
 | Unparseable document | Recorded in `export_one` at the id-collision read (`base.py:290-291`) as well as in `load_existing`; Codex and agy `_safe_target` no longer raise on such a file | On `main` the first read at `base.py:291` raised `FrontmatterParseError` before `load_existing` ran, and the Codex and agy planners raised earlier still, aborting the whole export |
 | Finding clears | A clean parse clears only drift kinds; a successful write clears `unparseable-document` | Otherwise every run cleared and re-recorded a blocked document (two writes per run) |
 | Heal exit code | `gap-heal:<collection>` is logged, not recorded as a failed step; the second scan is the verdict | A held drift outside the 1-day sync window makes the heal export exit 1 on every run, while the gap itself is closed |
-| Doctor gap line | `ok` adds `; N held by parser drift` when held ids exist | The `ok` text alone would claim held sessions were exported |
+| Doctor gap line | `ok` says `no unexplained gaps; N held by parser drift` when held ids exist, else `all exported` | "all exported" would claim held sessions were exported |
+| Codex unknown payload kinds | Under `event_msg` and `response_item` the finer kind decides: a kind in neither set (or a wrapper record with no payload type, `<wrapper>/?`) is unknown, and `ignored` lists the control and context kinds measured on the live store | Taking the whole wrapper as known let a renamed payload type (`response_item/message_v2`) read as `empty` and write an empty document. Re-measured on 807 rollouts: 800 clean, 7 `empty`, no error |
+| Codex fragments | The guard verdict is per logical session: one refused fragment holds every fragment of that session | Dropping only the refused file let an older healthy fragment overwrite the newer document, and a later clean fragment cleared the finding |
+| agy gap clock | The agy enumerator places a conversation in the window by the index's `last_modified` when agy recorded one, else the transcript mtime: the same time the export's `--since` filters on | With the mtime alone, a transcript touched long after its last turn was reported missing while the `--since 30d` heal skipped it, so `gap-check:antigravity-sessions` failed on every sync |
 | agy fixture | Invented steps with the record shapes of `AGY_STEPS`, not a copy of its text | Fixture text is invented throughout |
 
 Measured once on 2026-10-30 on one machine, read-only: Claude Code 222 sessions and
