@@ -116,6 +116,9 @@ is only raised, never lowered, except by a commit whose message says why.
 - `recall-qrels.json: row {id}: expected_top1 must be relevant[0] or in relevant`
 - `recall-qrels.json: row {id}: a temporal row needs --all-projects or --project in args`
 - `recall-qrels.json: duplicate id {id!r}`
+- `recall-qrels.json: row {id}: {path} is listed twice in relevant`
+- `recall-qrels.json: row {id}: a temporal row's expected_top1 must be relevant[0]`
+- `recall-qrels.json: row {id}: args is for temporal rows only`
 
 ### Skip message
 
@@ -141,8 +144,9 @@ None are new. The test passes or fails under `unittest`.
    `claude-code-sessions`, `codex-sessions` and `cursor-sessions`. Each collection gets
    an empty `store` folder under `<tmp>`, because no export runs.
 4. It sets every `.md` file's mtime to the file's `activity_at` (for the pre-schema file
-   and the exchange document, `last_activity`), plus one second per file in sorted path
-   order. This keeps all mtimes distinct, so the rg order is total. It models the
+   and the exchange document, `last_activity`), plus one second per file in
+   (activity, path) order. This keeps all mtimes distinct, so the rg order is total, and
+   never puts an older session after a newer one, however close their activity times. It models the
    contract in skills/search/SKILL.md: the file changes when its session does.
 5. It writes `claude-code-sessions/decoy-not-markdown.txt`, which holds every `exact`
    and `title-bare` query, with an mtime 60 seconds after the newest `.md` file. With
@@ -369,6 +373,8 @@ their floor). `TemporalQrelsTest.test_floors` prints the same shape with the one
 
 - `ScoringTest.test_metrics`: `recall_at`, `top1` and `exact` on empty and non-empty lists, and recall@5 for a list longer than five.
 - `ScoringTest.test_an_rg_error_scores_zero_and_is_shown`: an rg error on an empty-gold row scores 0 and prints the error; the same row without an error scores 1.
+- `ScoringTest.test_a_recall_miss_shows_the_relevant_set`: an rg row that keeps top-1 but loses a relevant document prints the relevant set and the first k.
+- `ScoringTest.test_table`: the exact text of a two-family table with one miss.
 - `ScoringTest.test_rg_outcome`: exit 0 gives the first 20 lines, exit 1 an empty list, exit 2 the first stderr line.
 - `CorpusStoreSetupTest.test_failed_setup_restores_the_environment`: a copy failure in `setUpClass` leaves no patched environment, cached config or temp directory after the class cleanups.
 - `CorpusStoreSetupTest.test_the_store_holds_a_non_markdown_decoy`: the decoy is the newest file and holds the rg queries.
@@ -453,8 +459,9 @@ Where the implementation departs from the design above:
    `render_document` and `export_one` in a throwaway home, so the join, the metadata
    block and the exporter and provenance stamps cannot drift from the exporters. The two
    documents that no exporter writes (pre-schema, exchange) use the helpers.
-3. **Mtime tie-break.** One second per file in sorted path order, not in spec order. The
-   activity times are minutes apart, so the offset only makes the order total.
+3. **Mtime tie-break.** One second per file in (activity, path) order, not in spec order.
+   The offset only makes the order total: it cannot invert two sessions, even when a new
+   corpus document lands seconds from another.
 4. **The exchange title** is the one `render_exchange` derives from the prompt
    ("codex round 1: ..."), not a hand-written title.
 5. **ripgrep in CI.** The recommended default was taken: one `apt-get` step before

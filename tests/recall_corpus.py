@@ -309,7 +309,7 @@ def _parent(
                 "agent_id": kid["agent_id"],
                 "title": kid["title"],
                 "agent_type": kid.get("agent_type"),
-                "request_shape": "task",
+                "request_shape": "foreground",
                 "finished": True,
                 "path": f"./{planned.stem}/agent-{kid['agent_id']}.md",
             }
@@ -348,7 +348,7 @@ def _child(
             parent_session_id=parent["id"],
             agent_type=doc.get("agent_type"),
             description=doc["title"],
-            request_shape="task",
+            request_shape="foreground",
             finished=True,
             git_branch=parent.get("branch"),
             parent_document=parent_doc.name,

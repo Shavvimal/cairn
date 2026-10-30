@@ -94,7 +94,7 @@ def load_qrels(data: dict[str, Any] | None = None, known: set[str] | None = None
                 "use temporal|exact|title-bare"
             )
         top = row.get("expected_top1")
-        for path in [*row["relevant"], *([top] if top else [])]:
+        for path in [*row["relevant"], *([top] if top is not None else [])]:
             if path not in known:
                 raise AssertionError(
                     f"{prefix} row {rid}: {path} is not in tests/fixtures/recall-corpus"
@@ -103,6 +103,15 @@ def load_qrels(data: dict[str, Any] | None = None, known: set[str] | None = None
             raise AssertionError(
                 f"{prefix} row {rid}: expected_top1 must be relevant[0] or in relevant"
             )
+        dupes = sorted({p for p in row["relevant"] if row["relevant"].count(p) > 1})
+        if dupes:
+            raise AssertionError(f"{prefix} row {rid}: {dupes[0]} is listed twice in relevant")
+        if row["family"] == "temporal" and row["relevant"] and top != row["relevant"][0]:
+            raise AssertionError(
+                f"{prefix} row {rid}: a temporal row's expected_top1 must be relevant[0]"
+            )
+        if row["family"] != "temporal" and "args" in row:
+            raise AssertionError(f"{prefix} row {rid}: args is for temporal rows only")
         args = row.get("args", [])
         if row["family"] == "temporal" and not {"--all-projects", "--project"} & set(args):
             raise AssertionError(
@@ -171,8 +180,14 @@ def score(family: str, rows: list[dict], results: dict[str, tuple[list[str], str
         out.top1 += t / len(rows)
         exacts.append(e)
         if r < 1 or t < 1 or (family == "temporal" and e < 1):
-            want = row["relevant"] if family == "temporal" else row["expected_top1"]
-            shown = got if family == "temporal" else got[:1]
+            # temporal shows the whole ordered list; an rg row shows its top-1, or the
+            # relevant set and the first k when a relevant document fell out of the k.
+            if family == "temporal":
+                want, shown = row["relevant"], got
+            elif r < 1:
+                want, shown = row["relevant"], got[:k]
+            else:
+                want, shown = row["expected_top1"], got[:1]
             out.misses += [
                 f"  {row['id']} {family}  want {want}",
                 f"  {' ' * len(row['id'])} {' ' * len(family)}  got  {shown}",
@@ -211,7 +226,7 @@ def rows_of(family: str) -> list[dict]:
 
 
 def skill_rg_line(path: Path, prefix: str = "rg -l ") -> str:
-    """The one fenced line of a skill that starts with ``prefix`` (the list pass)."""
+    """The one line of a skill that starts with ``prefix`` (default: the list pass)."""
     lines = [
         line.strip()
         for line in path.read_text(encoding="utf-8").splitlines()
@@ -304,14 +319,17 @@ class CorpusStore(unittest.TestCase):
             (cls.root / "stores" / name).mkdir(parents=True)
             shutil.copytree(CORPUS / name, cls.data / name)
         # The file changes when its session does (skills/search/SKILL.md), so the mtime
-        # is the last activity; one second per file keeps the rg order total.
-        for index, rel in enumerate(corpus_files(cls.data)):
-            path = cls.data / rel
-            fm = parse_frontmatter(path.read_text(encoding="utf-8"))
+        # is the last activity. One second per file, in (activity, path) order, keeps the
+        # rg order total without ever putting an older session after a newer one.
+        stamps = []
+        for rel in corpus_files(cls.data):
+            fm = parse_frontmatter((cls.data / rel).read_text(encoding="utf-8"))
             stamp = timeutil.parse_iso(fm.get("activity_at") or fm.get("last_activity"))
             assert stamp is not None, rel
-            when = stamp.timestamp() + index
-            os.utime(path, (when, when))
+            stamps.append((stamp.timestamp(), rel))
+        for index, (stamp_s, rel) in enumerate(sorted(stamps)):
+            when = stamp_s + index
+            os.utime(cls.data / rel, (when, when))
         # A non-Markdown file that holds every rg query and is the newest file in the
         # store: if a skill drops --type md, it takes top-1 on every rg row.
         decoy = cls.data / recall_corpus.COLLECTIONS["claude"] / DECOY
@@ -357,6 +375,30 @@ class ScoringTest(unittest.TestCase):
         self.assertEqual((broken.recall, broken.top1), (0.0, 0.0))
         self.assertEqual(broken.failed(), ["recall", "top1"])
         self.assertIn("rg: exit 2: rg: unrecognized flag --x", "\n".join(broken.misses))
+
+    def test_a_recall_miss_shows_the_relevant_set(self):
+        row = {"id": "e98", "relevant": ["a.md", "b.md"], "expected_top1": "a.md", "note": "n"}
+        res = score("exact", [row], {"e98": (["a.md", "x", "y", "z", "w", "b.md"], "")}, 5)
+        self.assertEqual((res.recall, res.top1), (0.5, 1.0))
+        self.assertIn("want ['a.md', 'b.md']", res.misses[0])
+        self.assertIn("got  ['a.md', 'x', 'y', 'z', 'w']", res.misses[1])
+
+    def test_table(self):
+        row = {"id": "e97", "relevant": ["a.md"], "expected_top1": "a.md", "note": "n"}
+        ok = score("exact", [row], {"e97": (["a.md"], "")}, 5)
+        bad = score("title-bare", [{**row, "id": "b97"}], {"b97": (["x"], "")}, 5)
+        self.assertEqual(
+            table([ok, bad]).splitlines(),
+            [
+                "family      rows recall@5 top1  exact floors                             status",
+                "exact          1   1.00   1.00   -    recall>=1.00 top1>=1.00            ok",
+                "title-bare     1   0.00   0.00   -    recall>=1.00 top1>=0.77            FAIL",
+                "misses:",
+                "  b97 title-bare  want ['a.md']",
+                "                  got  ['x']",
+                "                  note: n",
+            ],
+        )
 
     def test_rg_outcome(self):
         self.assertEqual(rg_outcome(0, "a.md\nb.md\n", ""), (["a.md", "b.md"], ""))
@@ -418,6 +460,30 @@ class QrelsFileTest(unittest.TestCase):
                 "--project in args",
             ),
             (doc(good, good), "recall-qrels.json: duplicate id 'e01'"),
+            (
+                doc({**good, "relevant": ["a.md", "a.md"]}),
+                "recall-qrels.json: row e01: a.md is listed twice in relevant",
+            ),
+            (
+                doc(
+                    {
+                        **good,
+                        "family": "temporal",
+                        "args": ["--all-projects"],
+                        "relevant": ["a.md", "b.md"],
+                        "expected_top1": "b.md",
+                    }
+                ),
+                "recall-qrels.json: row e01: a temporal row's expected_top1 must be relevant[0]",
+            ),
+            (
+                doc({**good, "args": ["--all-projects"]}),
+                "recall-qrels.json: row e01: args is for temporal rows only",
+            ),
+            (
+                doc({**good, "relevant": [], "expected_top1": ""}),
+                "recall-qrels.json: row e01:  is not in tests/fixtures/recall-corpus",
+            ),
         ]
         for data, message in cases:
             with self.subTest(message=message), self.assertRaises(AssertionError) as caught:
