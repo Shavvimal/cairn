@@ -10,7 +10,8 @@ queries in three families with the documents each must return:
   ``/recall`` skills print it (the flags are parsed from the two SKILL.md files).
 
 Each family has floors for recall@5 and expected-top-1 (and, for ``temporal``, the
-whole ordered list). A failure prints one table with every family and every miss.
+whole ordered list). A failing floor test prints one table with its families and every
+miss: the temporal test for ``temporal``, the rg test for ``exact`` and ``title-bare``.
 See docs/recall-qrels-spec.md, including how to add a row when a retrieval bug is fixed.
 """
 
@@ -56,6 +57,7 @@ FLOORS: dict[str, dict[str, float]] = {
 RG_CAP = 20  # the /search head -n cap; /recall keeps 10
 RG_SKIP = "rg not on PATH; the exact and title-bare families need ripgrep"
 PLACEHOLDERS = ("QUERY", "TERM")
+DECOY = "decoy-not-markdown.txt"
 
 
 # ---------------------------------------------------------------------------
@@ -159,9 +161,12 @@ def score(family: str, rows: list[dict], results: dict[str, tuple[list[str], str
     exacts = []
     for row in rows:
         got, error = results[row["id"]]
-        r = recall_at(got, row["relevant"], k)
-        t = top1(got, row["expected_top1"])
-        e = exact(got, row["relevant"])
+        if error:  # an rg failure is a miss even when the gold list is empty
+            r = t = e = 0.0
+        else:
+            r = recall_at(got, row["relevant"], k)
+            t = top1(got, row["expected_top1"])
+            e = exact(got, row["relevant"])
         out.recall += r / len(rows)
         out.top1 += t / len(rows)
         exacts.append(e)
@@ -205,15 +210,15 @@ def rows_of(family: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def skill_rg_line(path: Path) -> str:
-    """The one fenced ``rg -l`` line of a skill."""
+def skill_rg_line(path: Path, prefix: str = "rg -l ") -> str:
+    """The one fenced line of a skill that starts with ``prefix`` (the list pass)."""
     lines = [
         line.strip()
         for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip().startswith("rg -l ")
+        if line.strip().startswith(prefix)
     ]
     if len(lines) != 1:
-        raise AssertionError(f"{path}: expected one 'rg -l' line, found {len(lines)}")
+        raise AssertionError(f"{path}: expected one {prefix.strip()!r} line, found {len(lines)}")
     return lines[0]
 
 
@@ -234,6 +239,16 @@ def skill_rg_argv(path: Path) -> tuple[list[str], int]:
     return argv, int(head[head.index("-n") + 1])
 
 
+def rg_outcome(returncode: int, stdout: str, stderr: str) -> tuple[list[str], str]:
+    """The listed paths and an error: exit 1 is no match, any other non-zero is an error."""
+    if returncode == 1:
+        return [], ""
+    if returncode:
+        first = (stderr.strip().splitlines() or [f"exit {returncode}"])[0]
+        return [], f"exit {returncode}: {first}"
+    return stdout.splitlines()[:RG_CAP], ""
+
+
 # ---------------------------------------------------------------------------
 # The temp store
 # ---------------------------------------------------------------------------
@@ -250,6 +265,7 @@ class CorpusStore(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._tmp = TemporaryDirectory()
+        cls.addClassCleanup(cls._tmp.cleanup)
         cls.root = Path(cls._tmp.name).resolve()
         cls.data = cls.root / "data"
         cfg = cls.root / "config.json"
@@ -280,6 +296,9 @@ class CorpusStore(unittest.TestCase):
         env.pop("RIPGREP_CONFIG_PATH", None)  # a user's rg defaults must not change the run
         cls._env = patch.dict(os.environ, env, clear=True)
         cls._env.start()
+        # Class cleanups run even when setUpClass raises; tearDownClass does not.
+        cls.addClassCleanup(config.get_config.cache_clear)
+        cls.addClassCleanup(cls._env.stop)
         config.get_config.cache_clear()
         for name in recall_corpus.COLLECTIONS.values():
             (cls.root / "stores" / name).mkdir(parents=True)
@@ -293,12 +312,13 @@ class CorpusStore(unittest.TestCase):
             assert stamp is not None, rel
             when = stamp.timestamp() + index
             os.utime(path, (when, when))
-
-    @classmethod
-    def tearDownClass(cls):
-        cls._env.stop()
-        config.get_config.cache_clear()
-        cls._tmp.cleanup()
+        # A non-Markdown file that holds every rg query and is the newest file in the
+        # store: if a skill drops --type md, it takes top-1 on every rg row.
+        decoy = cls.data / recall_corpus.COLLECTIONS["claude"] / DECOY
+        queries = [row["query"] for row in load_qrels()["queries"] if row["family"] != "temporal"]
+        decoy.write_text("\n".join(queries) + "\n", encoding="utf-8")
+        newest = max(p.stat().st_mtime for p in cls.data.rglob("*.md")) + 60
+        os.utime(decoy, (newest, newest))
 
     def relative(self, path: str) -> str:
         return Path(path).resolve().relative_to(self.data).as_posix()
@@ -323,6 +343,30 @@ class ScoringTest(unittest.TestCase):
         self.assertEqual(exact(["a", "b"], ["a", "b"]), 1.0)
         self.assertEqual(exact(["b", "a"], ["a", "b"]), 0.0)
         self.assertEqual(exact([], []), 1.0)
+
+    def test_an_rg_error_scores_zero_and_is_shown(self):
+        row: dict[str, Any] = {
+            "id": "e99",
+            "relevant": [],
+            "expected_top1": None,
+            "note": "empty gold",
+        }
+        clean = score("exact", [row], {"e99": ([], "")}, 5)
+        self.assertEqual((clean.recall, clean.top1, clean.misses), (1.0, 1.0, []))
+        broken = score("exact", [row], {"e99": ([], "exit 2: rg: unrecognized flag --x")}, 5)
+        self.assertEqual((broken.recall, broken.top1), (0.0, 0.0))
+        self.assertEqual(broken.failed(), ["recall", "top1"])
+        self.assertIn("rg: exit 2: rg: unrecognized flag --x", "\n".join(broken.misses))
+
+    def test_rg_outcome(self):
+        self.assertEqual(rg_outcome(0, "a.md\nb.md\n", ""), (["a.md", "b.md"], ""))
+        self.assertEqual(rg_outcome(0, "".join(f"{i}.md\n" for i in range(30)), "")[0][-1], "19.md")
+        self.assertEqual(rg_outcome(1, "", ""), ([], ""))
+        self.assertEqual(
+            rg_outcome(2, "", "rg: unrecognized flag --x\nmore\n"),
+            ([], "exit 2: rg: unrecognized flag --x"),
+        )
+        self.assertEqual(rg_outcome(2, "", ""), ([], "exit 2: exit 2"))
 
 
 class QrelsFileTest(unittest.TestCase):
@@ -442,6 +486,41 @@ class SkillRgTest(unittest.TestCase):
             with self.subTest(skill=name):
                 self.assertEqual(argv[argv.index("QUERY") - 1], "-e")
 
+    def test_search_second_pass_passes_the_query_with_e(self):
+        tokens = shlex.split(skill_rg_line(SKILLS["search"], prefix="rg -n "))
+        self.assertEqual(tokens[tokens.index("QUERY") - 1], "-e")
+
+
+class CorpusStoreSetupTest(unittest.TestCase):
+    def test_failed_setup_restores_the_environment(self):
+        class Probe(CorpusStore):
+            pass
+
+        before = dict(os.environ)
+        with (
+            patch("shutil.copytree", side_effect=OSError("copy failed")),
+            self.assertRaises(OSError),
+        ):
+            Probe.setUpClass()
+        self.assertNotEqual(os.environ.get("HOME"), before.get("HOME"))
+        Probe.doClassCleanups()
+        self.assertEqual(dict(os.environ), before)
+        self.assertEqual(config.get_config.cache_info().currsize, 0)
+        self.assertFalse(Probe.root.exists())
+
+    def test_the_store_holds_a_non_markdown_decoy(self):
+        class Probe(CorpusStore):
+            pass
+
+        Probe.setUpClass()
+        try:
+            decoy = Probe.data / recall_corpus.COLLECTIONS["claude"] / DECOY
+            newest = max(p.stat().st_mtime for p in Probe.data.rglob("*.md"))
+            self.assertGreater(decoy.stat().st_mtime, newest)
+            self.assertIn("--sortr modified", decoy.read_text(encoding="utf-8"))
+        finally:
+            Probe.doClassCleanups()
+
 
 class TemporalQrelsTest(CorpusStore):
     def anchor(self) -> datetime:
@@ -495,13 +574,8 @@ class ExactQrelsTest(CorpusStore):
                 argv.append(token)
         argv[0] = str(self.rg)
         result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
-        if result.returncode == 1:
-            return [], ""
-        if result.returncode:
-            first = (result.stderr.strip().splitlines() or [f"exit {result.returncode}"])[0]
-            return [], f"exit {result.returncode}: {first}"
-        lines = result.stdout.splitlines()[:RG_CAP]
-        return [self.relative(line) for line in lines], ""
+        lines, error = rg_outcome(result.returncode, result.stdout, result.stderr)
+        return [self.relative(line) for line in lines], error
 
     def test_floors(self):
         k = load_qrels()["k"]

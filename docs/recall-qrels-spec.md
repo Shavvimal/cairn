@@ -133,7 +133,9 @@ None are new. The test passes or fails under `unittest`.
 1. `setUpClass` creates a `TemporaryDirectory`. It sets `HOME`, `XDG_CACHE_HOME`,
    `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `CAIRN_CONFIG` inside it, drops the host
    identity hints as `StoreFixture` does (tests/test_shared_store.py), drops
-   `RIPGREP_CONFIG_PATH`, and clears `config.get_config`.
+   `RIPGREP_CONFIG_PATH`, and clears `config.get_config`. It registers the directory
+   removal, the environment restore and the cache clear as class cleanups at once, so
+   they run even when a later setup step fails (unittest skips `tearDownClass` then).
 2. It copies the three collection folders with `shutil.copytree` to `<tmp>/data/`.
 3. It writes a config with `data_root=<tmp>/data` and the collections
    `claude-code-sessions`, `codex-sessions` and `cursor-sessions`. Each collection gets
@@ -142,6 +144,10 @@ None are new. The test passes or fails under `unittest`.
    and the exchange document, `last_activity`), plus one second per file in sorted path
    order. This keeps all mtimes distinct, so the rg order is total. It models the
    contract in skills/search/SKILL.md: the file changes when its session does.
+5. It writes `claude-code-sessions/decoy-not-markdown.txt`, which holds every `exact`
+   and `title-bare` query, with an mtime 60 seconds after the newest `.md` file. With
+   `--type md` the rg pass never lists it. Without `--type md` it takes top-1 on every
+   rg row.
 
 ### 4.2 Temporal family
 
@@ -183,8 +189,12 @@ For each row, with `R` = `relevant` and `G` = the returned list:
 - `exact` (temporal only) = 1 if G == R as ordered lists.
 
 The family value is the mean over the family's rows. Each family is compared with its
-floors. If any floor fails, one `self.fail` prints the whole table (section 5.3), so one
-run shows every family and every miss. A per-row `subTest` is not used, because the
+floors. There are two floor tests: `TemporalQrelsTest.test_floors` for `temporal` and
+`ExactQrelsTest.test_floors` for `exact` and `title-bare` (the second skips without rg).
+If a floor fails, that test's one `self.fail` prints a table of its families
+(section 5.3), with every miss. A run shows every family, in at most two tables.
+A row whose rg run failed (any exit other than 0 and 1) scores 0 on every metric, also
+when its gold list is empty, and its misses line prints the rg error. A per-row `subTest` is not used, because the
 floor is a property of the family, not of a single row.
 
 ### 4.5 Capture and replay: out, with reasons
@@ -327,7 +337,6 @@ That gives 15 + 12 + 9 = 36 rows.
 
 ```
 family      rows recall@5 top1  exact floors                             status
-temporal      15   1.00   1.00  1.00  exact>=1.00 recall>=1.00 top1>=1.00 ok
 exact         12   0.92   0.92   -    recall>=1.00 top1>=1.00            FAIL
 title-bare     9   1.00   0.78   -    recall>=1.00 top1>=0.77            ok
 misses:
@@ -337,8 +346,10 @@ misses:
              rg: exit 2: rg: unrecognized flag --sortr modified
 ```
 
-This is the table the test printed against the skill lines before the `-e` fix. The
-misses list also names b01 and b07, which do not fail their floor.
+This is the table `ExactQrelsTest.test_floors` printed against the skill lines before
+the `-e` fix (shortened: the misses list also names b01 and b07, which do not fail
+their floor). `TemporalQrelsTest.test_floors` prints the same shape with the one
+`temporal` row and an `exact` column.
 
 ## 6. Failure modes
 
@@ -346,7 +357,7 @@ misses list also names b01 and b07, which do not fail their floor.
 |---|---|
 | rg absent | the `exact` and `title-bare` tests skip with the exact message. `temporal` still runs |
 | rg exits 2 (bad flag, bad regex) | the row scores 0, and the table prints the first line of stderr |
-| A skill drops `-F`, `-i`, `-e` or `--type md` | e07 and e10 fail without `-F`; e12 fails without `-e`; `test_query_is_passed_with_e` names a missing `-e` |
+| A skill drops `-F`, `-i`, `-e` or `--type md` | e07 and e10 fail without `-F`; e12 fails without `-e`; `test_query_is_passed_with_e` names a missing `-e` on the list pass and `test_search_second_pass_passes_the_query_with_e` on the `/search` pass 2; without `--type md` the decoy takes top-1 on every rg row |
 | The two skills' rg lines differ | `test_skill_rg_lines_agree` fails and prints both lines |
 | A temporal row has no project scope | the loader fails, because the row would depend on the test's cwd |
 | The renderer changes the document shape | `test_corpus_matches_builder` fails. The author runs `uv run python -m tests.recall_corpus --write` and reviews the diff |
@@ -357,6 +368,10 @@ misses list also names b01 and b07, which do not fail their floor.
 ## 7. Tests (`tests/test_recall_qrels.py`)
 
 - `ScoringTest.test_metrics`: `recall_at`, `top1` and `exact` on empty and non-empty lists, and recall@5 for a list longer than five.
+- `ScoringTest.test_an_rg_error_scores_zero_and_is_shown`: an rg error on an empty-gold row scores 0 and prints the error; the same row without an error scores 1.
+- `ScoringTest.test_rg_outcome`: exit 0 gives the first 20 lines, exit 1 an empty list, exit 2 the first stderr line.
+- `CorpusStoreSetupTest.test_failed_setup_restores_the_environment`: a copy failure in `setUpClass` leaves no patched environment, cached config or temp directory after the class cleanups.
+- `CorpusStoreSetupTest.test_the_store_holds_a_non_markdown_decoy`: the decoy is the newest file and holds the rg queries.
 - `QrelsFileTest.test_schema_and_ids`: the file loads; ids are unique; all three families occur.
 - `QrelsFileTest.test_every_path_is_in_the_corpus`: every `relevant` and `expected_top1` path exists.
 - `QrelsFileTest.test_family_sizes`: temporal at least 12, exact at least 10, title-bare at least 8 rows.
@@ -368,6 +383,7 @@ misses list also names b01 and b07, which do not fail their floor.
 - `TemporalQrelsTest.test_clock_seam_is_used`: with `_utcnow` patched, `yesterday` is 03-15 to 03-16.
 - `SkillRgTest.test_skill_rg_lines_agree`: the two skills hold the same list-pass flags. Needs no rg.
 - `SkillRgTest.test_query_is_passed_with_e`: `-e` sits directly before the query placeholder in both skills.
+- `SkillRgTest.test_search_second_pass_passes_the_query_with_e`: the same for the `/search` pass-2 `rg -n` line.
 - `ExactQrelsTest.test_floors`: the `exact` and `title-bare` rows through rg (skipped without rg).
 
 The gate discriminates. Each mutation below was run once against this change:
@@ -378,6 +394,10 @@ The gate discriminates. Each mutation below was run once against this change:
 | `-F` removed from both skill lines | e07 and e10 fail (exact 0.83/0.83); b08 fails (title-bare top-1 0.67) |
 | `--sortr modified` removed from both skill lines | e01 and e11 lose top-1 (exact top-1 0.83) |
 | The `_utcnow` patch removed from the temporal runner | t02, t10, t11, t13 and t14 fail (temporal 0.67) |
+| `--type md` removed from both skill lines | the decoy takes top-1 on every rg row (exact top-1 0.00, title-bare top-1 0.00) |
+| `-e` removed from the `/search` pass-2 line | `test_search_second_pass_passes_the_query_with_e` fails |
+| `score` ignores the rg error | `test_an_rg_error_scores_zero_and_is_shown` fails |
+| The environment restore not registered as a class cleanup | `test_failed_setup_restores_the_environment` fails |
 
 ## 8. How to add a query when a retrieval bug is fixed
 
