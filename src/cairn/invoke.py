@@ -2610,7 +2610,11 @@ def cmd_publish(config: CairnConfig, thread_id: str, as_json: bool) -> int:
         if as_json:
             print(
                 json.dumps(
-                    errors.tag({**report, "error": message}, "INVOKE_BUSY", thread_id=thread_id)
+                    errors.tag(
+                        {**report, "error": message},
+                        "INVOKE_BUSY",
+                        thread_id=report["thread_id"],
+                    )
                 )
             )
         else:
