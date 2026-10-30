@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.0]
+
+### Added
+
+- `cairn routine pause NAME --reason TEXT` and `cairn routine resume NAME`. A paused
+  routine skips every run (exit 0, no stamp, no `last-run.json`) until resumed; `--force`
+  does not bypass it.
+- A routine-level breaker: after 3 consecutive failed runs with a counted failure the
+  routine writes `disabled.json` and stops spending peer rounds; `resume` clears it.
+- `routines.<name>.terminal_hook`: an argv list (absolute first element) run once per day
+  stamp with a 10 s timeout, the day's report row on stdin and `CAIRN_ROUTINE_*` in its
+  environment. Its failure is logged and changes nothing else.
+- `routines.<name>.stale_sources` (`warn`, `refuse`, `ignore`) and
+  `cairn routine run --stale-sources`: warn about, or refuse on, a digest source not
+  exported in the last 24 h. Exports now write `<state_home>/cairn/exports/<source>.json`.
+- `cairn routine run --json`: one run report with `schema_version` and `status`; the same
+  object is `last-run.json` (the old keys are kept).
+- `cairn routine status` names a state (`fresh`, `running`, `never_run`, `stale`,
+  `paused`, `disabled`) and attention codes from files only; `list` shows the state;
+  `doctor` reports a paused or disabled routine.
+- `procs.run_capped` takes an `input` string for the child's stdin.
+
+### Changed
+
+- `cairn routine status NAME` exit codes: 0 fresh or running, 1 needs attention (never
+  run, stale, a failed day, a non-zero last run, an interrupted run, a missing launchd
+  plist, a stale source), 2 paused or disabled. It always exited 0 before, so a script
+  that runs `status` under `set -e` now stops on a failed day.
+- `stale-source` joins the reasons that cost no attempt.
+
 ## [2.12.0]
 
 ### Added
