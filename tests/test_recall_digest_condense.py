@@ -465,7 +465,8 @@ class TestProvenanceKey(DigestFixture):
         self.write_doc("fixture.md", fixture_document())
         code, data, _, out = self.digest("--provenance", "imported")
         self.assertEqual(code, 3)
-        self.assertEqual(data, {"sessions": [], "skipped": []})
+        self.assertEqual((data["sessions"], data["skipped"]), ([], []))
+        self.assertEqual(data["coverage"]["verdict"], "clean-miss")
         self.assertEqual([p.name for p in out.iterdir()], [".cairn-digest"])
 
     def test_filter_to_nothing_clears_a_populated_directory(self):
