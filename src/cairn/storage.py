@@ -40,7 +40,13 @@ def document_lock(path: Path) -> Path:
     return lock_path(path, "document")
 
 
-def atomic_write(path: Path, text: str) -> None:
+def atomic_write(path: Path, text: str, *, mode: int | None = None) -> None:
+    """Replace ``path`` with ``text`` through a temporary file and ``os.replace``.
+
+    A new file gets ``mkstemp``'s mode 0600 unless ``mode`` is given. ``os.replace``
+    replaces a symlink at ``path`` with a file: pass the resolved path to write
+    through a symlink instead.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
@@ -48,6 +54,8 @@ def atomic_write(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temporary, mode)
         os.replace(temporary, path)
         directory = os.open(path.parent, os.O_RDONLY)
         try:
