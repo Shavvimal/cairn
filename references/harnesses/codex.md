@@ -48,9 +48,13 @@ are restricted to Plan mode; use asynchronous input or ordinary conversation oth
 Keep required answers pending and continue only independent work; elapsed time is not an
 answer or permission.
 
-Use `/skills` or the `$` picker to select the installed `setup`, `cairn`, `recall`, or
-`search` skill. Run setup only on explicit request or explicit onboarding. The setup
-policy `allow_implicit_invocation: false` is packaged in `agents/openai.yaml`.
+Use `/skills` or the `$` picker to select an installed skill: `$setup`, `$cairn`,
+`$recall`, `$search`, `$invoke-codex`, `$invoke-claude` or `$invoke-antigravity`. Skill
+text that says `/search` or `/cairn:recall` means `$search` or `$recall` here. Codex does
+not read `allowed-tools`; its sandbox and approval policy decide. Run setup only on
+explicit request or explicit onboarding. The setup policy
+`allow_implicit_invocation: false` is packaged in `agents/openai.yaml`; every other
+skill carries `true`.
 
 The recall-first block (`cairn instructions install --harness codex`) goes into the Codex
 home (`$CODEX_HOME`, else `~/.codex`). Codex loads `AGENTS.override.md` there in place of
@@ -63,7 +67,7 @@ Prefer the current thread ID provided by the host. `CODEX_THREAD_ID`/`CODEX_SESS
 can be inherited from a parent client: do not use them if they conflict with the selected
 thread. `CLAUDE_PLUGIN_ROOT` is also supplied by Codex for compatibility and does not
 identify Claude as the active harness. For operations, explicitly pass the correct native
-ID to `cairn codex note|close|log --session-id ID`.
+ID to `cairn codex note|close|log|decide|supersede|forget --session-id ID`.
 
 The authoritative manifest is root `plugin.json`; `.codex-plugin/plugin.json` is a generated
 compatibility projection required by the tested CLI 0.160.0. Update with:
@@ -172,6 +176,6 @@ network, and denies writes under `~/.codex` and `~/.claude`. Never start a neste
 
 `cairn agents list` shows every peer run and subagent of the current thread with execution
 state, activity and outcome; `cairn agents wait --session codex:<id>` blocks until the last
-one exits. The `invoke-codex` and `invoke-claude` skills ship with
+one exits. The `invoke-codex`, `invoke-claude` and `invoke-antigravity` skills ship with
 `allow_implicit_invocation: true`, so a request in conversation can start them; setup stays
 explicit.

@@ -80,6 +80,15 @@ class TestPortablePackage(unittest.TestCase):
                 self.assertTrue((cache / f"references/harnesses/{name}.md").is_file())
             policy = (cache / "skills/setup/agents/openai.yaml").read_text()
             self.assertIn("allow_implicit_invocation: false", policy)
+            # Every other skill states its Codex policy instead of relying on the default.
+            for skill in sorted((cache / "skills").glob("*/SKILL.md")):
+                if skill.parent.name == "setup":
+                    continue
+                policy_file = skill.parent / "agents/openai.yaml"
+                self.assertTrue(
+                    policy_file.is_file(), f"{skill.parent.name}: no agents/openai.yaml"
+                )
+                self.assertIn("allow_implicit_invocation: true", policy_file.read_text())
             self.assertIn(
                 "disable-model-invocation: true", (cache / "skills/setup/SKILL.md").read_text()
             )
