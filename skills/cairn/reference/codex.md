@@ -5,6 +5,15 @@ Export Codex CLI conversations to markdown. Shared verbs (`export`, `list`, `con
 `../SKILL.md`. Windowed - `export`
 defaults to the last 24h; use `--since` / `--all`.
 
+## Contents
+
+- Data source
+- Project / repo resolution
+- Frontmatter schema
+- Subagent rollouts
+- Parser checks
+- Resume and automatic sync
+
 ## Data source
 
 Codex stores each session as a rollout JSONL file:

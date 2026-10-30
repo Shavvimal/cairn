@@ -5,7 +5,17 @@ auto-generated summary. Works for any **conversation** source - substitute the s
 in `cairn <source> note|close|log|decide|supersede|forget` (Claude shown below; the same verbs exist
 for codex, antigravity, cursor, and granola). service-docs is a file mirror and has no annotation verbs.
 
-## Behavior
+## Contents
+
+- Via CLI: note, close, log
+- Via voice/text (agent workflow)
+- Record a decision: "record that decision", "log what we decided", "replace that decision"
+- Withdraw a claim: "forget that decision", "withdraw that claim"
+- Import Claude memories: `workflows/memory-import.md`
+- Finding the current session
+- Status values, tags, frontmatter
+
+## Behaviour
 
 - **Always generates a summary** from the available conversation context
 - Reads valid tags from `../schema/tags.yaml`
@@ -74,6 +84,8 @@ cairn claude decide "Send the review notes" --kind commitment --revisit-by 2026-
 cairn claude supersede 3 "Keep confidence as three words until grading lands"
 ```
 
+"replace that decision" is `supersede`: find N with `cairn recall decisions --json` first.
+
 - **Kind** (`--kind`, default `decision`): `decision` is a choice between options,
   `fact` is something observed and checkable, `commitment` is something promised
   (`--revisit-by` is its due date), `hunch` is a belief not yet checked.
@@ -121,25 +133,10 @@ matter to the match.
 
 ## Import Claude memories
 
-Claude Code keeps auto-memory notes per project (`~/.claude/projects/<project>/memory/`).
-`cairn claude memory import` adds each note's one-line description as a `## Decisions`
-row. The row goes into the session that wrote the note when cairn exported that session,
-else into the project decisions document `<data_root>/decisions/<project>.md`. The
-source cell is `memory:<project>/<file>`. Look at the plan first, then import:
-
-```bash
-cairn claude memory import --dry-run
-cairn claude memory import
-```
-
-- Do not run it with `--all-projects` unless the user asks. The default is the git
-  project of the working directory.
-- `feedback` and `project` notes become `decision` rows, `user` notes become `fact` rows.
-  `reference` notes are skipped unless `--include-reference`.
-- A re-run adds only new notes. A changed note prints a warning and leaves its row; use
-  `supersede` if the new text is right. A withdrawn claim is never added again.
-- Rows in a project document take `--session-id memory:<project>` for `decide`,
-  `supersede` and `forget`.
+`cairn claude memory import` adds Claude Code auto-memory notes as decision rows. Follow
+`workflows/memory-import.md`: dry run, counts, consent, import, then check. Rows in a
+project decisions document take `--session-id memory:<project>` for `decide`,
+`supersede` and `forget`.
 
 ## Finding the current session
 
@@ -163,7 +160,7 @@ comment rather than inventing unsupported flags.
 **Tag vocabulary (resolved per machine):** read the user's own tags file if present -
 `~/.config/cairn/tags.yaml` (or `$XDG_CONFIG_HOME/cairn/tags.yaml`) - otherwise fall back
 to the bundled `../schema/tags.yaml`. The bundled file ships universal **type tags** plus
-**example project tags** the user customizes; their real project taxonomy lives in the
+**example project tags** the user customises; their real project taxonomy lives in the
 local file (so it isn't committed to the plugin).
 
 **Type tags (universal):** research, implementation, debugging, planning, brainstorm,

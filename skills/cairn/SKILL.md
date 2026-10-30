@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: Exports, lists, annotates, and resumes local AI coding sessions (Claude Code, Codex, Cursor) plus Granola meetings and service docs to searchable markdown via the cairn CLI. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "resume session", "add session note", "close session", "log session", "sync docs", "sync service docs", "meeting transcripts", "scheduled routine", or "import claude memories". Covers per-source export/list/context/note/close/log/decide/supersede/forget, Claude and Codex resume, Claude memory import, the top-level sync/doctor/config/cron/routine commands, and the config-driven enablement model. Requires the cairn CLI - install via /cairn:setup.
+description: Exports, lists, annotates and resumes local AI coding sessions (Claude Code, Codex, Antigravity, Cursor), Granola meetings and service docs as searchable markdown through the cairn CLI; records, supersedes and withdraws decisions; imports Claude Code auto memory; runs and checks scheduled routines. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "export antigravity", "resume session", "add session note", "close session", "log session", "record that decision", "log what we decided", "replace that decision", "forget that decision", "withdraw that claim", "import claude memories", "sync docs", "sync service docs", "meeting transcripts", "scheduled routine", "pause my journal", "resume the routine", "is my routine healthy", "cairn daily check", "instructions block", or "cairn error code". Also covers doctor, config, cron and hooks. Requires the cairn CLI; install it with the setup skill.
 allowed-tools: Bash, Read
 ---
 
@@ -11,17 +11,19 @@ Claude or Codex reference from this installed package before host-specific opera
 # Cairn
 
 Cairn syncs local AI activity to markdown for observability and QMD search. One CLI,
-`cairn <source> <verb>`, drives five sources:
+`cairn <source> <verb>`, drives six sources:
 
 | Source         | Collection              | What it captures                     |
 | -------------- | ----------------------- | ------------------------------------ |
 | `claude`       | `claude-code-sessions/` | Claude Code conversations (+ resume, memory import) |
 | `codex`        | `codex-sessions/`       | Codex CLI rollouts                   |
+| `antigravity`  | `antigravity-sessions/` | Google Antigravity (agy) conversations |
 | `cursor`       | `cursor-sessions/`      | Cursor IDE composer sessions         |
 | `granola`      | `granola-sessions/`     | Granola meeting notes + transcripts  |
 | `service-docs` | `service-docs/`         | Verbatim mirror of repo docs         |
 
-Install first with `/cairn:setup`. Run `cairn help` for the canonical overview and
+Install first with the setup
+skill (`/cairn:setup` in Claude Code, `$setup` in Codex). Run `cairn help` for the canonical overview and
 `cairn doctor` to check install, config, qmd, cron, and PATH.
 
 **Authoritative args.** Treat the CLI as the source of truth, not this page - verbs and
@@ -32,7 +34,8 @@ For the live set of configured integrations and their enabled state, run `cairn 
 
 ## Shared command vocabulary
 
-The four conversation sources (claude, codex, cursor, granola) accept the same verbs.
+The five conversation sources (claude, codex, antigravity, cursor, granola) accept the
+same verbs.
 **service-docs is a file mirror - it supports only `export` / `list` / `context`** (no
 `note` / `close` / `log` / `decide` / `supersede` / `forget`, no time window; see `reference/service-docs.md`).
 
@@ -96,7 +99,8 @@ publishes an unfinished round whose runner and peer have both exited, as every i
 does. An exit code alone is ambiguous: 2 is both a usage
 error and a denied invoke round, and 3 is an empty digest day, a stalled `agents wait` and
 a withdrawn decision claim. `cairn errors` lists every
-code; `docs/error-codes.md` is the same table.
+code; `docs/error-codes.md` is the same table. "cairn error code" with a code the user
+pastes: run `cairn errors CODE` and give its `next_step` and `verify` lines.
 
 ## Enablement is config-driven
 
@@ -105,7 +109,7 @@ has a `sync.enabled` flag chosen at setup. Inspect and change it via the CLI (no
 hand-editing JSON):
 
 - `cairn config show` - see every integration and whether it's enabled.
-- `/cairn:setup` or `cairn config init --enable claude,codex,cursor,granola,service-docs` - initial choice.
+- the setup skill or `cairn config init --enable claude,codex,cursor,granola,service-docs` - initial choice.
 - `cairn config set <source>.enabled true|false` - toggle one later (e.g. `cairn config set cursor.enabled false`).
 
 `cairn sync` runs only **enabled** sources, then refreshes QMD. The `SessionEnd` hook
@@ -121,12 +125,16 @@ Config resolution: `$CAIRN_CONFIG`, else `$XDG_CONFIG_HOME/cairn/config.json` (e
 
 ```bash
 cairn sync [--hook | --cron | --all]   # sync enabled sources, then refresh QMD index
-cairn recall list <date>               # temporal session timeline (drives /cairn:recall)
+cairn recall list <date>               # temporal session timeline (drives the recall skill)
 cairn recall expand <id>               # one session's condensed transcript
 cairn recall digest <date>             # one day condensed with provenance
 cairn recall frame <ref> <n>           # open a cited frame
 cairn recall verify <journal> --digest <dir> [--fix]  # check a journal's citations and quotes; exit 4 on a failure
 cairn recall gaps [--json]             # what recall cannot see right now: export/index lag, disabled sources, rg
+cairn recall decisions [--overdue] [--json]  # active ## Decisions rows (drives "what did we decide")
+cairn errors CODE                      # meaning, next step and verify command for a failure code
+cairn hook status --harness claude     # last hook requests and their state (codex: also codex_trust)
+cairn claude memory import --dry-run   # plan an import of Claude Code auto memory; writes nothing
 cairn doctor [--strict-index]          # check install, config, qmd + index, cron, PATH, stores
 cairn config show [--json]             # print resolved config + integrations
 cairn config init [--enable ...]       # create the per-user config
@@ -153,7 +161,8 @@ cairn --version
 
 `--hook` is the legacy fast sync (on_hook sources only); `--cron` is the hourly
 full sync; `--all` also updates and embeds every enabled source using its configured window. Temporal recall has
-its own skill (`/cairn:recall`); `cairn recall --help` shows its args.
+its own skill (`/cairn:recall` in Claude Code, `$recall` in Codex); `cairn recall --help`
+shows its args.
 
 A routine runs a prompt file through `claude` or `codex` once a day for each UTC day without
 a done stamp, and stamps a day done only after its `validate` command exits 0 (3 means done
@@ -207,8 +216,45 @@ Re-exporting never clobbers your annotations. Across all sources, exports preser
 `## My Notes` section, a `## Decisions` table directly after it (a table cairn wrote stays
 byte for byte; a hand edit keeps its text, with LF endings), and these
 frontmatter fields: `comments`, `status`, `tags`, `rating`, `title`, `projects`, `links`.
-`decide`, `supersede` and `forget` are described in `workflows/log-session.md`, and so is
-`cairn claude memory import`, which adds Claude Code auto-memory notes as decision rows.
+
+## Decisions
+
+A claim the session settled goes in the `## Decisions` table, one row per claim.
+
+1. "record that decision", "log what we decided": run
+   `cairn claude decide "CLAIM" --kind decision` (any conversation source in place of
+   `claude`; `--kind fact`, `commitment` or `hunch` as fits). Read the `Added #N` line.
+2. "replace that decision": find N with `cairn recall decisions --json` (the `ref` ends
+   in `#N`), then run `cairn claude supersede N "NEW CLAIM"`.
+3. "forget that decision", "withdraw that claim": find N the same way, then run
+   `cairn claude forget N --reason stale` with the reason that fits, and read the
+   `Withdrew row #N` line. Exit 3 later means someone tried to add a withdrawn claim
+   again.
+
+Never guess N. Kinds, citations, reasons and `--force` rules:
+[workflows/log-session.md](workflows/log-session.md).
+
+## Daily check
+
+"is my routine healthy", "cairn daily check": follow
+[workflows/daily-check.md](workflows/daily-check.md). It reads
+`cairn routine status NAME --json` per routine and acts on exit 0, 1 or 2, then reads the
+gaps report and the overdue decisions. "pause my journal":
+`cairn routine pause NAME --reason "TEXT"`. "resume the routine": `cairn routine resume NAME`.
+Ask before either: both change what tomorrow's run does.
+
+## Import Claude memories
+
+"import claude memories": follow [workflows/memory-import.md](workflows/memory-import.md).
+Dry run first, show the counts, then import. The rows are private notes Claude wrote; they
+stay under `data_root`.
+
+## Recall-first block
+
+"instructions block": run `cairn instructions status --json` and read each harness's
+state. To add or remove the block, run the command with `--dry-run` first, show the diff,
+and run it without `--dry-run` only after the user says yes: it edits the user's own
+`CLAUDE.md` or `AGENTS.md`.
 
 ## Per-source reference
 
@@ -219,10 +265,11 @@ Each source's data location, frontmatter schema, and source-specific commands:
 - `reference/cursor.md` - Cursor IDE sessions
 - `reference/granola.md` - Granola meetings (dual source: cache + API)
 - `reference/service-docs.md` - verbatim service-docs mirror
+- `reference/antigravity.md` - Google Antigravity (agy) conversations + `resume`
 
 ## Annotation workflow
 
 To log/annotate the current session (CLI forms, natural-language parsing, auto-summary,
 status and tag values): see `workflows/log-session.md`. To schedule a daily peer run, see
-`workflows/routine.md`. Valid tags live in
-`schema/tags.yaml`.
+`workflows/routine.md`; to check it each day, `workflows/daily-check.md`; to import Claude
+Code auto memory, `workflows/memory-import.md`. Valid tags live in `schema/tags.yaml`.

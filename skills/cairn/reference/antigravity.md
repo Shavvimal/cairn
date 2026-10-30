@@ -6,6 +6,14 @@ Export Google Antigravity CLI conversations to markdown. Shared verbs (`export`,
 (`cairn antigravity resume <id>` prints `agy --conversation <id>`). Windowed - `export`
 defaults to the last 24h; use `--since` / `--all`.
 
+## Contents
+
+- Data source
+- Frontmatter schema
+- Parser checks
+- Hook
+- Permissions for headless runs
+
 ## Data source
 
 The collection's `store` is agy's app-data directory, `~/.gemini/antigravity-cli` for the

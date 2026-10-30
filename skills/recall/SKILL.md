@@ -1,6 +1,6 @@
 ---
 name: recall
-description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the shared exported store via the cairn CLI; topic queries search across QMD collections (BM25) plus an exact-match ripgrep pass. Every recall ends with "One Thing" - the single highest-leverage next action synthesized from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context from past sessions", "what was I doing", "session history", "digest yesterday", "daily digest", or "cite the frame". Requires the cairn CLI and qmd (install via /cairn:setup); rg is optional.
+description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the shared exported store via the cairn CLI; topic queries search across QMD collections (BM25) plus an exact-match ripgrep pass; decision queries list recorded decisions. Every recall ends with "One Thing" - the single highest-leverage next action synthesised from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context from past sessions", "what was I doing", "session history", "digest yesterday", "daily digest", "cite the frame", "what did we decide", "list our decisions", "verify journal citations", "missing sessions", or "why can't recall see". Requires the cairn CLI and qmd (install with the setup skill); rg is optional.
 argument-hint: [yesterday|today|last week|this week|YYYY-MM-DD|TOPIC]
 allowed-tools: Bash(cairn:*), Bash(qmd:*), Bash(rg:*), Bash(head:*)
 ---
@@ -19,7 +19,8 @@ flags, run `cairn recall --help`.
 
 ## Step 1: Classify the query
 
-Parse the user's input after `/recall`:
+Parse the user's input after `/recall` (`/cairn:recall` in Claude Code, `$recall` in
+Codex):
 
 - **Temporal** - a time reference ("yesterday", "today", "last week", "this week", a date,
   "what was I doing") → Step 2. A digest of a day, or recall that must cite its
@@ -27,6 +28,11 @@ Parse the user's input after `/recall`:
 - **Topic** - a subject ("auth flow", "the QMD migration", "onboarding") → Step 3.
 - **Both** - temporal + topic ("what did I do with auth yesterday") → Step 2, then filter
   the listed sessions for the topic (or run Step 3 scoped to that window).
+- **Decision** - "what did we decide about X", "list our decisions" → the Decisions
+  block in Step 2.
+- **Journal check** - "verify the journal citations" → `recall verify` in Step 2.
+- **Coverage** - "why can't recall see X", a session the user expected is missing →
+  "Coverage question" below.
 
 ## Step 2: Temporal recall (`cairn recall`)
 
@@ -114,6 +120,11 @@ and `--source` work as in `list`; the default is the current directory's project
 that does not parse is skipped with a `Warning:` on stderr and listed under `problems` in
 the JSON.
 
+Rows imported from Claude Code auto memory (`cairn claude memory import`) carry a
+`memory:<project>/<file>` source cell and end in `[memory]`; a project document's rows
+have refs such as `memory:example-app#3`, listed with `--source memory`. Claude wrote
+these claims: present them as notes, not as decisions the user made.
+
 When you write from a digest, cite each claim as `[SOURCE:ID fN]` (for example
 `[claude:3f2a9c1e f11]`, the `ref` from the digest file's front matter, full or a unique
 prefix of at least 8 characters, and the marker ordinal). Quote only text copied exactly
@@ -155,7 +166,7 @@ the counts and every failure with its reason.
    qmd search "VARIANT" -c COLLECTION -n 5
    ```
 
-   Prioritize session collections for "what did we do" questions; include `notes` /
+   Prioritise session collections for "what did we do" questions; include `notes` /
    `granola-sessions` / `service-docs` as relevant. Use `qmd search` (BM25), **not**
    `qmd query` (hybrid) - speed matters here.
 
@@ -181,7 +192,7 @@ the counts and every failure with its reason.
 
    Never print matched lines from a whole collection. If you need lines, run rg again on
    the chosen files only, with `-M 300 -m 5` (a session transcript can hold a single line
-   of several megabytes). See the `/search` skill for the full rg rules.
+   of several megabytes). See the search skill for the full rg rules.
 
 5. **Deduplicate** by document path (keep the highest score); present the top ~5 unique
    hits. An rg hit at `<collection Path>/<rel>` is the same document as
@@ -194,7 +205,7 @@ the counts and every failure with its reason.
    qmd get "qmd://collection/path/to/file.md" -l 50
    ```
 
-   Organize by type: sessions (what was worked on, decisions, status), notes (research,
+   Organise by type: sessions (what was worked on, decisions, status), notes (research,
    plans), meetings (discussions, attendees), docs (architecture, APIs).
 
 → Go to Step 4 (Gaps).
@@ -219,7 +230,7 @@ Build the line from the JSON only. Never add a gap the JSON does not contain.
 
 ## Step 5: One Thing
 
-After presenting results, synthesize the single highest-leverage next action.
+After presenting results, synthesise the single highest-leverage next action.
 
 **How to pick it:** what has momentum (recent, mid-flow) · what's blocked (removing the
 blocker unlocks downstream) · what's closest to done (finishing > starting) · urgency
@@ -252,6 +263,29 @@ A miss is clean or degraded. Read `coverage.verdict` (temporal) or `status` from
   ```
   No results for "QUERY", but coverage is degraded: <gaps>. This is not proof it did not happen. Run <fix> and recall again.
   ```
+
+## Coverage question
+
+For "why can't recall see X" or a session the user expected:
+
+1. Run `cairn recall gaps --json`. Read `status` and each gap's `kind`, `severity`,
+   `collection`, `message` and `fix`.
+2. If the user named a day or a source, run
+   `cairn recall list DATE --json --coverage --all-projects` and read
+   `coverage.verdict` and whether the session is in `sessions`.
+3. Explain each `warn` gap in one line. `export-lag`, `never-exported`,
+   `source-disabled` and `store-missing` mean the session is not exported;
+   `index-lag`, `index-count`, `collection-missing`, `index-stamp-missing` and
+   `index-unknown` mean QMD has not indexed it (rg still reads the file); `rg-missing`
+   means exact search is off.
+4. Print the Gaps line as in Step 4. The One Thing is the first warn gap's `fix`; do not
+   run it unasked, because `cairn sync` exports and re-indexes.
+
+## On failure
+
+If a cairn command exits non-zero, read the `code:` line on stderr (or the `code` key in
+its JSON) and run `cairn errors CODE`. Report its next step and stop; do not retry in a
+loop. An empty digest day is exit 3 with `DIGEST_EMPTY_DAY`, not a failure.
 
 ## Resolve before asking
 

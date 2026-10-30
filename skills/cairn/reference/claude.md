@@ -4,6 +4,17 @@ Export Claude Code conversations to markdown, and resume them. Shared verbs
 (`export`, `list`, `context`, `note`, `close`, `log`, `decide`, `supersede`, `forget`) work
 as documented in `../SKILL.md`. Claude additionally has `resume`.
 
+## Contents
+
+- Data source
+- Frontmatter schema
+- Subagent documents
+- Resume (Claude-only)
+- Memory import (Claude-only)
+- Internal sync hook
+- Parser checks
+- Annotate
+
 ## Data source
 
 Claude Code stores each conversation as a transcript under
@@ -146,11 +157,8 @@ Exit 0 when every note was added or skipped by rule; 1 when the directory is mis
 (`MEMORY_DIR_MISSING`), a note could not be read, or a write failed
 (`MEMORY_IMPORT_WRITE_FAILED`). The other notes are still imported.
 
-Privacy: a note holds whatever Claude saved, which can include private names. The
-import writes only into the data root, beside the exported sessions, and never into
-the memory directory. If the data root is inside a git work tree, keep it git-ignored
-and untracked (the import does not check). Do not copy a project decisions document
-into a tracked file.
+`--session-id memory:<project>` targets a project decisions document with `decide`,
+`supersede` and `forget`. Steps and privacy rules: `../workflows/memory-import.md`.
 
 ## Internal sync hook
 
