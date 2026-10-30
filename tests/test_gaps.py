@@ -111,6 +111,27 @@ class TestGapHeal(GapFixture):
         self.assertNotIn("[gap-heal:codex-sessions]", log)
         self.assertIn(f"[exporter-drift] 1 open findings: codex:{CODEX_ID[:8]} zero-messages", log)
 
+    def test_agy_scan_uses_the_index_time_the_heal_filters_on(self):
+        def stamp(days: float) -> str:
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days * DAY))
+
+        def age_logs(sid: str, seconds: float) -> None:
+            for transcript in (self.antigravity / "brain" / sid).rglob("transcript*.jsonl"):
+                _age(transcript, seconds)
+
+        # Last turn 40 days ago, transcript touched 2 days ago: the --since 30d heal
+        # filters on the index time and skips it, so the scan must not count it.
+        stale = "a9e00000-0000-4000-8000-0000000000c1"
+        self.native("antigravity", stale, stamps=[stamp(40)])
+        age_logs(stale, 2 * DAY)
+        # Last turn 2 days ago, transcript mtime 40 days old: missing, and healed.
+        fresh = "a9e00000-0000-4000-8000-0000000000c2"
+        self.native("antigravity", fresh, stamps=[stamp(2)])
+        age_logs(fresh, 40 * DAY)
+        self.assertEqual(gaps.scan(config.get_config(), "antigravity").missing, [fresh])
+        self.run_cli("antigravity", "export", "--since", "30d", "-q")
+        self.assertEqual(gaps.scan(config.get_config(), "antigravity").missing, [])
+
     def test_hook_mode_skips_gap_check(self):
         _age(self.codex_file(CODEX_ID), 2 * DAY)
         self.assertEqual(self.run_cli("sync", "--hook", check=False).returncode, 0, self.log_text)

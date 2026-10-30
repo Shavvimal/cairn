@@ -2,8 +2,9 @@
 
 ``cairn sync`` (every mode but ``--hook``) and ``cairn doctor`` compare the session
 ids a source store holds for the last :data:`GAP_WINDOW_DAYS` days with the
-documents in that source's collection. Enumeration reads no file contents: one
-``stat`` per candidate file plus one catalog walk per collection. A file changed in
+documents in that source's collection. Enumeration reads no transcript contents: one
+``stat`` per candidate file, one catalog walk per collection and, for Antigravity,
+one read-only query of agy's conversation index. A file changed in
 the last :data:`GAP_SETTLE_S` seconds is still being written and is left to the
 next run.
 
@@ -84,18 +85,40 @@ def codex_sessions(store: Path, start: float, end: float) -> dict[str, Path]:
 
 
 def antigravity_sessions(store: Path, start: float, end: float) -> dict[str, Path]:
-    """``brain/<id>/`` conversations whose transcript changed in the window."""
+    """``brain/<id>/`` conversations whose activity time is in the window.
+
+    The activity time is the one the agy export's ``--since`` filters on: the
+    index's ``last_modified`` when agy recorded one, else the transcript mtime. With
+    the mtime alone, a transcript touched long after its last turn read as missing
+    while the heal's ``--since 30d`` export skipped it, so the gap never closed.
+    The index is one read-only SQLite query, not a transcript read.
+    """
     found: dict[str, Path] = {}
     brain = store / "brain"
     if not brain.is_dir():
         return found
+    summaries = _agy_activity(store)
     for folder in brain.iterdir():
         if folder.is_symlink() or not folder.is_dir():
             continue
         transcript = conversation_transcript(store, folder.name)
-        if transcript is not None and _settled(transcript, start, end):
+        if transcript is None:
+            continue
+        activity = summaries.get(folder.name)
+        if activity is not None:
+            if start <= activity <= end:
+                found[folder.name] = transcript
+        elif _settled(transcript, start, end):
             found[folder.name] = transcript
     return found
+
+
+def _agy_activity(store: Path) -> dict[str, float]:
+    """``last_modified`` per conversation from agy's index (empty when absent)."""
+    from .sources.antigravity import read_summaries
+
+    summaries = read_summaries(store / "conversation_summaries.db")
+    return {sid: s.last_modified for sid, s in summaries.items() if s.last_modified}
 
 
 ENUMERATORS = {
