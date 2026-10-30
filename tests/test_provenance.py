@@ -7,6 +7,7 @@ import unittest
 from contextlib import redirect_stderr
 
 from cairn import provenance
+from cairn.frontmatter import parse_frontmatter
 from cairn.invoke import preamble
 from cairn.schema import Message
 
@@ -90,6 +91,26 @@ class OnRead(unittest.TestCase):
             "Warning: /tmp/demo/x.md: provenance 'robot' is not one of user, agent, tool, "
             "imported; reading it as agent\n",
         )
+
+    def test_empty_stored_value_warns(self):
+        for raw in ("provenance:", 'provenance: ""'):
+            with self.subTest(raw=raw):
+                fm = parse_frontmatter(f"---\ntype: claude-session\n{raw}\n---\n")
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    value = provenance.effective(fm, "claude", "/tmp/demo/x.md")
+                self.assertEqual(value, "tool")
+                self.assertEqual(
+                    err.getvalue(),
+                    "Warning: /tmp/demo/x.md: provenance '' is not one of user, agent, tool, "
+                    "imported; reading it as tool\n",
+                )
+
+    def test_absent_key_is_silent(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            value = provenance.effective({"type": "claude-session"}, "claude", "/tmp/x.md")
+        self.assertEqual((value, err.getvalue()), ("tool", ""))
 
 
 if __name__ == "__main__":

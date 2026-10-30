@@ -91,14 +91,15 @@ def stored(fm: dict) -> str | None:
 def effective(fm: dict, source: str, path: Path | str, *, peer_body: bool = False) -> str:
     """The stored value, else the derived one; warn once when the stored one is invalid.
 
-    ``peer_body`` is body evidence the caller already holds (the digest's lineage found
-    a peer link or an invoke preamble): without a valid stored key it reads ``agent``.
+    ``peer_body`` is body evidence the caller already holds (the digest found the invoke
+    preamble in the first user message with text): without a valid stored key it reads
+    ``agent``.
     """
     value = stored(fm)
     if value is not None:
         return value
     derived = "agent" if peer_body else derive(fm, source)
-    if fm.get(KEY) not in (None, ""):
+    if KEY in fm:  # present but invalid, the empty scalar included
         print(
             f"Warning: {path}: provenance '{fm.get(KEY)}' is not one of "
             f"{', '.join(VALUES)}; reading it as {derived}",
