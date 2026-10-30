@@ -1,7 +1,7 @@
 ---
 name: skill-review
 description: Reviews an Agent Skill (a SKILL.md and the files it links) against the authoring rules of Claude Code, Codex and Antigravity and against cairn's own tests, then reports each finding with file and line, severity, the rule it breaks and the fix, and ends with a verdict. Use when the user says "review this skill", "is this SKILL.md well written", "skill audit", or "check the skill before shipping", or when a diff touches skills/ or .agents/skills/. Repo-local developer skill for cairn; it does not ship in the plugin and never edits the skill it reviews.
-allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(uv run python:*), Bash(python3:*), Bash(wc:*)
+allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git rev-parse:*), Bash(gh pr view:*), Bash(uv run python:*), Bash(python3:*), Bash(wc:*)
 ---
 
 # Skill review
@@ -15,14 +15,25 @@ Review one or more skills and report findings. Do not edit the files you review.
 
 ## Steps
 
-1. Resolve the targets. For a branch, run
-   `git diff --name-only origin/main...HEAD -- skills references .agents/skills` and
-   keep each distinct `skills/<name>` or `.agents/skills/<name>` directory.
+1. Resolve the targets. For a branch, find its base first: the base the requester
+   names (a branch or a commit), else the PR's base from
+   `gh pr view --json baseRefName --jq .baseRefName`, else `main`. On a stacked branch
+   the base is the layer below, not `main`. If `git rev-parse --verify --quiet BASE`
+   prints a commit, use `BASE`; else use `origin/BASE`. Then run
+   `git diff --name-only BASE...HEAD -- skills references .agents/skills` and keep each
+   distinct `skills/<name>` or `.agents/skills/<name>` directory. A change under
+   `references/harnesses/` makes every shipped skill a target, because each links
+   `contract.md`. If `gh` cannot reach GitHub (no network in the sandbox), ask for the
+   base; do not fall back to `main` on a stacked branch, because that diff also lists
+   the lower layers' skills.
 2. Measure each target:
    `python3 .agents/skills/skill-review/scripts/measure.py skills/NAME`.
    Read the description length, body lines, quoted triggers, linked files with their
    line counts, and the flags it prints (`OVER_500`, `DESC_OVER_1024`, `YAML_HAZARD`,
-   `NO_CONTENTS`, `NESTED_LINK`, `CLAUDE_ONLY`, `MISSING_LINK`, `NAME_MISMATCH`).
+   `ANGLE_BRACKET`, `NO_CONTENTS`, `NESTED_LINK`, `CLAUDE_ONLY`, `MISSING_LINK`,
+   `NAME_MISMATCH`). If the requester attached this output, use it. If the host denies
+   `python3` or `git` (Antigravity's cairn preset denies `python3`), measure by reading
+   the files instead and write "measure.py not run" in the report.
 3. Run the repository's checks once and save the output:
    `uv run python -m unittest tests.test_skill_routing tests.test_docs_cli tests.test_plugin_manifest tests.test_public_hygiene tests.test_recall_qrels tests.test_skill_review > /tmp/skill-review-tests.log 2>&1`.
    Read the last line (`OK` or `FAILED`) and every failure that names a target file.

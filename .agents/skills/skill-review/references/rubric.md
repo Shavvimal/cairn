@@ -18,12 +18,12 @@ argues otherwise), **note** (judgement call; say why).
 
 | ID | Severity | Rule | Check | Source |
 |---|---|---|---|---|
-| A1 | block | Frontmatter opens and closes with `---` and parses as YAML: a plain-scalar `description` holds no `: ` and no ` #` (YAML reads the rest as a mapping or a comment) | `read_head` in `tests/test_skill_routing.py` returns without error; grep the line for `: ` after the key and for ` #` | agentskills-spec.md "Frontmatter"; claude-code-skills.md "Troubleshooting triggers" |
+| A1 | block | Frontmatter opens and closes with `---` and parses as YAML: a plain-scalar `description` holds no `: ` and no ` #` (YAML reads the rest as a mapping or a comment) | `measure.py` prints no `YAML_HAZARD`: every top-level line is a block indicator, a whole quoted string, a one-line flow sequence, or a plain scalar with no leading indicator, `: ` or ` #`. `read_head` only splits lines; it is not a YAML parser. A value outside that subset needs a real parser (`uv run --no-project --with pyyaml python -I -c ...`) before it passes | agentskills-spec.md "Frontmatter"; claude-code-skills.md "Troubleshooting triggers" |
 | A2 | block | `name` is 1-64 characters of `a-z0-9-`, no leading, trailing or double hyphen, equals the folder name | read the line; compare with the folder | agentskills-spec.md "Frontmatter" |
 | A3 | fix | `name` is specific, not `helper`, `utils`, `tools`; it follows the collection's pattern | compare with sibling skills | anthropic-best-practices.md "Naming" |
 | A4 | block | `description` is 1-1,024 characters with no `<` or `>` | count characters | agentskills-spec.md "Frontmatter"; claude-code-skills.md "Command names" |
 | A5 | fix | `allowed-tools` lists only what the steps run, in the repo's form (`Bash(cairn recall gaps:*)`), and grants no broad `Bash` unless the skill is a general CLI driver | compare the list with every command in the body | claude-code-skills.md "allowed-tools grants, it does not restrict" |
-| A6 | fix | A side-effectful or onboarding skill is explicit-only in both hosts: `disable-model-invocation: true` and `policy.allow_implicit_invocation: false` | read both files | claude-code-skills.md "Frontmatter that matters here"; codex-skills.md "agents/openai.yaml" |
+| A6 | fix | An onboarding or install skill (it installs software or edits the host's configuration) is explicit-only in both hosts: `disable-model-invocation: true` and `policy.allow_implicit_invocation: false`. A CLI driver whose every write follows a user request, with a dry run or a confirmation for the destructive ones (cairn, recall, search), stays implicit | read both files; for an implicit skill, check D4 on each write | claude-code-skills.md "Frontmatter that matters here"; codex-skills.md "agents/openai.yaml" |
 
 ## B. Description: the trigger surface
 
@@ -33,7 +33,7 @@ argues otherwise), **note** (judgement call; say why).
 | B2 | fix | Third person ("Exports ...", not "I can" or "You can") | read it | anthropic-best-practices.md "Descriptions"; antigravity-skills.md "Best practices" |
 | B3 | fix | The key use case and trigger words come first, because Codex shortens descriptions and Claude Code truncates at 1,536 characters | read the first sentence alone | codex-skills.md "Listing budget"; claude-code-skills.md "Listing budget and truncation" |
 | B4 | fix | Quoted trigger phrases paraphrase how a user speaks ("record that decision"), not CLI verbs ("decide") | read each quote aloud as a user request | anthropic-skill-creator.md "Description: the trigger surface" |
-| B5 | block | Every quoted phrase after `Use when the user says` has a fixture row that reaches it alone; overlaps are declared | `uv run python -m unittest tests.test_skill_routing` | cairn: `tests/test_skill_routing.py`; `CONTRIBUTING.md` "Changing a skill description" |
+| B5 | block | In a shipped skill (`skills/*`), every quoted phrase after `Use when the user says` has a fixture row that reaches it alone; overlaps are declared. A repo-local skill (`.agents/skills/*`) has no fixture file: review its phrases by hand under B4 and B6 | `uv run python -m unittest tests.test_skill_routing` (it reads `skills/` only) | cairn: `tests/test_skill_routing.py`; `CONTRIBUTING.md` "Changing a skill description" |
 | B6 | fix | No phrase so generic that it fires on ordinary work ("what does this error mean", "forget that") | imagine three unrelated requests that contain the phrase | anthropic-skill-creator.md "Trigger evaluation" (near misses) |
 | B7 | note | A skill that should stay quiet for nearby requests says so ("Do not activate for ordinary web searches") | read it | claude-code-skills.md "Troubleshooting triggers" |
 | B8 | fix | No `when_to_use`: Codex and Antigravity do not read it | grep | codex-skills.md "Fields Codex reads" |
@@ -82,5 +82,5 @@ argues otherwise), **note** (judgement call; say why).
 | F4 | block | `skills/search/SKILL.md` keeps one `rg -l ` line and one `rg -n ` line; `skills/recall/SKILL.md` keeps one `rg -l ` line | `uv run python -m unittest tests.test_recall_qrels` | cairn: `tests/test_recall_qrels.py` |
 | F5 | fix | A failure step reads `code` and runs `cairn errors CODE` | grep | cairn: `docs/error-codes.md` |
 | F6 | block | Each shipped skill links `../../references/harnesses/contract.md` | `uv run python -m unittest tests.test_plugin_manifest` | cairn: `tests/test_plugin_manifest.py` |
-| F7 | fix | A change under `skills/**` or `references/**` comes with a version bump (the orchestrator or maintainer does it) | `git diff --name-only origin/main...HEAD` | cairn: `.github/workflows/ci.yml` |
+| F7 | fix | A change under `skills/**` or `references/**` comes with a version bump (the orchestrator or maintainer does it) | `git diff --name-only origin/BASE...HEAD` with the PR base from step 1 (CI compares with the PR's base commit) | cairn: `.github/workflows/ci.yml` |
 | F8 | fix | Prose is plain and factual, British spelling, no marketing adjectives | read it | cairn: `CONTRIBUTING.md` "Changing a skill description" (the style line this layer adds) |

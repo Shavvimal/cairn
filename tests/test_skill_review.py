@@ -164,7 +164,8 @@ class TestSkillReview(unittest.TestCase):
                 "---\n\n"
                 "# Example\n\n"
                 "Read [the guide](docs/guide.md) and [gone](docs/gone.md).\n"
-                "Pass $ARGUMENTS through.\n",
+                "Pass $ARGUMENTS through.\n"
+                "Status: !`git status --short`\n",
                 encoding="utf-8",
             )
             guide = ["# Guide", "", "See [more](more.md).", *[f"line {n}" for n in range(120)]]
@@ -176,7 +177,7 @@ class TestSkillReview(unittest.TestCase):
             self.assertIn("name: other-name", lines)
             self.assertIn("triggers: 2", lines)
             self.assertIn("  - do the thing", lines)
-            self.assertIn("body: 5 lines", lines)
+            self.assertIn("body: 6 lines", lines)
             self.assertIn("  docs/guide.md: 123 lines", lines)
             self.assertIn("  docs/gone.md: missing", lines)
             flags = lines[lines.index("flags:") + 1 :]
@@ -186,11 +187,48 @@ class TestSkillReview(unittest.TestCase):
                     "  NO_CONTENTS docs/guide.md",
                     "  NESTED_LINK docs/guide.md -> more.md",
                     "  MISSING_LINK docs/gone.md",
-                    "  YAML_HAZARD",
+                    "  YAML_HAZARD description",
                     "  CLAUDE_ONLY $ARGUMENTS",
+                    "  CLAUDE_ONLY !`git status --short`",
                     "  NAME_MISMATCH other-name != example-skill",
                 ],
             )
+
+    def test_measure_flags_frontmatter_outside_the_yaml_subset(self) -> None:
+        cases = {
+            "description: [broken": "YAML_HAZARD description",
+            "argument-hint: [prompt] [model]": "YAML_HAZARD argument-hint",
+            "description: Does a thing.\n  Note: folded": "YAML_HAZARD description",
+            'description: "unclosed': "YAML_HAZARD description",
+            "description: Does <b>a thing</b>.": "ANGLE_BRACKET description",
+        }
+        for frontmatter, flag in cases.items():
+            with self.subTest(frontmatter=frontmatter), tempfile.TemporaryDirectory() as temporary:
+                skill = Path(temporary) / "example-skill"
+                skill.mkdir()
+                (skill / "SKILL.md").write_text(
+                    f"---\nname: example-skill\n{frontmatter}\n---\n\n# Example\n",
+                    encoding="utf-8",
+                )
+                result = run_measure(skill)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"  {flag}", result.stdout.splitlines())
+
+    def test_every_skill_frontmatter_is_in_the_yaml_subset(self) -> None:
+        # Codex and Antigravity parse the frontmatter as YAML; a value outside the subset
+        # (an unquoted `[a] [b]` hint, a `: ` in a plain scalar) can drop the metadata.
+        sys.path.insert(0, str(MEASURE.parent))
+        try:
+            import measure
+        finally:
+            sys.path.pop(0)
+        paths = [*sorted((ROOT / "skills").glob("*/SKILL.md")), SKILL_DIR / "SKILL.md"]
+        problems = {
+            str(path.relative_to(ROOT)): hazards
+            for path in paths
+            if (hazards := measure.frontmatter_hazards(path))
+        }
+        self.assertEqual(problems, {})
 
     def test_measure_refuses_a_directory_without_skill(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

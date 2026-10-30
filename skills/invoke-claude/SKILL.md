@@ -1,7 +1,7 @@
 ---
 name: invoke-claude
 description: Run Claude Code headlessly through `cairn invoke claude` for an adversarial second opinion, code review, plan review or an independent fresh-context pass, with progress readable mid-run, the session resumable later, and the whole exchange recorded in cairn. Use when the user says "invoke claude", "ask claude", "claude review", "second opinion from claude", "claude resume", or asks for a cross-model quality gate from Codex.
-argument-hint: [prompt or gate name] [model] [effort]
+argument-hint: "[prompt or gate name] [model] [effort]"
 allowed-tools: Bash(cairn:*), Bash(qmd:*), Read, AskUserQuestion, Monitor
 ---
 

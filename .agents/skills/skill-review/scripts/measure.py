@@ -20,6 +20,11 @@ CONTENTS_THRESHOLD = 100
 _LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 _QUOTED = re.compile(r'"([^"]+)"')
 _CLAUDE_ONLY = ("$ARGUMENTS", "CLAUDE_SKILL_DIR", "when_to_use", "```!")
+_INLINE_COMMAND = re.compile(r"!`[^`\n]+`")
+_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+_BLOCK = ("", ">", "|", ">-", "|-", ">+", "|+")
+# A plain scalar may not start with a YAML indicator (``- `` and ``? `` only with a space).
+_INDICATORS = tuple("[]{}&*!|>'\"%@`,#")
 
 
 def read_skill(path: Path) -> tuple[dict[str, str], list[str]]:
@@ -62,11 +67,53 @@ def has_contents(lines: list[str]) -> bool:
     return any(line.strip().lower() == "## contents" for line in lines[:20])
 
 
-def yaml_hazard(description: str) -> bool:
-    plain = not description.startswith(("'", '"'))
-    return (plain and (": " in description or " #" in description)) or bool(
-        set(description) & {"<", ">"}
+def plain_line_hazard(value: str) -> bool:
+    """True when a one-line frontmatter value falls outside the subset cairn's skills
+    use: a block indicator alone, a whole quoted string, a one-line flow sequence, or a
+    plain scalar that starts
+    with no indicator and holds no ``: `` or `` #``. Stdlib has no YAML parser, so this
+    subset is what the review can check; a value outside it needs a real parser."""
+    if value in _BLOCK:
+        return False
+    if value[0] == "[" and value[-1] == "]":
+        # A one-line flow sequence, as `argument-hint: [TOPIC]` is: valid YAML (a list).
+        inner = value[1:-1]
+        return any(c in inner for c in "[]{}") or ": " in inner or " #" in inner
+    if value[0] in "'\"":
+        return len(value) < 2 or value[-1] != value[0] or value[0] in value[1:-1]
+    return (
+        value.startswith(_INDICATORS)
+        or value.startswith(("- ", "? "))
+        or ": " in value
+        or " #" in value
+        or value.endswith(":")
     )
+
+
+def frontmatter_hazards(path: Path) -> list[str]:
+    """Keys (or ``line N``) of the top-level frontmatter lines outside the checked subset."""
+    hazards: list[str] = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    key, plain = "", False  # plain: the open key is a plain scalar that may continue
+    for number, line in enumerate(lines[1:], start=2):
+        if line.strip() == "---":
+            break
+        if not line.strip():
+            continue
+        if line[0].isspace():
+            # A plain scalar folded onto the next line still may not hold `: ` or ` #`.
+            text = line.strip()
+            if plain and (": " in text or " #" in text or text.endswith(":")):
+                hazards.append(key)
+            continue
+        key, sep, value = line.partition(":")
+        value = value.strip()
+        plain = bool(value) and value[0] not in "'\"[" and value not in _BLOCK
+        if not sep or not _KEY.fullmatch(key) or (line[len(key) + 1 :][:1] not in ("", " ")):
+            hazards.append(f"line {number}")
+        elif plain_line_hazard(value):
+            hazards.append(key)
+    return list(dict.fromkeys(hazards))
 
 
 def measure(skill_dir: Path) -> list[str]:
@@ -103,10 +150,12 @@ def measure(skill_dir: Path) -> list[str]:
         flags.append("OVER_500")
     if len(description) > DESCRIPTION_LIMIT:
         flags.append("DESC_OVER_1024")
-    if yaml_hazard(description):
-        flags.append("YAML_HAZARD")
+    flags.extend(f"YAML_HAZARD {key}" for key in frontmatter_hazards(skill_dir / "SKILL.md"))
+    if set(description) & {"<", ">"}:
+        flags.append("ANGLE_BRACKET description")
     whole = "\n".join(body) + "\n" + "\n".join(f"{k}: {v}" for k, v in head.items())
     flags.extend(f"CLAUDE_ONLY {token}" for token in _CLAUDE_ONLY if token in whole)
+    flags.extend(f"CLAUDE_ONLY {m}" for m in dict.fromkeys(_INLINE_COMMAND.findall(whole)))
     if head.get("name") != skill_dir.resolve().name:
         flags.append(f"NAME_MISMATCH {head.get('name', '')} != {skill_dir.resolve().name}")
     out.append("flags:")
