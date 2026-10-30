@@ -221,9 +221,10 @@ and in any backup or copy of the file. Recall and the digest hide withdrawn rows
 `cairn claude memory import` adds each Claude Code auto-memory note of the current
 project as a decision row: in the session that wrote it when cairn exported that
 session, else in `<data_root>/decisions/<project>.md`. A re-run adds only new notes.
-Notes hold whatever Claude saved, private names included. The import writes only under
-`data_root`, never into a repository; do not copy a decisions document into a tracked
-file.
+Notes hold whatever Claude saved, private names included. The import writes only into
+the data root, beside the exported sessions. If the data root is inside a git work tree,
+keep it git-ignored and untracked (the import does not check); do not copy a decisions
+document into a tracked file.
 
 Service docs is a verbatim mirror with no `--since`/`--all`:
 `cairn service-docs export [--clean]`.

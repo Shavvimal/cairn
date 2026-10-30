@@ -147,8 +147,10 @@ Exit 0 when every note was added or skipped by rule; 1 when the directory is mis
 (`MEMORY_IMPORT_WRITE_FAILED`). The other notes are still imported.
 
 Privacy: a note holds whatever Claude saved, which can include private names. The
-import writes only under `data_root`, never into a repository and never into the
-memory directory. Do not copy a project decisions document into a tracked file.
+import writes only into the data root, beside the exported sessions, and never into
+the memory directory. If the data root is inside a git work tree, keep it git-ignored
+and untracked (the import does not check). Do not copy a project decisions document
+into a tracked file.
 
 ## Internal sync hook
 

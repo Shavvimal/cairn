@@ -275,9 +275,13 @@ names the origin exactly, and `provenance` is a per-document key (`src/cairn/pro
    Otherwise the target is the project document, and `unknown_session` counts the
    memory.
 2. Existing markers: read the tables of the project document, of every target session
-   document, and of each Claude record whose `project` equals the directory's
-   `project_name_from_dir` label. Collect each row's `memory` value. This scan finds a
-   row even after a later run moves its memory to a different session.
+   document, and of every Claude record, whatever its `project` label (a session
+   exported from a worktree or a subdirectory has a different label). Collect each
+   row's `memory` value. This scan finds a row even after a later run moves its memory
+   to a different session. A document whose table cannot be read or parsed, and whose
+   bytes hold `memory:<label>/` for a directory of this run (or cannot be read at all),
+   fails every memory of that label with `cannot check <path> for imported memories:
+   <problem>`: an unchecked document is not proof that the marker is absent.
 3. Group the memories by target. Call `decisions.apply` once per target, with
    `source="claude"`. The project document gets a `find_file` closure that returns its
    path. The `edit` callback runs under the document lock. It does these steps:
@@ -383,7 +387,10 @@ Rows imported from Claude Code auto memory by cairn claude memory import.
 ```
 
 `action` is one of `added`, `existing`, `withdrawn`, `reference`, `invalid` or `failed`.
-`placement` is `session` or `project`. `ref` is `null` when nothing was written.
+`placement` is `session` or `project`, and `null` for a memory that never reached
+placement (`invalid`, `reference`, or `failed` before placement). `ref` is `null` when
+nothing was written. `reason` is the problem of an `invalid` or `failed` memory, else
+`null`.
 
 ## 6. Failure modes
 
@@ -392,9 +399,13 @@ Rows imported from Claude Code auto memory by cairn claude memory import.
 | No memory directory | exit 1, `MEMORY_DIR_MISSING` |
 | Empty directory | exit 0, `Imported 0 memories ...` |
 | Malformed frontmatter | warning, `invalid` +1, exit 1 at the end |
-| Session document table does not parse | `apply` error, `failed` +1, exit 1 |
+| Session document table does not parse | `apply` error, `failed` +1 with the error as `reason`, exit 1 |
+| Target document is not UTF-8 | `failed` +1 per memory of that target, `reason` `<path> is not UTF-8`; later targets still run; exit 1 |
+| A document of the marker scan cannot be read or parsed | its labels' memories fail with `cannot check <path> ...`; exit 1 |
+| Two directories of one run strip to one label | every memory of both fails with `label <label> is shared by <n> memory directories; import one of them with --memory-dir DIR`; exit 1 |
+| The label's project document was imported from another memory directory (`memory_dir` differs) | every memory of this directory fails with `<doc> was imported from <dir>, not <dir>; ...`; exit 1 |
 | Ledger invalid (`LedgerError`) | exit 1 before any write |
-| Concurrent import | the document lock serialises the work. The marker check inside `edit` stops a duplicate row |
+| Concurrent import | one import lock (`lock_path(<data_root>/decisions, "memory-import")`) is held from the marker scan to the last write, so a second import scans after the first wrote. The document lock and the marker check inside `edit` still guard each document against exporters and annotation verbs |
 | Concurrent re-export of a target session | the export keeps the section (`src/cairn/decisions.py:20-25`) |
 | Memory written while the import runs | the import reads the file once. The next run sees the new state |
 | `autoMemoryDirectory` set | the default directory is empty or missing. The error tells the user to pass `--memory-dir` |
@@ -455,8 +466,11 @@ commands), `test_skill_routing` (one new intent row, below), and the docs index 
 - `src/cairn/errors.py`: `MEMORY_DIR_MISSING` and `MEMORY_IMPORT_WRITE_FAILED`. Then
   regenerate `docs/error-codes.md`.
 - Privacy paragraph (README and reference): memories hold whatever Claude saved,
-  including private names. The import writes only under `data_root`, never into a
-  repository. A person must not copy a project decisions document into a tracked file.
+  including private names. The import writes only into the configured data root,
+  beside the exported sessions, and never into the memory directory. If the data root
+  sits inside a git work tree, it must be git-ignored and its files untracked; the
+  import does not check this. A person must not copy a project decisions document into
+  a tracked file.
 
 CHANGELOG entry:
 
@@ -502,6 +516,16 @@ The estimate is a day if the fixtures come together on the first pass.
 
 The surface, placement, idempotency rules, messages and JSON keys of sections 3 to 5
 are as written, with these differences.
+
+**Review fixes (2026-10-30).** The marker scan reads every Claude record, not only
+those of the directory's project label. A document the scan cannot read or parse
+fails the memories it may hold. One import lock covers the scan and the writes. A
+shared label, or a project document imported from another memory directory, fails
+the memories it would mix up. A target that is not UTF-8, or that `apply` refuses,
+fails its group with a `reason` and the next group still runs. A dry run leaves the
+catalog cache unwritten. `recall decisions` without `--project` also matches a
+project document whose `cwd` is the git main checkout of the current directory, so a
+subdirectory or a linked worktree sees it.
 
 **Open questions.** All three recommended defaults hold: `autoMemoryDirectory` is not
 read (`--memory-dir` covers it and the missing-directory error names the flag), the
