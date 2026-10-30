@@ -383,7 +383,7 @@ class TestProvenanceKey(DigestFixture):
     def test_digest_carries_provenance(self):
         self.write_doc("fixture.md", fixture_document())
         self.write_peer("owned-0001", "routine:example-daily")
-        code, data, _, out = self.digest()
+        code, data, _, out = self.digest("--include-routine-sessions")
         self.assertEqual(code, 0)
         rows = {row["ref"]: row for row in data["sessions"]}
         primary, owned = rows["claude:fixture-0001"], rows["codex:owned-0001"]
@@ -407,12 +407,12 @@ class TestProvenanceKey(DigestFixture):
         self.write_doc("fixture.md", fixture_document())
         self.write_peer("peer-0001", "claude session claude:fixture-0001")
         self.write_peer("owned-0001", "routine:example-daily")
-        code, data, _, out = self.digest("--provenance", "tool")
+        code, data, _, out = self.digest("--provenance", "tool", "--include-routine-sessions")
         self.assertEqual(code, 0)
         self.assertEqual([row["ref"] for row in data["sessions"]], ["claude:fixture-0001"])
         self.assertEqual(data["skipped"], [])
         self.assertFalse((out / "codex-peer0001.md").exists())
-        code, data, _, _ = self.digest("--provenance", "agent")
+        code, data, _, _ = self.digest("--provenance", "agent", "--include-routine-sessions")
         refs = sorted(row["ref"] for row in data["sessions"])
         self.assertEqual(refs, ["codex:owned-0001", "codex:peer-0001"])
 
@@ -487,6 +487,7 @@ class TestProvenanceKey(DigestFixture):
         self.assertEqual(code, 3)
         self.assertEqual((data["sessions"], data["skipped"]), ([], []))
         self.assertEqual(data["coverage"]["verdict"], "clean-miss")
+        self.assertEqual(data["excluded"], [])
         self.assertEqual([p.name for p in out.iterdir()], [".cairn-digest"])
 
     def test_filter_to_nothing_clears_a_populated_directory(self):
