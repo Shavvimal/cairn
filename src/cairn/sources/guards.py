@@ -127,11 +127,15 @@ def check_parse(
 
     ``data`` is ``None`` when the adapter could not build a session at all (Codex: no
     ``session_meta`` id). Messages are what the document would render
-    (:func:`cairn.store.messages_of`); user and assistant are counted by role.
+    (:func:`cairn.store.messages_of`); user and assistant are counted by role, and
+    only those two roles count as rendered for the zero-messages check.
     """
     messages = messages_of(data) if data else []  # type: ignore[arg-type]
     user = sum(1 for m in messages if m.get("role") == "user")
     assistant = sum(1 for m in messages if m.get("role") == "assistant")
+    # Tool, system and agent turns alone are not a conversation: a parser that
+    # files every record it no longer knows as a tool result still drifted.
+    rendered = user + assistant
     conversational = target.conversational if target else frozenset()
     ignored = target.ignored if target else frozenset()
     # A conversational name is a top-level type ("user") or a finer kind
@@ -152,7 +156,7 @@ def check_parse(
         kind, severity = "no-session-id", ERROR
         detail = f"no session id in {stats.records} records ({stats.bytes} bytes)"
         message = f"parser drift: {where} {kind}: {detail} in {path}; {tail}; see 'cairn doctor'"
-    elif not messages and (conv_records or unknown):
+    elif not rendered and (conv_records or unknown):
         kind, severity = "zero-messages", ERROR
         detail = f"rendered 0 messages from {stats.records} records ({stats.bytes} bytes)"
         if unknown:
@@ -161,7 +165,7 @@ def check_parse(
             f"parser drift: {where} {kind}: rendered 0 messages from {stats.records} records "
             f"({stats.bytes} bytes) in {path}; {tail}; see 'cairn doctor'"
         )
-    elif not messages:
+    elif not rendered:
         kind, severity = "empty", INFO
         detail = f"{stats.records} records, all of ignored types"
         message = f"{where} {kind}: {detail} in {path}"
