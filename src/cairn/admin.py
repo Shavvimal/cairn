@@ -1097,6 +1097,32 @@ def _check_exporters(config: CairnConfig) -> None:
             continue
         _ok(f"exporter [{source}]", f"adapter {target.adapter_version}, {target.describe()}")
     _check_drift(config)
+    _check_gaps(config)
+
+
+def _check_gaps(config: CairnConfig) -> None:
+    """Warn-only, read-only gap check: no heal (that is 'cairn sync')."""
+    from .gaps import GAP_WINDOW_DAYS, gap_sources, refs, scan
+    from .registry import SOURCE_COLLECTIONS
+
+    for source in gap_sources(config):
+        label = f"gap check [{SOURCE_COLLECTIONS[source]}]"
+        try:
+            found = scan(config, source)
+        except (OSError, ValueError) as exc:
+            _warn(label, f"could not scan: {exc}")
+            continue
+        total = len(found.on_disk)
+        days = f"in the last {GAP_WINDOW_DAYS} days"
+        if found.missing:
+            _warn(
+                label,
+                f"{len(found.missing)} of {total} sessions {days} have no document: "
+                f"{refs(source, found.missing)}; run 'cairn sync'",
+            )
+            continue
+        held = f"; {found.held_on_disk} held by parser drift" if found.held_on_disk else ""
+        _ok(label, f"{total} sessions on disk {days}, all exported{held}")
 
 
 def _check_drift(config: CairnConfig) -> None:
