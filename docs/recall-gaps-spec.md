@@ -270,7 +270,7 @@ Coverage is computed after `--refresh`, so it describes the store the rows came 
 ```
 
 `store` is printed as configured, after expansion. `index.qmd` is `available`,
-`missing` or `failed`. A collection with no index data has `"index": null`. Timestamps
+`missing` or `failed` (`skipped` in facts gathered for coverage, which never asks QMD). A collection with no index data has `"index": null`. Timestamps
 are UTC ISO-8601, seconds precision. `fix` is a command string or `null`.
 
 ### 5.2 `coverage`
@@ -363,6 +363,13 @@ Existing modules:
 - `tests/test_hooks.py::test_update_index_writes_stamp`.
 - `tests/test_invoke.py::test_update_index_writes_stamp`.
 - `tests/test_catalog.py::test_scan_matches_walk`.
+
+Added after review (section 11): in `tests/test_recall_gaps.py`, the per-file lag,
+window boundary, clock-skew, repair-command, skipped-session, disabled-unreadable,
+empty-listing, unnamed-disabled-source, id-based skip, Claude probe, unreadable store
+and stamp-validation cases; `tests/test_recall_digest.py` asserts coverage on skipped
+days; `tests/test_sync.py::TestIndexStamp.test_stamp_time_is_read_before_update_under_the_index_lock`;
+`tests/test_invoke.py::TestIndexStamp.test_stamp_leaves_out_a_collection_that_was_not_registered`.
 
 ## 8. Docs to update
 
@@ -459,6 +466,27 @@ Where the code differs from the sections above:
   `facts.count` and `facts.skipped` (the refs), and `fix` `cairn <source> export --all`
   when one was a legacy export. A day whose only sessions were skipped is a
   `degraded-miss`, not a `clean-miss`.
+- **Coverage severity of a disabled source.** `coverage(config, sources, window, found,
+  *, skipped=(), named=None, now=None)`. `sources` is the command's source list (the
+  `--source` values, else its default) and decides which collections are gathered.
+  `named` is the `--source` values only, so a disabled source is `warn` only when the
+  user named it, as in section 4.2; a default list never makes it a warn.
+- **Empty QMD listing.** `qmd collection list` that prints QMD's `No collections.` line
+  is `available` with no registered collection, so a collection with markdown reports
+  `collection-missing`. Other output with no `qmd://` block is still `index-unknown`.
+- **No readable QMD age.** A registered collection with no usable stamp and an
+  `Updated:` age cairn cannot read (`2mo ago`) is listed in `index-stamp-missing`, so
+  its unknown `index-lag` is not silently clean.
+- **Live-session skip by id.** The current session ids are compared with each native
+  file's id (section 11, per-file comparison), not searched for in the path: a project
+  folder named after a working directory can contain a session id. Cursor, Granola and
+  service docs skip nothing.
+- **Claude probe.** A top-level `agent-*.jsonl` (a legacy side thread the exporter never
+  exports) is ignored. A session's mtime is the newest of its file, its subagent
+  transcripts and their `.meta.json` files, the value the exporter selects by.
+- **`store_exists`** is `true` for a store that exists but cannot be read (the
+  `store-missing` gap carries the error), and `false` for service docs with no
+  `service_sources`.
 - **Repair commands.** `never-exported` names `cairn <source> export --all` for a
   windowed source and `cairn <source> export` for one without `--all` (service docs).
 - **Non-session collections** (service docs, journal) compare the native newest file with
@@ -473,8 +501,11 @@ Where the code differs from the sections above:
   (`1h ago` counts files changed in the last 30 minutes). That is a lower bound whether
   QMD floors or rounds the age. The `w` unit is read as well as `s`, `m`, `h` and `d`.
 - **Index stamp collections.** `cairn sync` records the enabled collections that hold
-  markdown (the set its registration step ensures). The hook and `cairn invoke` record the
-  `qmd collection list` set they fetched plus the collections they registered. Each call
+  markdown (the set its registration step ensures), read before `qmd update` starts. The
+  hook and `cairn invoke` record the `qmd collection list` set they fetched plus the
+  collections `ensure_collection` reported `added` or `exists`; a `skipped` collection
+  is left out. A stamp entry only sharpens a collection QMD lists, so a name QMD does
+  not list still reports `collection-missing`. Each call
   site reads `time.time_ns()` before `qmd update` and calls `qmd.record_update` after it
   exits 0: two lines per site.
 - **JSON additions.** Each `collections[]` row also carries `markdown_files`, and

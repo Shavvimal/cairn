@@ -172,11 +172,18 @@ def parse_collection_list(text: str) -> dict[str, CollectionInfo]:
     return {name: CollectionInfo(**fields) for name, fields in found.items()}
 
 
-def collection_details(qmd_binary: str, timeout: float) -> dict[str, CollectionInfo]:
+_NO_COLLECTIONS = re.compile(r"^\s*No collections", re.MULTILINE)
+
+
+def collection_details(
+    qmd_binary: str, timeout: float, *, strict: bool = False
+) -> dict[str, CollectionInfo]:
     """Run ``qmd collection list`` once and parse every block.
 
     Raises ``RuntimeError`` on a timeout or a non-zero exit, and lets ``OSError``
     through when the binary cannot start, exactly as :func:`list_collections` does.
+    With ``strict``, output with no ``qmd://`` block that is not QMD's
+    ``No collections.`` line also raises: cairn cannot read it.
     """
     try:
         result = run_capped([qmd_binary, "collection", "list"], timeout=timeout)
@@ -187,7 +194,10 @@ def collection_details(qmd_binary: str, timeout: float) -> dict[str, CollectionI
             f"`qmd collection list` failed (exit {result.returncode}): "
             f"{result.stderr.strip() or 'unknown error'}"
         )
-    return parse_collection_list(result.stdout)
+    details = parse_collection_list(result.stdout)
+    if strict and not details and not _NO_COLLECTIONS.search(strip_ansi(result.stdout)):
+        raise RuntimeError("`qmd collection list` printed no qmd:// block")
+    return details
 
 
 def list_collections(qmd_binary: str | None = None) -> set[str]:

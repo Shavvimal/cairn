@@ -27,6 +27,7 @@ from pathlib import Path
 from .catalog import load_catalog, scan
 from .config import CairnConfig, Collection
 from .harnesses.antigravity import conversation_transcript, transcript_conversation_id
+from .jsonl import iter_subagent_files, subagent_meta_path
 from .qmd import CollectionInfo, collection_details, read_stamp
 from .registry import SOURCES, Source
 from .runtime import qmd_resources
@@ -215,12 +216,10 @@ class _Scan:
                 if accept(name):
                     yield Path(directory) / name
 
-    def files(self, paths: Iterable[Path], skip: tuple[str, ...]) -> list[tuple[Path, int]]:
-        """``(path, mtime_ns)`` of non-empty regular files, skipping the live session."""
+    def files(self, paths: Iterable[Path]) -> list[tuple[Path, int]]:
+        """``(path, mtime_ns)`` of non-empty regular files."""
         found = []
         for path in paths:
-            if skip and any(token in str(path) for token in skip):
-                continue
             try:
                 st = os.stat(path)
             except OSError as exc:
@@ -235,8 +234,29 @@ def _claude_files(store: Path, scan: _Scan) -> Iterable[Path]:
     for project in scan.scandir(store):
         if project.is_dir(follow_symlinks=False):
             for entry in scan.scandir(Path(project.path)):
-                if entry.name.endswith(".jsonl"):
+                # A top-level agent-*.jsonl is a legacy side thread the exporter skips.
+                if entry.name.endswith(".jsonl") and not entry.name.startswith("agent-"):
                     yield Path(entry.path)
+
+
+def _claude_mtime_ns(path: Path, mtime_ns: int, scan: _Scan) -> int:
+    """A session's newest write: its file, or a subagent that finished after it.
+
+    The export selects and revises a parent by the same value (``jsonl.newest_mtime``).
+    """
+    try:
+        children = iter_subagent_files(path)
+    except OSError as exc:
+        scan.error(exc)
+        return mtime_ns
+    for child in children:
+        for item in (child, subagent_meta_path(child)):
+            try:
+                mtime_ns = max(mtime_ns, os.stat(item).st_mtime_ns)
+            except OSError as exc:
+                if item == child:
+                    scan.error(exc)
+    return mtime_ns
 
 
 def _antigravity_files(store: Path, scan: _Scan) -> Iterable[Path]:
@@ -312,21 +332,24 @@ def _scan_error(scan: _Scan) -> str | None:
 
 
 def _native(source: str | None, coll: Collection) -> _NativeFacts:
-    """The newest native file of one collection, and each file when compared per file."""
-    skip = _current_session_ids()
+    """The newest native file of one collection, and each file when compared per file.
+
+    A file whose native id is a current session id is skipped, so the live session
+    never reports itself. The id is compared, not the path: a project folder named
+    after a working directory can contain a session id too.
+    """
+    skip = set(_current_session_ids())
     scan = _Scan()
     if source == "service-docs":
         roots = [s.path for s in coll.service_sources]
         missing = [str(r) for r in roots if not r.is_dir()]
-        found = scan.files(
-            (p for r in roots for p in scan.walk(r, lambda n: n.endswith(".md"))), skip
-        )
+        found = scan.files(p for r in roots for p in scan.walk(r, lambda n: n.endswith(".md")))
         newest = max((m for _, m in found), default=None)
         error = f"service source {', '.join(missing)} not found" if missing else None
         return _NativeFacts(
             _from_ns(newest) if newest is not None else None,
             "file",
-            not missing,
+            bool(roots) and not missing,
             error or _scan_error(scan),
         )
     if coll.store is None or source not in PROBES:
@@ -339,16 +362,20 @@ def _native(source: str | None, coll: Collection) -> _NativeFacts:
     except OSError as exc:
         return _NativeFacts(store_error=str(exc))
     if not os.access(store, os.R_OK | os.X_OK) and store.is_dir():
-        return _NativeFacts(store_error=f"store {store} is not readable")
+        return _NativeFacts(store_exists=True, store_error=f"store {store} is not readable")
     probe, basis, ids = PROBES[source]
-    found = scan.files(probe(store, scan), skip)
-    newest = max((m for _, m in found), default=None)
+    found = scan.files(probe(store, scan))
+    if source == "claude":
+        found = [(path, _claude_mtime_ns(path, m, scan)) for path, m in found]
+    rows = [(ids(path) if ids is not None else (), path, m) for path, m in found]
+    rows = [row for row in rows if not skip.intersection(row[0])]
+    newest = max((m for _, _, m in rows), default=None)
     return _NativeFacts(
         _from_ns(newest) if newest is not None else None,
         basis,
         True,
         _scan_error(scan),
-        tuple((ids(path), m) for path, m in found) if ids is not None else None,
+        tuple((row_ids, m) for row_ids, _, m in rows) if ids is not None else None,
     )
 
 
@@ -523,12 +550,9 @@ def gather(
         qmd_state = "missing"
     else:
         try:
-            details = collection_details(binary, QMD_PROBE_TIMEOUT_S)
+            details = collection_details(binary, QMD_PROBE_TIMEOUT_S, strict=True)
         except (RuntimeError, OSError) as exc:
             qmd_state, qmd_error = "failed", str(exc)
-        else:
-            if not details:
-                qmd_state, qmd_error = "failed", "`qmd collection list` printed no qmd:// block"
     stamp = read_stamp()
     if stamp is not None and stamp["database"] != str(qmd_resources()[1]):
         stamp = None
@@ -754,7 +778,8 @@ def _global_gaps(facts: Facts) -> list[Gap]:
             if c.enabled
             and c.markdown_files
             and c.index is not None
-            and c.index.basis == "qmd-relative"
+            and c.index.registered
+            and c.index.basis != "cairn"
         ]
         if relative:
             gaps.append(
@@ -765,7 +790,8 @@ def _global_gaps(facts: Facts) -> list[Gap]:
                     None,
                     None,
                     f"no qmd update recorded by cairn for {len(relative)} collections; "
-                    "index-lag is a lower bound from qmd's Updated age",
+                    "index-lag is a lower bound from qmd's Updated age, or unknown when "
+                    "qmd prints no age cairn can read",
                     FIX_SYNC,
                     {"collections": relative},
                 )
@@ -790,9 +816,8 @@ def _in_window(gap: Gap, window: tuple[datetime, datetime]) -> bool:
         return True  # unreadable, disabled, missing store: their dates are unknown
     start, end = window
     low, high = gap.interval
-    if gap.kind == "never-exported":
-        return high is not None and high >= start
-    # The unexported interval (low, high] intersects [start, end).
+    # The unexported interval (low, high] intersects [start, end); a never-exported
+    # or never-exported-session gap has no low end.
     return high is not None and high >= start and (low is None or low < end)
 
 
@@ -926,19 +951,22 @@ def coverage(
     found: bool,
     *,
     skipped: Iterable[dict] = (),
+    named: Iterable[str] | None = None,
     now: datetime | None = None,
 ) -> dict:
     """The store gaps that can hide a row from ``window`` for ``sources``. No QMD call.
 
     ``sources`` are the requested sources (``--source``, else the command's
-    default). ``found`` says whether the command returned any row. ``skipped`` are
-    the sessions a digest could not read (:func:`skipped_gaps`).
+    default). ``named`` are the ``--source`` values only: a disabled source is a warn
+    when it was named, and info when it is only in the command's default list.
+    ``found`` says whether the command returned any row. ``skipped`` are the sessions
+    a digest could not read (:func:`skipped_gaps`).
     """
     now = now or datetime.now(UTC)
     sources = list(sources)
     facts = gather(config, sources, index=False, now=now)
     gaps = sorted(
-        classify(facts, now, window=window, requested=sources) + skipped_gaps(skipped),
+        classify(facts, now, window=window, requested=named) + skipped_gaps(skipped),
         key=_order,
     )
     status = status_of(gaps)

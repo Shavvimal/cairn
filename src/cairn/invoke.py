@@ -492,19 +492,22 @@ def update_index(config: CairnConfig, collections: list[str], timeout_s: float) 
         try:
             with locked_index(blocking=False):
                 known = list_collections(config.qmd_binary)
+                registered = set(known)
                 for name in collections:
                     status = ensure_collection(
                         name, config.output_dir(name), config.qmd_binary, known
                     )
                     if status == "FAILED":
                         raise RuntimeError(f"qmd collection add failed for {name}")
+                    if status in ("added", "exists"):
+                        registered.add(name)
                 started_ns = time.time_ns()
                 result = run_capped([config.qmd_binary, "update"], timeout=QMD_UPDATE_TIMEOUT_S)
                 if result.returncode:
                     raise RuntimeError(
                         f"qmd update failed: {(result.stderr or result.stdout)[-STDERR_TAIL:]}"
                     )
-                record_update(started_ns, known | set(collections))
+                record_update(started_ns, registered)
             return
         except BlockingIOError:
             if time.monotonic() >= deadline:

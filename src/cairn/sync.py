@@ -362,11 +362,12 @@ def _index_stages(config: CairnConfig, embed: bool, record) -> None:
             "qmd-collections",
             run_inproc("qmd-collections", lambda: _ensure_collections(config)),
         )
+        registered = _registered(config)  # before the update: what it can have scanned
         started_ns = time.time_ns()
         updated = run_step("qmd-update", [qmd, "update"])
         record("qmd-update", updated)
         if updated:
-            record_update(started_ns, _registered(config))
+            record_update(started_ns, registered)
         if not embed:
             return
         if not updated:

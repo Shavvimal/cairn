@@ -2545,3 +2545,13 @@ class TestIndexStamp(StoreFixture):
         self.assertGreaterEqual(stamp["started_ns"], before)
         self.assertIn("codex-sessions", stamp["collections"])
         self.assertEqual(stamp, qmd.read_stamp())
+
+    def test_stamp_leaves_out_a_collection_that_was_not_registered(self):
+        self.fake_qmd()
+        # No markdown in cursor-sessions: ensure_collection skips it, so the update
+        # cannot have scanned it.
+        invoke.update_index(config.get_config(), ["codex-sessions", "cursor-sessions"], 5)
+        stamp = qmd.read_stamp()
+        assert stamp is not None
+        self.assertIn("codex-sessions", stamp["collections"])
+        self.assertNotIn("cursor-sessions", stamp["collections"])

@@ -153,7 +153,11 @@ class TestClassify(StoreFixture):
         found = classify(
             facts(
                 collection(index=IndexFacts(False)),
-                collection(collection="codex-sessions", source="codex", index=IndexFacts(True, 4)),
+                collection(
+                    collection="codex-sessions",
+                    source="codex",
+                    index=IndexFacts(True, 4, 0, "cairn"),
+                ),
                 rg=False,
             ),
             NOW,
@@ -166,6 +170,9 @@ class TestClassify(StoreFixture):
                 ("rg-missing", "info"),
             ],
         )
+        # Registered, no stamp, and an age cairn cannot read: index-lag is unknown.
+        unknown = classify(facts(collection(index=IndexFacts(True, 10, None, None))), NOW)
+        self.assertEqual(self.kinds(unknown), [("index-stamp-missing", "info")])
         missing = classify(facts(qmd="missing"), NOW)
         self.assertEqual(self.kinds(missing), [("index-unknown", "warn")])
         self.assertIn("temporal recall still works", missing[0].message)
@@ -509,6 +516,77 @@ class TestGather(GapsFixture):
         stamp = qmd.read_stamp()
         self.assertEqual(stamp["started_ns"] if stamp else None, 1_000)
 
+    def test_malformed_stamps_are_absent(self):
+        path = qmd.stamp_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        good = {"version": qmd.STAMP_VERSION, "database": "x", "started_ns": 5, "collections": []}
+        for bad in ("not json", "[]", {**good, "version": 2}, {**good, "started_ns": True}):
+            path.write_text(bad if isinstance(bad, str) else json.dumps(bad))
+            self.assertIsNone(qmd.read_stamp(), bad)
+        path.write_text(json.dumps(good))
+        self.assertIsNotNone(qmd.read_stamp())
+
+    def test_session_id_in_a_project_folder_name_does_not_hide_the_project(self):
+        # The live session's id appears in the encoded working directory of another
+        # session's project folder; only the live session's own file is skipped.
+        folder = self.claude / "-tmp-live-session-0001-worktree"
+        folder.mkdir()
+        (folder / "other-0001.jsonl").write_text("{}\n")
+        self.native("claude", "live-session-0001")
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "live-session-0001"}):
+            claude = self.by_name(self.gather(index=False), "claude-code-sessions")
+        self.assertIsNotNone(claude.native_newest_at)
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "live-session-0001"}):
+            native = gaps._native("claude", config.get_config().collections["claude-code-sessions"])
+        self.assertEqual([ids for ids, _ in native.files or ()], [("other-0001",)])
+
+    def test_claude_probe_skips_legacy_agent_files_and_reads_subagents(self):
+        parent = self.native("claude", "sub-0001")
+        legacy = parent.parent / "agent-legacy.jsonl"
+        legacy.write_text("{}\n")
+        child = parent.with_suffix("") / "subagents" / "agent-a1.jsonl"
+        child.parent.mkdir(parents=True)
+        child.write_text("{}\n")
+        self.touch(parent, 600)
+        self.touch(legacy, 60)
+        self.touch(child, 300)
+        native = gaps._native("claude", config.get_config().collections["claude-code-sessions"])
+        self.assertEqual([ids for ids, _ in native.files or ()], [("sub-0001",)])
+        self.assertEqual(native.newest_at, gaps._from_ns(child.stat().st_mtime_ns))
+
+    def test_codex_and_antigravity_compare_files_with_their_exports(self):
+        for source in ("codex", "antigravity"):
+            self.native(source, f"{source}-pf-0001")
+            self.export(source)
+        given = self.gather(index=False)
+        for name in ("codex-sessions", "antigravity-sessions"):
+            self.assertEqual(self.by_name(given, name).unexported, (), name)
+        rollout = self.codex / "rollout-codex-pf-0001.jsonl"
+        self.touch(rollout, -5)  # changed after its export
+        codex = self.by_name(self.gather(index=False), "codex-sessions")
+        self.assertEqual(len(codex.unexported or ()), 1)
+
+    def test_unreadable_store_exists(self):
+        self.claude.chmod(0)
+        self.addCleanup(self.claude.chmod, 0o700)
+        if os.access(self.claude, os.R_OK):
+            self.skipTest("root reads every folder")
+        claude = self.by_name(self.gather(index=False), "claude-code-sessions")
+        self.assertTrue(claude.store_exists)
+        self.assertEqual(claude.store_error, f"store {self.claude} is not readable")
+
+    def test_empty_qmd_listing_is_available_and_reports_missing_collections(self):
+        self.fake_qmd('print("No collections.")')
+        self.native("claude", "empty-0001")
+        self.export()
+        given = self.gather()
+        self.assertEqual(given.qmd, "available")
+        kinds = [g.kind for g in classify(given, datetime.now(UTC))]
+        self.assertIn("collection-missing", kinds)
+        self.assertNotIn("index-unknown", kinds)
+        self.fake_qmd('print("something else")')
+        self.assertEqual(self.gather().qmd, "failed")
+
 
 class TestCli(GapsFixture):
     def test_gaps_text_lists_warn_before_info_and_ends_with_status(self):
@@ -596,6 +674,24 @@ class TestCoverage(GapsFixture):
     def setUp(self):
         super().setUp()
         self.stub_qmd()
+
+    def test_a_disabled_source_not_named_does_not_degrade_coverage(self):
+        data = json.loads(self.config.read_text())
+        data["collections"]["cursor-sessions"] = {
+            "store": str(self.root / "cursor"),
+            "sync": {"enabled": False},
+        }
+        self.config.write_text(json.dumps(data))
+        self.native("claude", "cov-0001")
+        self.export()
+        args = ("list", "2026-03-28", "--all-projects", "--json", "--coverage", "--min-msgs", "0")
+        cov = json.loads(self.cli(*args)[1])["coverage"]
+        self.assertEqual(cov["status"], "clean")
+        self.assertEqual(
+            [(g["kind"], g["severity"]) for g in cov["gaps"]], [("source-disabled", "info")]
+        )
+        cov = json.loads(self.cli(*args, "--source", "cursor")[1])["coverage"]
+        self.assertEqual(cov["verdict"], "degraded-miss")
 
     def test_list_json_without_flag_is_still_an_array(self):
         self.native("claude", "cov-0001")

@@ -55,7 +55,7 @@ for a child end with `(subagent of <parent[:8]>)`. `expand` takes a child id dir
 for example `cairn recall expand claude:agent-a193a0cb5d55bc5b6`.
 
 With `--coverage`, the JSON is `{"sessions": rows, "coverage": {...}}`. Each row has
-`session_id`, `time`, `msgs`, `title`, `project`, `type` and `parent`. `coverage.verdict`
+`session_id`, `time`, `msgs`, `title`, `project`, `type`, `parent`, `provenance` and `owner`. `coverage.verdict`
 is `found`, `clean-miss` or `degraded-miss`, and `coverage.gaps` lists the store gaps
 that can hide a session in the window. Without `--coverage`, `--json` prints the bare
 array.

@@ -168,7 +168,12 @@ def main(argv: list[str] | None = None) -> int:
                 records,
                 (start, end),
                 coverage=lambda found, skipped: gaps.coverage(
-                    store.config, requested, (start, end), found, skipped=skipped
+                    store.config,
+                    requested,
+                    (start, end),
+                    found,
+                    skipped=skipped,
+                    named=args.source,
                 ),
             )
         if args.command == "frame":
@@ -222,7 +227,9 @@ def main(argv: list[str] | None = None) -> int:
         cov = None
         if args.coverage or not args.json:
             requested = args.source or session_sources
-            cov = gaps.coverage(store.config, requested, (start, end), bool(output))
+            cov = gaps.coverage(
+                store.config, requested, (start, end), bool(output), named=args.source
+            )
         if args.json:
             payload = {"sessions": output, "coverage": cov} if args.coverage else output
             print(json.dumps(payload, indent=2))
