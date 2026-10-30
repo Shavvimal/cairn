@@ -372,6 +372,14 @@ class TestCursorExport(_AdapterFixture):
 class TestGranolaExport(_AdapterFixture):
     module_name = "cairn.sources.granola"
 
+    def test_export_is_imported(self):
+        mod = self._activate({"granola-sessions": str(self.root / "granola")})
+        data: SessionData = {"meeting_id": "m1", "date": "2026-07-01", "title": "Meeting"}
+        path = mod.GranolaSource().export_one("m1", data, None)
+        assert path is not None
+        lines = path.read_text(encoding="utf-8").split("\n")
+        self.assertEqual(lines[lines.index("status: raw") - 1], "provenance: imported")
+
     def test_source_headings_do_not_erase_handwritten_notes_on_reexport(self):
         mod = self._activate({"granola-sessions": str(self.root / "granola")})
         for field in ("notes_markdown", "summary_markdown"):
