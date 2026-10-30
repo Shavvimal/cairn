@@ -86,10 +86,12 @@ Two engines:
    b. **Pass 1 - list matching files, newest first, capped:**
 
       ```bash
-      rg -l -i -F "QUERY" --type md --sortr modified "PATH1" "PATH2" ... | head -n 20
+      rg -l -i -F -e "QUERY" --type md --sortr modified "PATH1" "PATH2" ... | head -n 20
       ```
 
       - `-F` treats the query as literal text. Drop `-F` for a regex query.
+      - `-e` keeps a query that starts with `-` from being read as a flag. Keep it
+        directly before the query.
       - Drop `-i` if case matters (identifiers, error codes).
       - `--sortr modified` puts the newest files first. An exported session file changes
         only when its session changes, so this is a good proxy for recency.
@@ -98,7 +100,7 @@ Two engines:
    c. **Pass 2 - matched lines for the top NUM files only, capped:**
 
       ```bash
-      rg -n -i -F "QUERY" -M 300 -m 5 -C 1 "FILE1" "FILE2" ...
+      rg -n -i -F -e "QUERY" -M 300 -m 5 -C 1 "FILE1" "FILE2" ...
       ```
 
       - `-M 300` cuts lines longer than 300 characters. **Never omit it**: a session
