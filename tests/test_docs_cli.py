@@ -724,7 +724,7 @@ def scan_text(path: str, text: str) -> tuple[int, list[str]]:
 
 def doc_files() -> list[Path]:
     files = [ROOT / "README.md", ROOT / "CONTRIBUTING.md"]
-    for folder in ("skills", "references", "docs"):
+    for folder in ("skills", "references", "docs", ".agents/skills"):
         files.extend(sorted((ROOT / folder).rglob("*.md")))
     return [path for path in files if path.is_file()]
 
