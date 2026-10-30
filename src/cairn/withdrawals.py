@@ -12,7 +12,9 @@ the next append truncates it. Any other line that is not a valid record fails lo
 with its line number, so a hand-edited ledger never lifts a withdrawal in silence.
 
 Lock order: a caller that also writes a session document takes the document lock
-first and this ledger lock second. Nothing takes them the other way round.
+first and this ledger lock second. Nothing takes them the other way round. A forced
+``decide`` keeps the ledger lock until its row is written and only then appends
+``unwithdrawn``, so a failed or interrupted write leaves the claim withdrawn.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import os
 import re
 import sys
 import unicodedata
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,8 +61,10 @@ FIELDS: Final[tuple[str, ...]] = (
     "norm",
     "reason",
 )
-_TS_RE: Final = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
-_FINGERPRINT_RE: Final = re.compile(r"^[0-9a-f]{64}$")
+# Both are used with ``fullmatch``: ``$`` would also accept a trailing newline.
+_TS_RE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_FINGERPRINT_RE: Final = re.compile(r"[0-9a-f]{64}")
+_TS_FORMAT: Final = "%Y-%m-%dT%H:%M:%SZ"
 
 
 class LedgerError(ValueError):
@@ -136,7 +141,7 @@ def ledger_lock(path: Path) -> Path:
 
 
 def _now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime(_TS_FORMAT)
 
 
 def record(
@@ -156,6 +161,21 @@ def record(
     }
 
 
+def _is_version(value: object, version: int) -> bool:
+    """``value`` is the integer ``version`` (not ``True``, not ``1.0``)."""
+    return type(value) is int and value == version
+
+
+def _real_ts(value: object) -> bool:
+    if not isinstance(value, str) or not _TS_RE.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value, _TS_FORMAT)
+    except ValueError:
+        return False
+    return True
+
+
 def _problem(data: object) -> str | None:
     """Why ``data`` is not a valid record, or ``None``."""
     if not isinstance(data, dict):
@@ -163,9 +183,9 @@ def _problem(data: object) -> str | None:
     missing = [key for key in FIELDS if key not in data]
     if missing:
         return f"missing {', '.join(missing)}"
-    if data["v"] != RECORD_VERSION or isinstance(data["v"], bool):
+    if not _is_version(data["v"], RECORD_VERSION):
         return f"unknown record version {data['v']!r}"
-    if not isinstance(data["ts"], str) or not _TS_RE.match(data["ts"]):
+    if not _real_ts(data["ts"]):
         return f"ts must be YYYY-MM-DDTHH:MM:SSZ, got {data['ts']!r}"
     if data["event"] not in EVENTS:
         return f"unknown event {data['event']!r}"
@@ -175,15 +195,17 @@ def _problem(data: object) -> str | None:
     row = data["row"]
     if not isinstance(row, int) or isinstance(row, bool) or row < 1:
         return f"row must be an integer of 1 or greater, got {row!r}"
-    if not isinstance(data["fingerprint"], str) or not _FINGERPRINT_RE.match(data["fingerprint"]):
+    if not isinstance(data["fingerprint"], str) or not _FINGERPRINT_RE.fullmatch(
+        data["fingerprint"]
+    ):
         return "fingerprint must be 64 lowercase hex characters"
-    if data["norm"] != NORM_VERSION or isinstance(data["norm"], bool):
+    if not _is_version(data["norm"], NORM_VERSION):
         return f"unknown normalisation version {data['norm']!r}"
     reason = data["reason"]
     if data["event"] == "withdrawn" and reason not in REASONS:
         return f"unknown reason {reason!r}"
-    if data["event"] == "unwithdrawn" and reason is not None and reason not in REASONS:
-        return f"unknown reason {reason!r}"
+    if data["event"] == "unwithdrawn" and reason is not None:
+        return f"reason must be null on an unwithdrawn record, got {reason!r}"
     return None
 
 
@@ -297,48 +319,70 @@ def withdraw(path: Path, fp: str, *, source: str, session_id: str, row: int, rea
     return True
 
 
-def guard(
-    config: CairnConfig, claim: str, *, force: bool, source: str, session_id: str, row: int
-) -> bool:
-    """Whether a new decision row with ``claim`` may be added.
+@dataclass(frozen=True)
+class Unwithdrawal:
+    """The ``unwithdrawn`` record a forced addition still owes the ledger.
 
-    A withdrawn claim is refused (the refusal is printed and False returned) unless
-    ``force``: then a warning is printed and an ``unwithdrawn`` record that names the
-    new row is appended. The guard is global: a claim withdrawn in one source's
-    session is refused in every source. :class:`EmptyClaim` for an empty claim.
+    :func:`guard` returns it with the ledger lock still held. The caller writes the
+    row, then calls :meth:`commit`, then releases the lock. A write that fails or is
+    interrupted never reaches :meth:`commit`, so the claim stays withdrawn.
+    """
+
+    path: Path
+    entry: dict
+    lifted_reason: str | None
+
+    def commit(self) -> None:
+        """Append the record (the caller holds the ledger lock) and print the warning."""
+        _append(self.path, self.entry)
+        print(
+            f"Warning: adding a withdrawn claim (reason was: {self.lifted_reason}); "
+            "recorded as unwithdrawn",
+            file=sys.stderr,
+        )
+
+
+def guard(
+    config: CairnConfig,
+    claim: str,
+    *,
+    force: bool,
+    source: str,
+    session_id: str,
+    row: int,
+    hold: ExitStack,
+) -> tuple[bool, Unwithdrawal | None]:
+    """Whether a new decision row with ``claim`` may be added, and what it owes.
+
+    A withdrawn claim is refused (the refusal is printed and ``(False, None)``
+    returned) unless ``force``. With ``force`` the ledger lock stays entered on
+    ``hold`` and an :class:`Unwithdrawal` that names the new row is returned: the
+    caller commits it after the row is written, then closes ``hold``. A claim that is
+    not withdrawn gives ``(True, None)``. The guard is global: a claim withdrawn in
+    one source's session is refused in every source. :class:`EmptyClaim` for an
+    empty claim.
     """
     fp = fingerprint(claim)
     path = ledger_path(config)
     if not path.exists():
-        return True
-    with locked(ledger_lock(path)):
+        return True, None
+    with ExitStack() as stack:
+        stack.enter_context(locked(ledger_lock(path)))
         entry = is_withdrawn(_read(path), fp)
         if entry is None:
-            return True
+            return True, None
         if not force:
             print(
                 f"Error: claim withdrawn on {entry.date} (reason: {entry.reason}, "
                 f"{entry.ref} row #{entry.row}); pass --force to add it again",
                 file=sys.stderr,
             )
-            return False
-        print(
-            f"Warning: adding a withdrawn claim (reason was: {entry.reason}); "
-            "recorded as unwithdrawn",
-            file=sys.stderr,
-        )
-        _append(
-            path,
-            record(
-                "unwithdrawn",
-                fingerprint=fp,
-                source=source,
-                session_id=session_id,
-                row=row,
-                reason=None,
-            ),
-        )
-    return True
+            return False, None
+        hold.enter_context(stack.pop_all())
+    owed = record(
+        "unwithdrawn", fingerprint=fp, source=source, session_id=session_id, row=row, reason=None
+    )
+    return True, Unwithdrawal(path, owed, entry.reason)
 
 
 __all__ = [
@@ -349,6 +393,7 @@ __all__ = [
     "REASONS",
     "EmptyClaim",
     "LedgerError",
+    "Unwithdrawal",
     "Withdrawal",
     "fingerprint",
     "guard",

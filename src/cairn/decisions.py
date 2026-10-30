@@ -34,6 +34,7 @@ import os
 import re
 import sys
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -613,8 +614,9 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
     """``decide`` (``args.number`` absent) and ``supersede N``; the session is resolved.
 
     The new claim passes the withdrawal guard under the document lock, before the
-    write: a withdrawn claim exits 3 unless ``--force``, which records it as
-    unwithdrawn in the ledger first.
+    write: a withdrawn claim exits 3 unless ``--force``. A forced claim keeps the
+    ledger lock through the write and records ``unwithdrawn`` only once the row is
+    written, so a failed write leaves the claim withdrawn.
     """
     target: int | None = getattr(args, "number", None)
     claim = normalise_claim(args.claim)
@@ -627,22 +629,27 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
         return 2
     struck_number: list[int] = []
     native: list[str] = []
+    owed: list[withdrawals.Unwithdrawal] = []
+    hold = ExitStack()
     guarded = bool(withdrawals.normalise_claim(claim))  # no fingerprint for "!!!"
     config = get_config() if guarded else None
 
     def check(number: int) -> None:
         if config is None:
             return
-        allowed = withdrawals.guard(
+        allowed, unwithdrawal = withdrawals.guard(
             config,
             claim,
             force=bool(getattr(args, "force", False)),
             source=source.source_name,
             session_id=native[0],
             row=number,
+            hold=hold,
         )
         if not allowed:
             raise ClaimWithdrawn
+        if unwithdrawal is not None:
+            owed.append(unwithdrawal)
 
     def edit(rows: list[DecisionRow]) -> list[DecisionRow]:
         number = max((row.number for row in rows), default=0) + 1
@@ -680,23 +687,34 @@ def cmd_decide(source: ConversationSource, session_id: str, args: argparse.Names
         )
         return [struck if row.number == target else row for row in rows] + [new]
 
-    try:
-        written = apply(
-            source.find_file,
-            session_id,
-            edit,
-            source=source.source_name,
-            conversation_heading=source.conversation_heading,
-            id_field=source.id_field,
-            on_read=native.append,
-        )
-    except ClaimWithdrawn:
-        return 3
-    except (withdrawals.LedgerError, OSError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    if written is None:
-        return 1
+    with hold:  # the ledger lock of a forced claim, released after the commit
+        try:
+            written = apply(
+                source.find_file,
+                session_id,
+                edit,
+                source=source.source_name,
+                conversation_heading=source.conversation_heading,
+                id_field=source.id_field,
+                on_read=native.append,
+            )
+        except ClaimWithdrawn:
+            return 3
+        except (withdrawals.LedgerError, OSError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if written is None:
+            return 1
+        try:
+            for unwithdrawal in owed:
+                unwithdrawal.commit()
+        except OSError as exc:
+            print(
+                f"Error: added #{written.rows[-1].number} but could not record it as "
+                f"unwithdrawn: {exc}; the claim stays withdrawn",
+                file=sys.stderr,
+            )
+            return 1
     row = written.rows[-1]
     session = f"{source.source_name}:{written.native_id}"
     if getattr(args, "json", False):
@@ -756,11 +774,17 @@ def cmd_forget(source: ConversationSource, session_id: str, args: argparse.Names
             raise DecisionError(
                 f"row #{number} has an empty claim after normalisation; edit it by hand"
             )
+        struck = strike_withdrawn(row, reason)
+        # Check before the ledger append: a strike the parser cannot read back would
+        # leave the table unreadable for every later command.
+        if parse_row(render_row(struck), row.line) != struck:
+            raise DecisionError(
+                f"row #{number} cannot be struck in a form that reads back; edit it by hand"
+            )
         appended = withdrawals.withdraw(
             ledger, fp, source=source.source_name, session_id=native[0], row=number, reason=reason
         )
         outcome.update(already=False, appended=appended, reason=reason)
-        struck = strike_withdrawn(row, reason)
         return [struck if r.number == number else r for r in rows]
 
     try:
