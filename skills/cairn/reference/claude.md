@@ -1,7 +1,7 @@
 # Claude Code Sessions
 
 Export Claude Code conversations to markdown, and resume them. Shared verbs
-(`export`, `list`, `context`, `note`, `close`, `log`) work as documented in
+(`export`, `list`, `context`, `note`, `close`, `log`, `decide`, `supersede`) work as documented in
 `../SKILL.md`. Claude additionally has `resume`.
 
 ## Data source

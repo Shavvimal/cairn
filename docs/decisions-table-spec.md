@@ -140,6 +140,8 @@ filter.
 - `no row #<n> in ## Decisions of <file name>`
 - `row #<n> is already struck (<marker or 'no marker'>)`
 - `no row number is left after #999999999`
+- `row #<n> would not read back: <reason>` or `row #<n> would not read back as written`:
+  the writer renders each new or changed row and parses it again before it writes
 - The existing messages from section 2 for a missing session, a missing file and an
   ambiguous id.
 
@@ -290,9 +292,11 @@ CITATION_RE = re.compile(
 Reader rules:
 
 - The section is the lines from `## Decisions` up to the next `## ` line outside a fence,
-  or EOF.
-- Blank lines are skipped. The first non-blank line must equal `HEADER` once trailing
-  spaces are stripped. The next line must match `SEPARATOR_RE`.
+  or EOF. The frame anchor (the conversation heading, a blank line, then a turn marker)
+  ends the section even inside a fence, so a fence left open in the section cannot pair
+  with a fence in the conversation.
+- Blank lines are skipped. The first non-blank line must equal `HEADER` once leading and
+  trailing whitespace is stripped. The next line must match `SEPARATOR_RE`.
 - Each following non-blank line must start and end with `|` and hold exactly seven cells
   under `CELL_RE`. The reader is lenient about whitespace and strict about values.
 - `#`: a positive integer of at most nine digits (`row number must be at most 999999999`
@@ -533,7 +537,10 @@ Where the implementation differs from the sections above:
 - **The anchor rule.** An exported `## Conversation` heading is followed by a blank line
   and then the first `<!-- cairn:turn ` marker (`src/cairn/frames.py:34`). The reader
   stops at the first such heading outside a code fence, or at a heading that ends the
-  file, which is the rule of `frames.locate`. Fence tracking means a fenced copy of the
+  file. `frames.locate` finds the same anchor in an exported document by another route:
+  it tracks no fences and checks each candidate by walking the frame lengths, which needs
+  the whole file. The reader reads only the prefix, so it tracks fences instead. Fence
+  tracking means a fenced copy of the
   anchor in My Notes does not stop the reader early. The worked example in section 5.6
   shows the blank line.
 - **The inserted section.** The section goes after the last non-blank line of My Notes,
@@ -572,7 +579,8 @@ Where the implementation differs from the sections above:
   dispatched before the shared record selection in `recall.main`, so the shared tuples
   in `recall.py` do not change. The project default is the current directory, as for
   `list`. Human output prints `revisit -` for a row without `revisit_by`, and a struck row
-  (with `--include-struck`) as `~~claim~~ [marker]`.
+  (with `--include-struck`) as `~~claim~~ [marker]`, or `~~claim~~ [struck]` when the
+  row has no marker.
 - **`--as-of` error.** A bad value prints `Error: --as-of must be YYYY-MM-DD, got '<v>'`
   and exits 1.
 - **Exchange documents.** `exchange._read_existing` uses `extract_annotations`, so a
@@ -580,4 +588,3 @@ Where the implementation differs from the sections above:
 - **Tests.** The tests listed for `tests/test_decisions.py` are there. The granola case is
   tested on `decisions.rewrite` with a meeting-shaped document, because the test store has
   no granola collection.
-

@@ -1,7 +1,7 @@
 # Codex CLI Sessions
 
 Export Codex CLI conversations to markdown. Shared verbs (`export`, `list`, `context`,
-`note`, `close`, `log`) work as documented in `../SKILL.md`. Windowed - `export`
+`note`, `close`, `log`, `decide`, `supersede`) work as documented in `../SKILL.md`. Windowed - `export`
 defaults to the last 24h; use `--since` / `--all`.
 
 ## Data source
