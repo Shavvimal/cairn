@@ -312,6 +312,36 @@ Differences from the sections above:
 - **Source count.** The cairn skill's verb table says "five conversation sources" and
   names antigravity, matching the new source-table row.
 - **Review step 3** also runs `tests.test_skill_review`.
+- **Review step 1** diffs against the PR's base (the base the requester names, else
+  `gh pr view --json baseRefName`, else `main`; a local commit or branch is used as is,
+  else `origin/BASE`), not `origin/main`: on a stacked branch `main` would also list the
+  lower layers' skills. A change under `references/harnesses/` targets every shipped
+  skill. Rubric F7 uses the same base, as CI does (`BASE_SHA` in
+  `.github/workflows/ci.yml`). Step 2 falls back to reading the files when the host
+  denies `python3` (Antigravity's cairn preset does). `allowed-tools` adds
+  `Bash(git rev-parse:*)` and `Bash(gh pr view:*)`.
+- **Review triage fixes** (Codex and Antigravity reviews of this layer):
+  - `measure.py` checks every top-level frontmatter line against a YAML subset (block
+    indicator, whole quoted string, one-line flow sequence, plain scalar with no leading
+    indicator, `: ` or ` #`, also on folded lines) and prints `YAML_HAZARD <key>`;
+    angle brackets in the description print `ANGLE_BRACKET description`; an inline
+    ``!`command` `` prints `CLAUDE_ONLY`. Rubric A1 no longer calls `read_head` a YAML
+    parser. The invoke skills' `argument-hint: [a] [b] [c]` did not parse as YAML and is
+    now quoted; `test_every_skill_frontmatter_is_in_the_yaml_subset` keeps it so.
+  - Rubric A6 keeps implicit invocation for CLI drivers whose writes follow a request;
+    B5 applies to shipped skills, a repo-local skill's phrases are read by hand.
+  - The cairn skill's supersede and forget steps take `SOURCE`, `ID` and N from the
+    chosen row's `session` and `number` and pass `--session-id`; they name the
+    `Struck #N; added #M` line and exit 3. Its workflow and reference mentions are links,
+    so `measure.py` follows them. The trigger is "cairn instructions block".
+  - `memory-import.md` checks both `--source claude` and `--source memory`, keeping rows
+    whose `memory` key is set; withdrawing hides a row from structured recall only.
+  - The recall Coverage question explains each gap from its `message`, keeps
+    `index-unknown` as unknown, handles a clean report and a gap with no `fix`.
+  - `daily-check.md` says which state its commands touch and reports a blocked step as
+    "not checked"; it names the `decisions` and `problems` keys, checks the antigravity
+    hook, runs `cairn errors` only for a non-null `code`, and handles
+    `last-run-exit-unknown` (also listed in `routine.md`).
 - **Plugin manifest test.** The policy check walks every `skills/*/SKILL.md` except
   setup, so a new skill without `agents/openai.yaml` fails.
 - **Dogfood fixes** (the `skill-review` pass over cairn, recall and search): British
@@ -319,8 +349,8 @@ Differences from the sections above:
   `Prioritise`, `Organise`); `/search` and `/cairn:recall` in prose became "the search
   skill" and "the recall skill", and the search skill's Codex line also maps `/recall`
   to `$recall`; the `forget` steps say to read the `Withdrew row #N` line;
-  `memory-import.md` uses "memory" for one auto-memory file throughout. The rubric item
-  F7 (version bump) stays open for the maintainer.
+  `memory-import.md` uses "memory" for one auto-memory file throughout. Rubric item F7
+  (version bump) is met by the `Bump to 2.20.1` commit.
 - **README.** One line in the repository layout names `.agents/skills/skill-review/`.
 - **Headless reviews** in P5.3 use the layer below as the diff base, not a branch name.
 

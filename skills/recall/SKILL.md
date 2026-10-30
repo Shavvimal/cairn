@@ -273,13 +273,19 @@ For "why can't recall see X" or a session the user expected:
 2. If the user named a day or a source, run
    `cairn recall list DATE --json --coverage --all-projects` and read
    `coverage.verdict` and whether the session is in `sessions`.
-3. Explain each `warn` gap in one line. `export-lag`, `never-exported`,
-   `source-disabled` and `store-missing` mean the session is not exported;
-   `index-lag`, `index-count`, `collection-missing`, `index-stamp-missing` and
-   `index-unknown` mean QMD has not indexed it (rg still reads the file); `rg-missing`
+3. If `status` is `clean` and the session is not listed, say so: coverage is clean, so
+   cairn has no record of it in an enabled source. Otherwise explain each `warn` gap in
+   one line from its `message`, without going further than the message does. Common
+   cases: `export-lag` and `never-exported` mean recent activity may not be exported
+   yet; `source-disabled` means new sessions of that source are not exported (earlier
+   exports stay); `index-lag`, `index-count` and `collection-missing` mean QMD has not
+   indexed every file (rg still reads them); `index-unknown` means cairn could not
+   inspect QMD at all, so whether a file is indexed is unknown, not false; `rg-missing`
    means exact search is off.
-4. Print the Gaps line as in Step 4. The One Thing is the first warn gap's `fix`; do not
-   run it unasked, because `cairn sync` exports and re-indexes.
+4. Print the Gaps line as in Step 4. The One Thing is the `fix` of the first `warn` gap
+   that has one; do not run it unasked, because `cairn sync` exports and re-indexes. If
+   no warn gap has a `fix` (for example `unreadable-exports`), the One Thing is
+   `cairn doctor`.
 
 ## On failure
 

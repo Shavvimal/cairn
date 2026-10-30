@@ -11,8 +11,9 @@ mapping and exit codes: `reference/claude.md`, section
 
 A memory holds whatever Claude chose to save, including private names. The import
 writes only under `data_root`, which QMD indexes. Never copy a decisions document or a
-memory row into a tracked file. To hide a row from recall, withdraw it (step 6); the text
-stays in the file.
+memory row into a tracked file. To hide a row from `cairn recall decisions` and the
+digest, withdraw it (step 6). Withdrawing does not erase it: the text stays in the file,
+and QMD and rg still find it.
 
 ## Steps
 
@@ -45,15 +46,19 @@ stays in the file.
 4. For each `changed` memory, the warning names the row it was imported as (for example
    `claude:3f2a9c1e#4`). Ask whether the new text replaces the old claim. If yes, run
    `cairn claude supersede N "NEW CLAIM" --session-id ID` with N and ID from that ref.
+   Read the `Struck #N; added #M` line. Exit 3 means the new claim matches a withdrawn
+   row; add `--force` only if the user wants that claim back.
 
-5. Check the result:
+5. Check the result. Imported rows land in Claude sessions or in project documents, so
+   ask for both sources, with `--all-projects` if step 3 used it:
 
    ```bash
-   cairn recall decisions --source memory --json
+   cairn recall decisions --source claude --source memory --json
    ```
 
-   Rows in a project document have refs such as `memory:example-app#3`; rows in a
-   session end in `[memory]` in text output. A `[memory]` row is model-written: cite it
+   Keep the rows of `decisions` whose `memory` key is set; each claim this run added
+   must be among them. Rows in a project document have refs such as
+   `memory:example-app#3`; rows in a session end in `[memory]` in text output. A `[memory]` row is model-written: cite it
    as a hint, not as a decision the user made.
 
 6. Withdraw a wrong or private row:

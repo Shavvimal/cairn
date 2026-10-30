@@ -1,9 +1,12 @@
 # Daily check
 
 Read-only health check of the scheduled routines, recall coverage and overdue
-decisions. It runs no peer round and changes no file. Every fix it proposes waits for
-the user's yes, because `run`, `kickstart`, `install` and `resume` can start a peer
-round that spends money.
+decisions. It runs no peer round and changes no routine, session document or config.
+The commands still open lock files and, for the Codex hook check, start the Codex
+client, so under a read-only sandbox a step can fail: report that step as "not
+checked" with its error, never as healthy. Every fix it proposes waits for the user's
+yes, because `run`, `kickstart`, `install` and `resume` can start a peer round that
+spends money.
 
 ## Contents
 
@@ -33,8 +36,8 @@ round that spends money.
    `last_cost_usd` and `log_tail`. Exit 2 with nothing on stdout means the name is not
    in the config (`ROUTINE_UNKNOWN`).
 
-3. Act on the exit with the table below. Run `cairn errors CODE` for the `code` value
-   once per check and quote its next step.
+3. Act on the exit with the table below. If `code` is not null, run
+   `cairn errors CODE` once per check and quote its next step.
 
 4. Read the coverage report:
 
@@ -50,12 +53,14 @@ round that spends money.
    cairn recall decisions --overdue --all-projects --json
    ```
 
-   Count the rows; keep the three oldest `ref` values.
+   Count the rows of the `decisions` array (sorted oldest `since` first) and keep the
+   first three `ref` values. Report each entry of `problems` (a file that did not
+   parse) in one line.
 
-6. On a Codex host, if step 4 shows `export-lag` for `codex-sessions`, run
-   `cairn hook status --harness codex` and read `codex_trust` and the last request's
-   state. On a Claude Code host, do the same with `--harness claude` for
-   `claude-code-sessions`.
+6. If step 4 shows `export-lag` for a collection whose sessions a hook exports, run
+   `cairn hook status --harness HOST` for that host: `codex` for `codex-sessions`
+   (also read `codex_trust`), `claude` for `claude-code-sessions`, `antigravity` for
+   `antigravity-sessions`. Read the last request's state.
 
 ## Acting on the status exit
 
@@ -64,6 +69,7 @@ round that spends money.
 | 0 | `fresh`, `running` | ran in the last 48 h, or runs now | report the last done day and `last_cost_usd`; nothing to do |
 | 1 | `never_run` | no run yet | if `installed` is not `loaded`, propose `cairn routine install NAME` (ask); else propose `cairn routine kickstart NAME` (ask) |
 | 1 | `stale` | no finished run in 48 h | same as `never_run`; launchd did not start it |
+| 1 | `last-run-exit-unknown` | `last-run.json` does not parse (`last_run` is null) or has no integer `exit` | read `log_tail` for the last run's end; report the path from `paths.state_dir`; the next run rewrites the file |
 | 1 | `failed-day`, `attempts-exhausted`, `last-run-exit-<n>` | a day failed | read `last_run.failures` (day and reason, for example `validate-exit-1`) and `log_tail`; name the failing step; after the cause is fixed, propose `cairn routine run NAME --day YYYY-MM-DD` (ask); add `--force` only for `attempts-exhausted` |
 | 1 | `stale-source` | a digest source was not exported in 24 h | propose `cairn sync` (ask) or adding the source to `routines.NAME.sources` |
 | 1 | `launchd-missing` | the plist is gone | propose `cairn routine install NAME` (ask) |

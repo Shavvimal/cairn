@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: Exports, lists, annotates and resumes local AI coding sessions (Claude Code, Codex, Antigravity, Cursor), Granola meetings and service docs as searchable markdown through the cairn CLI; records, supersedes and withdraws decisions; imports Claude Code auto memory; runs and checks scheduled routines. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "export antigravity", "resume session", "add session note", "close session", "log session", "record that decision", "log what we decided", "replace that decision", "forget that decision", "withdraw that claim", "import claude memories", "sync docs", "sync service docs", "meeting transcripts", "scheduled routine", "pause my journal", "resume the routine", "is my routine healthy", "cairn daily check", "instructions block", or "cairn error code". Also covers doctor, config, cron and hooks. Requires the cairn CLI; install it with the setup skill.
+description: Exports, lists, annotates and resumes local AI coding sessions (Claude Code, Codex, Antigravity, Cursor), Granola meetings and service docs as searchable markdown through the cairn CLI; records, supersedes and withdraws decisions; imports Claude Code auto memory; runs and checks scheduled routines. Use when the user says "sync sessions", "export sessions", "export codex", "export cursor", "export granola", "export antigravity", "resume session", "add session note", "close session", "log session", "record that decision", "log what we decided", "replace that decision", "forget that decision", "withdraw that claim", "import claude memories", "sync docs", "sync service docs", "meeting transcripts", "scheduled routine", "pause my journal", "resume the routine", "is my routine healthy", "cairn daily check", "cairn instructions block", or "cairn error code". Also covers doctor, config, cron and hooks. Requires the cairn CLI; install it with the setup skill.
 allowed-tools: Bash, Read
 ---
 
@@ -37,7 +37,7 @@ For the live set of configured integrations and their enabled state, run `cairn 
 The five conversation sources (claude, codex, antigravity, cursor, granola) accept the
 same verbs.
 **service-docs is a file mirror - it supports only `export` / `list` / `context`** (no
-`note` / `close` / `log` / `decide` / `supersede` / `forget`, no time window; see `reference/service-docs.md`).
+`note` / `close` / `log` / `decide` / `supersede` / `forget`, no time window; see [reference/service-docs.md](reference/service-docs.md)).
 
 | Verb        | Does                                    | Example                                                       |
 | ----------- | --------------------------------------- | ------------------------------------------------------------- |
@@ -51,10 +51,10 @@ same verbs.
 | `supersede` | Strike row N, add its replacement       | `cairn claude supersede 3 "Keep three words until grading"`   |
 | `forget`    | Withdraw row N so it stays withdrawn    | `cairn claude forget 3 --reason hallucination`                |
 
-Use `cairn resume SOURCE:ID` for either Claude or Codex: it prints the appropriate native
+Use `cairn resume SOURCE:ID` for Claude, Codex or Antigravity: it prints the appropriate native
 command. Show that command for the user's terminal. Claude also retains its legacy picker.
 
-### Time window (windowed sources: claude, codex, cursor, granola)
+### Time window (windowed sources: claude, codex, antigravity, cursor, granola)
 
 `export` defaults to the **last 24h** (`--since 1d`). Override with:
 
@@ -167,7 +167,7 @@ shows its args.
 A routine runs a prompt file through `claude` or `codex` once a day for each UTC day without
 a done stamp, and stamps a day done only after its `validate` command exits 0 (3 means done
 and empty). Set one up, dry-run, install, read status and re-run a day: see
-`workflows/routine.md`.
+[workflows/routine.md](workflows/routine.md).
 
 ## Peer agents and fan-out health
 
@@ -222,16 +222,21 @@ frontmatter fields: `comments`, `status`, `tags`, `rating`, `title`, `projects`,
 A claim the session settled goes in the `## Decisions` table, one row per claim.
 
 1. "record that decision", "log what we decided": run
-   `cairn claude decide "CLAIM" --kind decision` (any conversation source in place of
-   `claude`; `--kind fact`, `commitment` or `hunch` as fits). Read the `Added #N` line.
-2. "replace that decision": find N with `cairn recall decisions --json` (the `ref` ends
-   in `#N`), then run `cairn claude supersede N "NEW CLAIM"`.
-3. "forget that decision", "withdraw that claim": find N the same way, then run
-   `cairn claude forget N --reason stale` with the reason that fits, and read the
-   `Withdrew row #N` line. Exit 3 later means someone tried to add a withdrawn claim
-   again.
+   `cairn claude decide "CLAIM" --kind decision` in Claude Code, `cairn codex decide ...`
+   in Codex (`--kind fact`, `commitment` or `hunch` as fits). Read the `Added #N` line.
+   Exit 3 means the claim matches a withdrawn row.
+2. "replace that decision": run `cairn recall decisions --json` and pick the row. Its
+   `session` is `SOURCE:ID` and its `number` is N; keep all three together. Run
+   `cairn SOURCE supersede N "NEW CLAIM" --session-id ID` (for a `memory:<project>`
+   session: `cairn claude supersede N "NEW CLAIM" --session-id memory:<project>`). Read
+   the `Struck #N; added #M` line. Exit 3 means the new claim matches a withdrawn row.
+3. "forget that decision", "withdraw that claim": pick the row the same way, then run
+   `cairn SOURCE forget N --reason stale --session-id ID` with the reason that fits, and
+   read the `Withdrew row #N` line. Exit 3 later means someone tried to add a withdrawn
+   claim again.
 
-Never guess N. Kinds, citations, reasons and `--force` rules:
+Never pass N without `--session-id`: without it the command acts on the current session,
+whose row N is a different claim. Never guess N. Kinds, citations, reasons and `--force` rules:
 [workflows/log-session.md](workflows/log-session.md).
 
 ## Daily check
@@ -251,7 +256,7 @@ stay under `data_root`.
 
 ## Recall-first block
 
-"instructions block": run `cairn instructions status --json` and read each harness's
+"cairn instructions block": run `cairn instructions status --json` and read each harness's
 state. To add or remove the block, run the command with `--dry-run` first, show the diff,
 and run it without `--dry-run` only after the user says yes: it edits the user's own
 `CLAUDE.md` or `AGENTS.md`.
@@ -260,16 +265,16 @@ and run it without `--dry-run` only after the user says yes: it edits the user's
 
 Each source's data location, frontmatter schema, and source-specific commands:
 
-- `reference/claude.md` - Claude Code sessions, the `resume` command and `memory import`
-- `reference/codex.md` - Codex CLI rollouts
-- `reference/cursor.md` - Cursor IDE sessions
-- `reference/granola.md` - Granola meetings (dual source: cache + API)
-- `reference/service-docs.md` - verbatim service-docs mirror
-- `reference/antigravity.md` - Google Antigravity (agy) conversations + `resume`
+- [reference/claude.md](reference/claude.md) - Claude Code sessions, the `resume` command and `memory import`
+- [reference/codex.md](reference/codex.md) - Codex CLI rollouts
+- [reference/cursor.md](reference/cursor.md) - Cursor IDE sessions
+- [reference/granola.md](reference/granola.md) - Granola meetings (dual source: cache + API)
+- [reference/service-docs.md](reference/service-docs.md) - verbatim service-docs mirror
+- [reference/antigravity.md](reference/antigravity.md) - Google Antigravity (agy) conversations + `resume`
 
 ## Annotation workflow
 
 To log/annotate the current session (CLI forms, natural-language parsing, auto-summary,
-status and tag values): see `workflows/log-session.md`. To schedule a daily peer run, see
-`workflows/routine.md`; to check it each day, `workflows/daily-check.md`; to import Claude
-Code auto memory, `workflows/memory-import.md`. Valid tags live in `schema/tags.yaml`.
+status and tag values): see [workflows/log-session.md](workflows/log-session.md). To schedule a daily peer run, see
+[workflows/routine.md](workflows/routine.md); to check it each day, [workflows/daily-check.md](workflows/daily-check.md); to import Claude
+Code auto memory, [workflows/memory-import.md](workflows/memory-import.md). Valid tags live in `schema/tags.yaml`.

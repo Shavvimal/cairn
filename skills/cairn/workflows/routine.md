@@ -178,7 +178,7 @@ cairn routine list                  # one line per routine, ending in state=<sta
 | `disabled` | the breaker stopped the routine | 2 |
 
 The attention codes are `failed-day`, `attempts-exhausted`, `corrupt-stamp`,
-`last-run-exit-<n>`, `interrupted-run`, `launchd-missing` (macOS only) and `stale-source`.
+`last-run-exit-<n>`, `last-run-exit-unknown` (`last-run.json` does not parse, so `last_run` is null, or has no integer `exit`), `interrupted-run`, `launchd-missing` (macOS only) and `stale-source`.
 The state comes from files only, so `status` answers while launchd is wedged. An unknown
 routine is also exit 2, but prints no JSON on stdout:
 
