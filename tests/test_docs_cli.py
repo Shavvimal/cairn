@@ -149,7 +149,14 @@ def _closing(text: str, i: int, opener: str, closer: str) -> int:
     return i
 
 
+BRACE_PLACEHOLDER = re.compile(
+    r"^\{[a-z][a-z0-9_]*\}$"
+)  # {harness}, {name}: a registry verify argv
+
+
 def _is_placeholder(word: str) -> bool:
+    if BRACE_PLACEHOLDER.match(word):
+        return True
     return bool(NAME_PLACEHOLDER.match(word) or word.endswith(("...", "…")) or word in ("...", "…"))
 
 
