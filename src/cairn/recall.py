@@ -9,7 +9,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 
-from . import decisions, digest, provenance, verify
+from . import decisions, digest, errors, provenance, verify
 from . import recall_gaps as gaps
 from .config import ConfigError, get_config
 from .registry import SOURCES
@@ -189,6 +189,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.min_msgs < 0:
                 raise ValueError("--min-msgs must be nonnegative")
             if args.refresh and not refresh(sources):
+                # refresh() printed which source failed; name the code after it.
+                errors.emit("RECALL_FAILED")
+                if getattr(args, "json", False):
+                    message = "refresh failed; the store may be stale"
+                    print(json.dumps(errors.failure("RECALL_FAILED", message, exit=1)))
                 return 1
         records = family = store.records(sources)
         # An explicit ID is global unless a project filter is requested. Listing and
@@ -294,8 +299,13 @@ def main(argv: list[str] | None = None) -> int:
             print(note, file=sys.stderr)
         return 0
     except (ValueError, ConfigError, OSError, subprocess.TimeoutExpired) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
+        return errors.fail(
+            errors.code_of(exc, "RECALL_FAILED"),
+            str(exc),
+            exit=1,
+            prefix="Error: ",
+            as_json=bool(getattr(args, "json", False)),
+        )
 
 
 def _gaps(args: argparse.Namespace) -> int:

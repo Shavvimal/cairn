@@ -62,6 +62,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
+from . import errors
 from .config import (
     BILLING_ROUTES,
     INVOKE_PEERS,
@@ -161,7 +162,14 @@ _CALLER_REF = re.compile(r"^(claude|codex):\S+$")
 
 
 class UsageError(Exception):
-    """A request cairn refuses before spawning anything (exit 2)."""
+    """A request cairn refuses before spawning anything (exit 2).
+
+    ``code`` names the failure in the error registry (``cairn errors CODE``).
+    """
+
+    def __init__(self, message: str = "", code: str = "INVOKE_USAGE") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -1248,6 +1256,12 @@ def round_result(
         "warnings": warnings,
     }
     result.update(extra)
+    # A round that did not succeed names its registry code; 'retryable' and 'error'
+    # stay the round's own values.
+    code = errors.outcome_code(str(result["status"]))
+    if code is not None:
+        thread_id = state.thread_id if state else None
+        result = errors.tag(result, code, thread_id=thread_id, peer=peer)
     return result
 
 
@@ -1506,7 +1520,8 @@ class Runner:
         if depth >= 1 and not args.allow_nested:
             raise UsageError(
                 f"refusing a nested invoke ({DEPTH_ENV}={depth}); a peer must not invoke "
-                "another peer unless --allow-nested is passed"
+                "another peer unless --allow-nested is passed",
+                code="INVOKE_NESTED",
             )
         if self.peer != "claude" and getattr(args, "permission_mode", None):
             raise UsageError("--permission-mode is Claude-only; use --profile or the peer's flag")
@@ -1558,13 +1573,18 @@ class Runner:
         if self.billing is not None:
             problems = billing_problems(self.billing, os.environ)
             if problems:
-                raise UsageError("billing check failed: " + "; ".join(problems))
+                raise UsageError(
+                    "billing check failed: " + "; ".join(problems),
+                    code="INVOKE_BILLING_CHECK_FAILED",
+                )
             if self.billing.route == "gcp":
                 # The file can exist with a refresh token Google no longer honours
                 # (invalid_rapt); only minting a token proves the route is usable.
                 verdict, reason = adc_token_check(os.environ)
                 if verdict == "refused":
-                    raise UsageError(f"billing check failed: {reason}")
+                    raise UsageError(
+                        f"billing check failed: {reason}", code="INVOKE_BILLING_CHECK_FAILED"
+                    )
                 if verdict == "unverified":
                     self.warnings.append(f"billing: ADC token not verified: {reason}")
         if self.peer == "antigravity":
@@ -2587,7 +2607,18 @@ def cmd_publish(config: CairnConfig, thread_id: str, as_json: bool) -> int:
     report = publish_thread(config, run_dir)
     if report.get("busy"):
         message = "thread is busy (a round is running); try again when it ends"
-        print(json.dumps({**report, "error": message}) if as_json else message)
+        if as_json:
+            print(
+                json.dumps(
+                    errors.tag(
+                        {**report, "error": message},
+                        "INVOKE_BUSY",
+                        thread_id=report["thread_id"],
+                    )
+                )
+            )
+        else:
+            print(message)
         return EXIT_BUSY
     remaining = {n: p for n, p in report["rounds"].items() if p}
     if as_json:
@@ -2790,12 +2821,26 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_publish(config, args.thread_id, args.json)
         return cmd_list_models(config, args.json)
     except UsageError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return EXIT_USAGE
+        return errors.fail(
+            exc.code,
+            str(exc),
+            exit=EXIT_USAGE,
+            prefix="Error: ",
+            as_json=bool(getattr(args, "json", False)),
+            peer=args.command if args.command in INVOKE_PEERS else None,
+        )
     except LookupError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_FATAL
-    except (OSError, ValueError, RuntimeError, ConfigError) as exc:
+    except ConfigError as exc:
+        return errors.fail(
+            exc.code,
+            str(exc),
+            exit=EXIT_FATAL,
+            prefix="Error: ",
+            as_json=bool(getattr(args, "json", False)),
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_FATAL
 

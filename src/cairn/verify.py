@@ -20,7 +20,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import digest
+from . import digest, errors
 from .frames import Frame, locate, read_text
 from .frontmatter import FrontmatterParseError, parse_frontmatter
 from .storage import atomic_write, document_lock, locked
@@ -709,6 +709,7 @@ def run_verify(args: argparse.Namespace, store: SessionStore) -> int:
         _replace(path, snapshot, text, args.file)
     if report.citations["total"] == 0 and report.quotes["total"] == 0:
         print(f"Warning: {args.file} has no citations", file=sys.stderr)
+    failed = bool(report.failures) and not args.fix
     if args.json:
         print(
             json.dumps(
@@ -721,6 +722,7 @@ def run_verify(args: argparse.Namespace, store: SessionStore) -> int:
                     "quotes": report.quotes,
                     "failures": report.failures,
                     "moved": moved,
+                    "code": "RECALL_VERIFY_FAILED" if failed else None,
                 },
                 indent=2,
             )
@@ -735,7 +737,8 @@ def run_verify(args: argparse.Namespace, store: SessionStore) -> int:
         )
         if moved:
             print(f"moved {moved} blocks to {UNVERIFIED_HEADING} in {args.file}")
-    if report.failures and not args.fix:
+    if failed:
+        errors.emit("RECALL_VERIFY_FAILED")
         return EXIT_FAILED
     return 0
 

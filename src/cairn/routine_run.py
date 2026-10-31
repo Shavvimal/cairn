@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from . import __version__, routine_plan, routine_state
+from . import __version__, errors, routine_plan, routine_state
 from .config import CairnConfig, RoutineSpec
 from .exchange import now_iso
 from .procs import run_capped
@@ -657,8 +657,10 @@ class Run:
         *,
         reason: str | None = None,
         error: str | None = None,
+        code_name: str | None = None,
     ) -> dict:
-        """The run report: ``last-run.json`` and the ``--json`` output (5)."""
+        """The run report: ``last-run.json`` and the ``--json`` output (5). ``code`` is
+        the registry code: ``ROUTINE_DAY_FAILED`` on exit 1, the error's code on exit 2."""
         return {
             "schema_version": SCHEMA_VERSION,
             "routine": self.spec.name,
@@ -672,6 +674,7 @@ class Run:
             **self.counts,
             "cost_usd": round(sum(self.costs), 6) if self.costs else None,
             "error": error,
+            "code": code_name or ("ROUTINE_DAY_FAILED" if code == 1 else None),
             "failures": self.failures,
             "stale_sources": self.stale,
             "breaker": self.breaker,
@@ -688,11 +691,18 @@ class Run:
         self.emit(self.report(0, "skipped", now_iso(), reason=reason))
         return 0
 
-    def finish(self, code: int, error: str | None = None, *, end_line: bool = True) -> int:
+    def finish(
+        self,
+        code: int,
+        error: str | None = None,
+        *,
+        end_line: bool = True,
+        code_name: str | None = None,
+    ) -> int:
         finished = now_iso()
         status = self.status(code)
         self.update_breaker(status, finished)
-        report = self.report(code, status, finished, error=error)
+        report = self.report(code, status, finished, error=error, code_name=code_name)
         write_json(self.sdir / routine_state.LAST_RUN_FILE, report)
         if end_line:
             self.log.event("end", exit=code, **self.counts, cost_usd=report["cost_usd"])
@@ -755,7 +765,8 @@ class Run:
         except RoutineError as exc:
             self.log.event("error", message=str(exc))
             print(str(exc), file=sys.stderr)
-            return self.finish(2, str(exc))
+            errors.emit(exc.code)
+            return self.finish(2, str(exc), code_name=exc.code)
         return self.finish(1 if self.counts["failed"] or self.counts["deferred"] else 0)
 
 
@@ -791,7 +802,8 @@ def run_routine(
     if depth >= 1:
         raise RoutineError(
             f"routine {spec.name}: refusing to run inside a peer ({DEPTH_ENV}={depth}); "
-            f"start it from a shell or with 'cairn routine kickstart {spec.name}'"
+            f"start it from a shell or with 'cairn routine kickstart {spec.name}'",
+            code="ROUTINE_NESTED",
         )
     run = Run(config, spec, as_json=as_json, stale_sources=stale_sources)
     blocked = skip_on_marker(run)

@@ -32,7 +32,14 @@ _ATTEMPT_RE = re.compile(r"^attempt-(\d+)$")
 
 
 class RoutineError(Exception):
-    """A usage, config or render error: the run exits 2 and writes no stamp."""
+    """A usage, config or render error: the run exits 2 and writes no stamp.
+
+    ``code`` names the failure in the error registry (``cairn errors CODE``).
+    """
+
+    def __init__(self, message: str = "", code: str = "ROUTINE_USAGE") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +122,8 @@ def _unknown(spec: RoutineSpec, token: str, where: str, variables: dict) -> Rout
     """The exit-2 error for an unknown ``{{token}}`` at ``where``, listing the known ones."""
     return RoutineError(
         f"routine {spec.name}: unknown template variable {{{{{token}}}}} in {where}; "
-        f"known: {', '.join(sorted(variables))}"
+        f"known: {', '.join(sorted(variables))}",
+        code="ROUTINE_TEMPLATE_UNKNOWN_VAR",
     )
 
 
@@ -164,9 +172,15 @@ class Rendered:
 def check_inputs(spec: RoutineSpec) -> None:
     """The static checks of section 3.5: prompt file readable, ``cd`` a directory."""
     if not spec.prompt_file.is_file():
-        raise RoutineError(f"routine {spec.name}: prompt_file not found: {spec.prompt_file}")
+        raise RoutineError(
+            f"routine {spec.name}: prompt_file not found: {spec.prompt_file}",
+            code="ROUTINE_INPUT_INVALID",
+        )
     if not spec.cd.is_dir():
-        raise RoutineError(f"routine {spec.name}: cd is not a directory: {spec.cd}")
+        raise RoutineError(
+            f"routine {spec.name}: cd is not a directory: {spec.cd}",
+            code="ROUTINE_INPUT_INVALID",
+        )
 
 
 def render_day(config: CairnConfig, spec: RoutineSpec, day: date, attempt: Path) -> Rendered:
@@ -180,7 +194,8 @@ def render_day(config: CairnConfig, spec: RoutineSpec, day: date, attempt: Path)
         raw = spec.prompt_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise RoutineError(
-            f"routine {spec.name}: prompt_file not readable: {spec.prompt_file} ({exc})"
+            f"routine {spec.name}: prompt_file not readable: {spec.prompt_file} ({exc})",
+            code="ROUTINE_INPUT_INVALID",
         ) from None
 
     def prompt_unknown(name: str, offset: int) -> RoutineError:
@@ -190,7 +205,10 @@ def render_day(config: CairnConfig, spec: RoutineSpec, day: date, attempt: Path)
 
     prompt = render_text(raw, variables, prompt_unknown)
     if not prompt.strip():
-        raise RoutineError(f"routine {spec.name}: {spec.prompt_file} renders to an empty prompt")
+        raise RoutineError(
+            f"routine {spec.name}: {spec.prompt_file} renders to an empty prompt",
+            code="ROUTINE_INPUT_INVALID",
+        )
     prepare = (
         render_argv(spec, spec.prepare, "prepare", variables) if spec.prepare is not None else None
     )

@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import asdict, fields
 from pathlib import Path
 
-from . import __version__
+from . import __version__, errors
 from .config import (
     BILLING_PEERS,
     INVOKE_PEERS,
@@ -142,6 +142,7 @@ def _config_show_path() -> int:
     except ConfigError as e:
         print(f"No config loaded: {e}", file=sys.stderr)
         print(f"It would live at: {user_config_path()}", file=sys.stderr)
+        errors.emit(e.code)
         return 1
 
 
@@ -209,6 +210,9 @@ def _config_show(as_json: bool) -> int:
     except ConfigError as e:
         print(f"No config loaded: {e}", file=sys.stderr)
         print(f"It would live at: {user_config_path()}", file=sys.stderr)
+        errors.emit(e.code)
+        if as_json:
+            print(json.dumps(errors.failure(e.code, str(e), exit=1), ensure_ascii=False))
         return 1
 
     collections = [_collection_view(name, coll) for name, coll in sorted(cfg.collections.items())]
@@ -852,12 +856,14 @@ def _ok(label: str, detail: str = "") -> None:
     print(f"  ok   {label}" + (f" - {detail}" if detail else ""))
 
 
-def _warn(label: str, detail: str = "") -> None:
-    print(f"  warn {label}" + (f" - {detail}" if detail else ""))
+def _warn(label: str, detail: str = "", code: str | None = None) -> None:
+    """A warning line; ``code`` adds the registry suffix `` [CODE]``."""
+    print(f"  warn {label}" + (f" - {detail}" if detail else "") + errors.finding(code))
 
 
-def _fail(label: str, detail: str = "") -> None:
-    print(f"  FAIL {label}" + (f" - {detail}" if detail else ""))
+def _fail(label: str, detail: str = "", code: str | None = None) -> None:
+    """A critical line; ``code`` adds the registry suffix `` [CODE]``."""
+    print(f"  FAIL {label}" + (f" - {detail}" if detail else "") + errors.finding(code))
 
 
 def _check_codex_trust() -> None:
@@ -879,14 +885,21 @@ def _check_codex_trust() -> None:
             _ok(label, f"trusted (written by {who})")
         elif state == "stale":
             _warn(
-                label, f"stale: SessionEnd group {index} changed after it was trusted; {reinstall}"
+                label,
+                f"stale: SessionEnd group {index} changed after it was trusted; {reinstall}",
+                "CODEX_HOOK_TRUST_BROKEN",
             )
         elif state == "missing":
-            _warn(label, f"missing: no trust table for SessionEnd group {index}; {reinstall}")
+            _warn(
+                label,
+                f"missing: no trust table for SessionEnd group {index}; {reinstall}",
+                "CODEX_HOOK_TRUST_BROKEN",
+            )
         elif state == "disabled":
             _warn(
                 label,
                 f"disabled: SessionEnd group {index} has enabled = false; enable it in /hooks",
+                "CODEX_HOOK_TRUST_BROKEN",
             )
         else:
             if report["codex_version"] is None:
@@ -899,7 +912,7 @@ def _check_codex_trust() -> None:
                     f"Codex {report['codex_version']} is outside the verified range "
                     f"({report['verified_range']})"
                 )
-            _warn(label, f"manual: {reason}; {MANUAL_STEP}")
+            _warn(label, f"manual: {reason}; {MANUAL_STEP}", "HOOK_NOT_TRUSTED")
 
 
 def _check_qmd_runtime(qmd_binary: str) -> tuple[int, IndexStatus | None, str | None]:
@@ -933,10 +946,17 @@ def _check_qmd_runtime(qmd_binary: str) -> tuple[int, IndexStatus | None, str | 
         _warn("qmd runtime", f"ran, but {e}")
         return 0, None, str(e)
     except RuntimeError as e:
-        _fail("qmd runtime", f"{e} - QMD cannot open its index, so search cannot work")
+        _fail(
+            "qmd runtime",
+            f"{e} - QMD cannot open its index, so search cannot work",
+            "QMD_RUNTIME_FAILED",
+        )
         return 1, None, "the QMD runtime probe failed"
     _ok("qmd runtime", "'qmd status' succeeded")
     return 0, status, None
+
+
+_INDEX = "QMD_INDEX_INCOMPLETE"
 
 
 def _check_embeddings(
@@ -950,16 +970,16 @@ def _check_embeddings(
     """
     if status is None:
         caveat = f"could not read 'qmd status': {reason}"
-        (_fail if strict else _warn)("embeddings", caveat)
+        (_fail if strict else _warn)("embeddings", caveat, _INDEX)
         return int(strict), caveat
     counts = status.describe()
     if status.state == "empty":
         caveat = "the index is empty, so no search can be verified yet"
-        _warn("embeddings", f"{caveat}; run 'cairn sync --cron'")
+        _warn("embeddings", f"{caveat}; run 'cairn sync --cron'", _INDEX)
         return 0, caveat
     if status.state == "no-vectors":
         caveat = f"{counts}: keyword search can work, semantic search is not ready"
-        (_fail if strict else _warn)("embeddings", f"{caveat}; run 'cairn sync --cron'")
+        (_fail if strict else _warn)("embeddings", f"{caveat}; run 'cairn sync --cron'", _INDEX)
         return int(strict), caveat
     if status.state == "pending":
         caveat = f"{counts}: semantic search misses the pending documents"
@@ -967,6 +987,7 @@ def _check_embeddings(
             "embeddings",
             f"{caveat}; the next 'cairn sync --cron' continues. If this count does not fall "
             "across runs, investigate instead of retrying",
+            _INDEX,
         )
         return int(strict), caveat
     _ok("embeddings", counts)
@@ -1165,6 +1186,7 @@ def _check_gaps(config: CairnConfig) -> None:
                 label,
                 f"{len(found.missing)} of {total} sessions {days} have no document: "
                 f"{refs(source, found.missing)}; run 'cairn sync'",
+                "SYNC_SOURCE_GAP",
             )
             continue
         if found.held_on_disk:
@@ -1176,7 +1198,7 @@ def _check_gaps(config: CairnConfig) -> None:
 
 def _check_drift(config: CairnConfig) -> None:
     """Warn-only: the open parser-drift findings, at most five, oldest first."""
-    from .sources.guards import FindingsStore
+    from .sources.guards import DOCUMENT_KIND, FindingsStore
 
     store = FindingsStore(config.data_root)
     found = store.open_findings()
@@ -1184,6 +1206,9 @@ def _check_drift(config: CairnConfig) -> None:
         _warn(
             "parser drift",
             f"{finding.ref} {finding.kind}: {finding.detail}; first seen {finding.first_seen}",
+            "EXPORT_DOCUMENT_UNPARSEABLE"
+            if finding.kind == DOCUMENT_KIND
+            else "EXPORT_PARSER_DRIFT",
         )
     if len(found) > 5:
         _warn("parser drift", f"+{len(found) - 5} more; see {store.path}")
@@ -1240,9 +1265,14 @@ def _check_recall_first(harness: str | None) -> None:
             _warn(
                 label,
                 f"edited by hand inside the markers; edits there are replaced by 'install --force'{suffix}",
+                "INSTRUCTIONS_BLOCK_EDITED",
             )
         elif view.state == DAMAGED:
-            _warn(label, f"damaged markers in {view.path}; fix them by hand{suffix}")
+            _warn(
+                label,
+                f"damaged markers in {view.path}; fix them by hand{suffix}",
+                "INSTRUCTIONS_MARKERS_DAMAGED",
+            )
 
 
 def doctor_main(argv: list[str] | None = None) -> int:
@@ -1283,7 +1313,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
         config = get_config()
         _ok("config", str(config.config_path))
     except ConfigError as e:
-        _fail("config", str(e))
+        _fail("config", str(e), e.code)
         critical_failures += 1
 
     # qmd
@@ -1295,7 +1325,11 @@ def doctor_main(argv: list[str] | None = None) -> int:
             failures, qmd_status, status_reason = _check_qmd_runtime(qmd)
             critical_failures += failures
         else:
-            _fail("qmd", f"{qmd!r} not found - install it (e.g. npm install -g @tobilu/qmd)")
+            _fail(
+                "qmd",
+                f"{qmd!r} not found - install it (e.g. npm install -g @tobilu/qmd)",
+                "QMD_MISSING",
+            )
             critical_failures += 1
 
     # rg (optional exact-match engine for the skills)
@@ -1396,7 +1430,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
                 _warn("hook inspection", str(exc))
             _check_codex_trust()
         else:
-            _warn("hook trust", report["trust"])
+            _warn("hook trust", report["trust"], "HOOK_NOT_TRUSTED")
         _ok("observed sync states", json.dumps(report["counts"]))
         problems = [
             r for r in report["requests"] if r.get("state") in ("failed", "exhausted", "invalid")

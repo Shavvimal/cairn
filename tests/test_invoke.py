@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import ClassVar
 from unittest.mock import patch
 
-from cairn import config, invoke, qmd
+from cairn import config, errors, invoke, qmd
 from cairn.catalog import load_catalog
 from cairn.config import PeerPolicy
 from cairn.exchange import ThreadState, render_exchange, validate_head, write_exchange
@@ -265,6 +265,7 @@ class TestCodexRun(InvokeFixture):
         assert data is not None
         self.assertEqual(RESULT_KEYS - set(data), set())
         self.assertEqual(data["status"], "succeeded")
+        self.assertNotIn("code", data)  # a succeeded round names no registry code
         self.assertEqual(data["last_message"], "ANSWER")
         self.assertEqual(data["round"], 1)
         self.assertEqual(data["profile"], "review")
@@ -431,6 +432,8 @@ class TestCodexRun(InvokeFixture):
         assert data is not None
         self.assertEqual(data["status"], "timeout")
         self.assertTrue(data["retryable"])
+        self.assertEqual(data["code"], "INVOKE_TIMEOUT")
+        self.assertEqual(data["fix"]["verify"], ["cairn", "invoke", "status", data["thread_id"]])
         child = next(c["sleep_child"] for c in self.stub_calls() if "sleep_child" in c)
         self.wait_for(lambda: self.gone(child), timeout=10)
 
@@ -608,9 +611,15 @@ class TestCodexRun(InvokeFixture):
         self.assertEqual(self.stub_calls(), [])
 
     def test_depth_guard_and_env_scrub(self):
-        result, _ = self.run_codex(env={"CAIRN_INVOKE_DEPTH": "1"})
+        result, data = self.run_codex(env={"CAIRN_INVOKE_DEPTH": "1"})
         self.assertEqual(result.returncode, 2)
-        self.assertIn("nested", result.stderr)
+        self.assertTrue(result.stderr.startswith("Error: refusing a nested invoke"))
+        self.assertIn("\ncode: INVOKE_NESTED (run 'cairn errors INVOKE_NESTED')\n", result.stderr)
+        assert data is not None
+        self.assertEqual(
+            (data["ok"], data["code"], data["exit"], data["fix"]),
+            (False, "INVOKE_NESTED", 2, {"next_step": errors.entry("INVOKE_NESTED").next_step}),
+        )
         self.assertFalse((self.root / "data/logs/invoke").exists())
         hints = {
             "CLAUDECODE": "1",
@@ -1052,10 +1061,16 @@ class TestAntigravityRun(InvokeFixture):
 
     def test_gcp_route_refuses_to_spawn_without_adc(self):
         self.write_config(antigravity={"billing": {"route": "gcp"}})
-        result, _ = self.run_agy()
+        result, refused = self.run_agy()
         self.assertEqual(result.returncode, 2)
         self.assertIn("billing check failed", result.stderr)
         self.assertIn("application_default_credentials.json", result.stderr)
+        self.assertIn(
+            "\ncode: INVOKE_BILLING_CHECK_FAILED (run 'cairn errors INVOKE_BILLING_CHECK_FAILED')\n",
+            result.stderr,
+        )
+        assert refused is not None
+        self.assertEqual((refused["code"], refused["exit"]), ("INVOKE_BILLING_CHECK_FAILED", 2))
         self.assertEqual(self.stub_calls(), [])
         self.assertEqual(self.run_dirs("antigravity"), [])
         self.write_adc(quota_project=None)
@@ -1082,6 +1097,10 @@ class TestAntigravityRun(InvokeFixture):
         result, _ = self.run_agy(env={"STUB_GCLOUD": "rapt"})
         self.assertEqual(result.returncode, 2)
         self.assertIn("billing check failed: Google rejected the ADC refresh token", result.stderr)
+        self.assertIn(
+            "\ncode: INVOKE_BILLING_CHECK_FAILED (run 'cairn errors INVOKE_BILLING_CHECK_FAILED')\n",
+            result.stderr,
+        )
         self.assertIn("cannot prompt during non-interactive execution", result.stderr)
         self.assertIn("gcloud auth application-default login", result.stderr)
         self.assertEqual(self.stub_calls(), [])
@@ -1343,11 +1362,20 @@ class TestAntigravityRun(InvokeFixture):
         self.write_config(antigravity={"quiet_after_s": 1})
         lock.acquire(run_dir)
         result, shown = self.invoke("wait", data["thread_id"], "--json")
+        published, report = self.invoke("publish", data["thread_id"], "--json")
         lock.release()
         self.assertEqual(result.returncode, 75, result.stderr)
         assert shown is not None
         self.assertEqual(shown["status"], "busy")
+        self.assertEqual(shown["code"], "INVOKE_BUSY")
         self.assertIn("adopting this round", shown["error"])
+        # ``publish`` with the thread lock held: busy, with the registry code and fix.
+        self.assertEqual(published.returncode, 75, published.stderr)
+        assert report is not None
+        self.assertEqual(
+            (report["busy"], report["code"], report["fix"]["verify"]),
+            (True, "INVOKE_BUSY", ["cairn", "invoke", "status", data["thread_id"]]),
+        )
         _, shown = self.invoke("status", data["thread_id"], "--json")
         assert shown is not None
         self.assertEqual((shown["execution"], shown["outcome"]), ("exited", "denied"))
@@ -1641,6 +1669,28 @@ class TestStatusAndPublish(InvokeFixture):
         self.assertEqual(data["status"], "succeeded")
         self.assertIn("result file missing", " ".join(data["warnings"]))
         self.assertTrue(self.thread(tid)["rounds"][0]["adopted_at"])
+
+    def test_wait_on_an_aborted_round_names_its_code(self):
+        # Runner and peer both killed before a final event: adoption records 'aborted',
+        # and the result 'wait' prints carries the registry code and fix.
+        runner = self.spawn(
+            "codex", "--json", "--cd", self.cwd, "--prompt", "x", env=self.hold_env()
+        )
+        state = self.started_round()
+        tid = state["thread_id"]
+        peer_pid = state["rounds"][0]["peer_pid"]
+        self.wait_ready()
+        os.kill(runner.pid, signal.SIGKILL)
+        runner.wait()
+        os.kill(peer_pid, signal.SIGKILL)
+        self.wait_for(lambda: self.gone(runner.pid))
+        self.wait_for(lambda: self.gone(peer_pid))
+        result, data = self.invoke("wait", tid, "--json")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        assert data is not None
+        self.assertEqual(data["status"], "aborted")
+        self.assertEqual(data["code"], "INVOKE_FAILED")
+        self.assertEqual(data["fix"]["verify"], ["cairn", "invoke", "status", tid])
 
     def test_status_shows_progress_midway(self):
         runner = self.spawn(

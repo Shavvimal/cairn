@@ -85,6 +85,7 @@ One JSON line on the task's stdout. Lead with `last_message`. Then check `status
 `outcome`, `exit_code`, `retryable`, `warnings` and `publication`. Evaluate critically per
 the doctrine. Exit codes: 0 succeeded; 2 self-check, depth or usage refusal; 75 thread busy;
 124 wall-clock timeout; 125 idle timeout; 130 cancelled; otherwise the Claude exit code.
+A round that did not succeed carries `code` and `fix`; `cairn errors CODE` gives the next step.
 
 ## 7. Debate
 

@@ -7,13 +7,17 @@ start path - the property that lets a global install fall through to XDG.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from cairn import config
 from cairn.timeutil import parse_since
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 class TestConfigPrecedence(unittest.TestCase):
@@ -38,6 +42,76 @@ class TestConfigPrecedence(unittest.TestCase):
         os.environ["CAIRN_CONFIG"] = "/nonexistent/cairn-xyz.json"
         with self.assertRaises(config.ConfigError):
             config._config_path()
+
+    def test_missing_config_carries_code(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.environ.pop("CAIRN_CONFIG", None)
+            os.environ["XDG_CONFIG_HOME"] = d
+            with (
+                mock.patch.object(config, "find_repo_root", return_value=None),
+                self.assertRaises(config.ConfigError) as caught,
+            ):
+                config._config_path()
+        self.assertEqual(caught.exception.code, "CONFIG_NOT_FOUND")
+        self.assertTrue(str(caught.exception).startswith("No cairn config found"))
+
+    def test_unknown_key_carries_code(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "my.json"
+            data = {
+                "data_root": "/tmp/ctx",
+                "collections": {"x": {"store": "/tmp/x", "efort": 1}},
+                "project_groups": {},
+                "repo_catalog": {},
+                "project_descriptions": {},
+            }
+            p.write_text(json.dumps(data))
+            with self.assertRaises(config.ConfigError) as caught:
+                config.load_config_from(p)
+        self.assertEqual(caught.exception.code, "CONFIG_UNKNOWN_KEY")
+        self.assertIn("has unknown keys: efort", str(caught.exception))
+
+    def test_unknown_key_code_at_every_parser_site(self):
+        # One unknown key at each of the six parser sites (collection, invoke peer, peer,
+        # billing, profile, routine): each raises CONFIG_UNKNOWN_KEY, not CONFIG_INVALID.
+        base = json.loads((REPO / "src" / "cairn" / "config.example.json").read_text())
+        sites = {
+            "collection": lambda d: d["collections"][next(iter(d["collections"]))],
+            "invoke": lambda d: d["invoke"],
+            "peer": lambda d: d["invoke"]["codex"],
+            "billing": lambda d: d["invoke"]["antigravity"]["billing"],
+            "profile": lambda d: d["invoke"]["claude"]["profiles"]["scheduled"],
+            "routine": lambda d: d["routines"]["example-daily"],
+        }
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "my.json"
+            p.write_text(json.dumps(base))
+            config.load_config_from(p)  # the example itself loads
+            for site, pick in sites.items():
+                with self.subTest(site=site):
+                    data = json.loads(json.dumps(base))
+                    pick(data)["zzunknown"] = 1
+                    p.write_text(json.dumps(data))
+                    with self.assertRaises(config.ConfigError) as caught:
+                        config.load_config_from(p)
+                    self.assertIn("zzunknown", str(caught.exception))
+                    self.assertEqual(caught.exception.code, "CONFIG_UNKNOWN_KEY")
+
+    def test_missing_override_file_carries_not_found_code(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["CAIRN_CONFIG"] = str(Path(d) / "none.json")
+            with self.assertRaises(config.ConfigError) as caught:
+                config._config_path()
+        self.assertEqual(caught.exception.code, "CONFIG_NOT_FOUND")
+        self.assertIn("is set but no such file exists", str(caught.exception))
+
+    def test_invalid_json_carries_default_code(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "my.json"
+            p.write_text("{not json")
+            with self.assertRaises(config.ConfigError) as caught:
+                config.load_config_from(p)
+        self.assertEqual(caught.exception.code, "CONFIG_INVALID")
 
     def test_xdg_preferred_over_repo(self):
         with tempfile.TemporaryDirectory() as d:

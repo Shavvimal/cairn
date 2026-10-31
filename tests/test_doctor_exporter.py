@@ -46,9 +46,11 @@ class TestDoctorExporter(StoreFixture):
         self.assertNotIn("exporter [cursor]", text)  # cursor is not configured here
         self.assertIn(f"  warn parser drift - codex:{CODEX_ID[:8]} zero-messages: rendered 0", text)
         self.assertIn("; first seen 20", text)
+        drift = next(line for line in text.splitlines() if "warn parser drift - codex:" in line)
+        self.assertTrue(drift.endswith(" [EXPORT_PARSER_DRIFT]"), drift)
         self.assertIn(
             "  warn gap check [claude-code-sessions] - 1 of 1 sessions in the last 30 days "
-            f"have no document: claude:{CLAUDE_ID[:8]}; run 'cairn sync'",
+            f"have no document: claude:{CLAUDE_ID[:8]}; run 'cairn sync' [SYNC_SOURCE_GAP]\n",
             text,
         )
         self.assertIn(

@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
-from . import decisions, withdrawals
+from . import decisions, errors, withdrawals
 from . import provenance as provenance_mod
 from .config import get_config
 from .digest_condense import (
@@ -548,6 +548,8 @@ def run_digest(
         payload["overdue"] = overdue
         if cov is not None:
             payload["coverage"] = cov
+        if not digests:
+            payload = errors.tag(payload, "DIGEST_EMPTY_DAY")
         print(json.dumps(payload, indent=2))
     else:
         for row in rows:
@@ -568,7 +570,10 @@ def run_digest(
             print(f"Overdue: {item['ref']}  revisit_by {item['revisit_by']}  {item['claim']}")
     if cov is not None and (degraded := coverage_note(cov)):
         print(degraded, file=sys.stderr)
-    return 0 if digests else 3
+    if not digests:
+        errors.emit("DIGEST_EMPTY_DAY")
+        return 3
+    return 0
 
 
 def _stored_row(path: Path, ordinal: int) -> dict:

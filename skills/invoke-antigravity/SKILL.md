@@ -194,6 +194,7 @@ event stream) and the diff: the peer's report can describe a design it abandoned
 lists every call agy refused. Evaluate critically per the doctrine. Exit codes: 0 succeeded;
 2 self-check, depth, permissions or usage refusal, or a `denied` round; 75 thread busy;
 124 wall-clock timeout; 125 idle timeout; 130 cancelled; otherwise the `agy` exit code.
+A round that did not succeed carries `code` and `fix`; `cairn errors CODE` gives the next step.
 
 ## 7. Debate
 

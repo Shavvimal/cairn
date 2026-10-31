@@ -143,7 +143,8 @@ class TestInstall(InstructionsFixture):
         self.assertEqual(
             err,
             f"Error: {self.codex_home} does not exist; is Codex installed? cairn edits "
-            f"{self.agents_md} only inside an existing Codex home\n",
+            f"{self.agents_md} only inside an existing Codex home\n"
+            + "code: INSTRUCTIONS_HOME_MISSING (run 'cairn errors INSTRUCTIONS_HOME_MISSING')\n",
         )
         self.assertFalse(self.codex_home.exists())
         code, out, _ = self.install("codex", "--json")
@@ -173,7 +174,8 @@ class TestInstall(InstructionsFixture):
         self.assertEqual(
             err,
             f"Error: the recall-first block in {self.claude_md} was edited by hand since cairn "
-            "wrote it; move your text outside the markers, or pass --force to replace it\n",
+            "wrote it; move your text outside the markers, or pass --force to replace it\n"
+            + "code: INSTRUCTIONS_BLOCK_EDITED (run 'cairn errors INSTRUCTIONS_BLOCK_EDITED')\n",
         )
         self.assertEqual(self.claude_md.read_text(), edited)
         code, out, _ = self.install("claude", "--force")
@@ -202,7 +204,8 @@ class TestInstall(InstructionsFixture):
                     err,
                     f"Error: recall-first markers in {self.claude_md} are damaged ({begins} "
                     f"begin, {ends} end; expected one of each, begin first); fix or delete "
-                    "them by hand, then re-run\n",
+                    "them by hand, then re-run\n"
+                    + "code: INSTRUCTIONS_MARKERS_DAMAGED (run 'cairn errors INSTRUCTIONS_MARKERS_DAMAGED')\n",
                 )
                 self.assertEqual(self.claude_md.read_text(), text)
                 self.assertEqual(self.remove()[0], 1)
@@ -293,7 +296,8 @@ class TestInstall(InstructionsFixture):
         self.assertEqual(
             err,
             f"Error: {self.claude_md} changed while cairn was updating it; nothing was "
-            "written. Re-run\n",
+            "written. Re-run\n"
+            + "code: INSTRUCTIONS_FAILED (run 'cairn errors INSTRUCTIONS_FAILED')\n",
         )
         self.assertEqual(self.claude_md.read_text(), "an editor saved this\n")
         self.assertFalse(self.ledger.exists())
@@ -304,7 +308,9 @@ class TestInstall(InstructionsFixture):
         code, _, err = self.install()
         self.assertEqual(code, 1)
         self.assertEqual(
-            err, f"Error: {self.claude_md} is not UTF-8 text; cairn will not edit it\n"
+            err,
+            f"Error: {self.claude_md} is not UTF-8 text; cairn will not edit it\n"
+            + "code: INSTRUCTIONS_FAILED (run 'cairn errors INSTRUCTIONS_FAILED')\n",
         )
         self.assertEqual(self.claude_md.read_bytes(), b"caf\xe9\n")
 

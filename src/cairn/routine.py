@@ -21,7 +21,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import routine_plan, routine_state
+from . import errors, routine_plan, routine_state
 from .config import (
     NAME_RE,
     NAME_RULE,
@@ -77,7 +77,9 @@ def _routine(config: CairnConfig, name: str) -> RoutineSpec:
     spec = config.routines.get(name)
     if spec is None:
         known = ", ".join(sorted(config.routines)) or "(none)"
-        raise RoutineError(f"routine {name!r} is not in routines; known: {known}")
+        raise RoutineError(
+            f"routine {name!r} is not in routines; known: {known}", code="ROUTINE_UNKNOWN"
+        )
     return spec
 
 
@@ -394,8 +396,10 @@ def status(config: CairnConfig, name: str, as_json: bool, lines: int) -> int:
     verdict = routine_state.classify(config, spec, macos=is_macos())
     last_done = next((r for r in rows if r["state"] in ("done", "empty")), None)
     latest = next((r.get("attempt_dir") for r in rows if r.get("attempt_dir")), None)
+    code = {1: "ROUTINE_NEEDS_ATTENTION", 2: "ROUTINE_HELD"}.get(verdict.exit)
     report: dict = {
         **verdict.as_json(),
+        "code": code,
         "routine": name,
         "config": {
             "peer": spec.peer,
@@ -429,6 +433,8 @@ def status(config: CairnConfig, name: str, as_json: bool, lines: int) -> int:
         "last_cost_usd": last_done.get("cost_usd") if last_done else None,
         "log_tail": _log_tail(log, lines),
     }
+    if code is not None:
+        errors.emit(code)
     if as_json:
         print(json.dumps(report, indent=2))
         return verdict.exit
@@ -695,8 +701,13 @@ def main(argv: list[str] | None = None) -> int:
             return uninstall(config, args.name)
         return kickstart(config, args.name, args.force_restart)
     except (RoutineError, ConfigError) as exc:
-        print(f"cairn routine: {exc}", file=sys.stderr)
-        return 2
+        return errors.fail(
+            errors.code_of(exc, "ROUTINE_USAGE"),
+            str(exc),
+            exit=2,
+            prefix="cairn routine: ",
+            name=getattr(args, "name", None),
+        )
 
 
 __all__ = [

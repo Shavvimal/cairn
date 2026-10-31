@@ -56,6 +56,40 @@ class _ConfigFixture(unittest.TestCase):
 
 
 class TestConfigShow(_ConfigFixture):
+    def test_config_show_json_failure_object(self):
+        data = json.loads(self.cfg_path.read_text())
+        name = next(iter(data["collections"]))
+        data["collections"][name]["efort"] = 1
+        self.cfg_path.write_text(json.dumps(data))
+        config.get_config.cache_clear()
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = admin._config_show(as_json=True)
+        self.assertEqual(code, 1)
+        lines = err.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith(f"No config loaded: Collection {name!r} has unknown"))
+        self.assertTrue(lines[1].startswith("It would live at: "))
+        self.assertEqual(
+            lines[2], "code: CONFIG_UNKNOWN_KEY (run 'cairn errors CONFIG_UNKNOWN_KEY')"
+        )
+        data = json.loads(out.getvalue())
+        self.assertEqual(sorted(data), ["code", "error", "exit", "fix", "ok", "retryable"])
+        self.assertEqual((data["ok"], data["code"], data["exit"]), (False, "CONFIG_UNKNOWN_KEY", 1))
+        self.assertEqual(data["error"], lines[0].removeprefix("No config loaded: "))
+        self.assertEqual(data["fix"]["verify"], ["cairn", "config", "show", "--json"])
+
+    def test_config_path_failure_names_its_code(self):
+        os.environ["CAIRN_CONFIG"] = str(Path(self.cfg_path).parent / "none.json")
+        config.get_config.cache_clear()
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            code = admin._config_show_path()
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            err.getvalue().splitlines()[-1],
+            "code: CONFIG_NOT_FOUND (run 'cairn errors CONFIG_NOT_FOUND')",
+        )
+
     def test_show_json_shape_and_enabled_state(self):
         data = self._show_json()
         self.assertEqual(data["data_root"], "/tmp/ctx")
@@ -577,7 +611,7 @@ class TestDoctorRecallFirst(StoreFixture):
         self.assertEqual(
             self.check(),
             "  warn recall-first [claude] - edited by hand inside the markers; edits there "
-            "are replaced by 'install --force'\n",
+            "are replaced by 'install --force' [INSTRUCTIONS_BLOCK_EDITED]\n",
         )
         with redirect_stdout(io.StringIO()):
             instructions.main(["remove", "--harness", "claude"])
@@ -590,7 +624,8 @@ class TestDoctorRecallFirst(StoreFixture):
         md.write_text("<!-- cairn:recall-first:end -->\n")
         self.assertEqual(
             self.check(),
-            f"  warn recall-first [claude] - damaged markers in {md}; fix them by hand\n",
+            f"  warn recall-first [claude] - damaged markers in {md}; fix them by hand"
+            " [INSTRUCTIONS_MARKERS_DAMAGED]\n",
         )
         codex_home = Path(os.environ["CODEX_HOME"])
         self.assertEqual(
@@ -634,6 +669,8 @@ class TestDoctorRecallFirst(StoreFixture):
         out = buf.getvalue()
         self.assertEqual(rc, 1)
         self.assertIn("  FAIL config", out)
+        fail_line = next(line for line in out.splitlines() if line.startswith("  FAIL config"))
+        self.assertTrue(fail_line.endswith(" [CONFIG_NOT_FOUND]"), fail_line)
         self.assertIn("  warn recall-first [claude] - not in", out)
         self.assertNotIn("[codex]", out)
         self.assertFalse(self.claude_md.exists())

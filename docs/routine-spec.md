@@ -978,7 +978,8 @@ Flags:
 
 Exit codes for `run`: 0 when every day in the set ended done or empty, when the lock
 was held, or when nothing was due. 1 when any day failed or was deferred. 2 for usage,
-config or render errors.
+config or render errors. `last-run.json` and the `--json` report carry the registry `code`
+of a failed run; see `docs/error-codes.md`.
 
 #### 6.2.2 The child environment
 

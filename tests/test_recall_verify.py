@@ -454,10 +454,12 @@ class TestChecks(VerifyFixture):
                     "failures",
                     "moved",
                     "exit",
+                    "code",
                 ]
             ),
         )
         self.assertEqual(data["schema_version"], 1)
+        self.assertEqual((data["exit"], data["code"]), (4, "RECALL_VERIFY_FAILED"))
         self.assertEqual(data["file"], str(self.journal.absolute()))
         self.assertEqual(data["digest"], str(self.out.absolute()))
         self.assertFalse(data["ok"])
@@ -487,12 +489,14 @@ class TestChecks(VerifyFixture):
         self.journal.write_text(journal(VERIFIED))
         code, _, stderr = self.cli("verify", str(self.journal), "--digest", str(self.root))
         self.assertEqual(code, 1)
+        recall_failed = "code: RECALL_FAILED (run 'cairn errors RECALL_FAILED')\n"
         self.assertEqual(
-            stderr, f"Error: not a digest directory: {self.root} has no .cairn-digest\n"
+            stderr,
+            f"Error: not a digest directory: {self.root} has no .cairn-digest\n" + recall_failed,
         )
         code, _, stderr = self.cli("verify", str(self.root / "none.md"), "--digest", str(self.out))
         self.assertEqual(code, 1)
-        self.assertEqual(stderr, f"Error: no such file: {self.root / 'none.md'}\n")
+        self.assertEqual(stderr, f"Error: no such file: {self.root / 'none.md'}\n" + recall_failed)
 
     def test_exit_code_never_3(self):
         texts = [
@@ -508,6 +512,22 @@ class TestChecks(VerifyFixture):
 
 
 class TestFix(VerifyFixture):
+    def test_fix_clears_the_registry_code(self):
+        # A failing journal names RECALL_VERIFY_FAILED on stderr; with --fix the failing
+        # blocks move, the run exits 0 and the JSON code is null.
+        original = journal(VERIFIED, "", NOT_FOUND)
+        code, _, stderr = self.verify(original)
+        self.assertEqual(code, 4)
+        self.assertTrue(
+            stderr.endswith(
+                "code: RECALL_VERIFY_FAILED (run 'cairn errors RECALL_VERIFY_FAILED')\n"
+            )
+        )
+        code, stdout, stderr = self.verify(original, "--fix", "--json")
+        self.assertEqual(code, 0)
+        self.assertIsNone(json.loads(stdout)["code"])
+        self.assertNotIn("RECALL_VERIFY_FAILED", stderr)
+
     def test_fix_moves_only_failing_blocks(self):
         original = journal(VERIFIED, "", NOT_FOUND, "", "Closing line.")
         code, stdout, _ = self.verify(original, "--fix")
@@ -606,7 +626,8 @@ class TestFix(VerifyFixture):
         self.assertEqual(code, 1)
         self.assertEqual(
             stderr,
-            f"Error: {self.journal} changed while verify ran; nothing written, run it again\n",
+            f"Error: {self.journal} changed while verify ran; nothing written, run it again\n"
+            "code: RECALL_FAILED (run 'cairn errors RECALL_FAILED')\n",
         )
         self.assertEqual(self.journal.read_text(encoding="utf-8"), edited)
 

@@ -20,7 +20,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-from cairn import config, routine, routine_plan, routine_run
+from cairn import config, errors, routine, routine_plan, routine_run
 from cairn.procs import ProcessCleanupError
 from cairn.storage import lock_path
 from tests.test_shared_store import StoreFixture
@@ -233,6 +233,37 @@ class TestTemplate(RoutineFixture):
         assert last is not None
         self.assertEqual(last["exit"], 2)
         self.assertIn("JORNAL_DIR", last["error"])
+
+    def test_unknown_variable_reports_code(self):
+        self.prompt.write_text("see {{JORNAL_DIR}}\n")
+        code, _out, err = self.cli("run", "daily")
+        self.assertEqual(code, 2)
+        lines = err.splitlines()
+        first = next(i for i, line in enumerate(lines) if "unknown template variable" in line)
+        self.assertEqual(
+            lines[first + 1],
+            "code: ROUTINE_TEMPLATE_UNKNOWN_VAR (run 'cairn errors ROUTINE_TEMPLATE_UNKNOWN_VAR')",
+        )
+        last = routine_plan.read_json(self.state / "last-run.json")
+        assert last is not None
+        self.assertEqual((last["exit"], last["code"]), (2, "ROUTINE_TEMPLATE_UNKNOWN_VAR"))
+
+    def test_relative_path_reports_config_code_and_exit_2(self):
+        self.write_config(prompt_file="prompts/daily.md")
+        code, _out, err = self.cli("run", "daily")
+        self.assertEqual(code, 2)
+        self.assertEqual(err.splitlines()[0][:15], "cairn routine: ")
+        self.assertEqual(
+            err.splitlines()[1], "code: CONFIG_INVALID (run 'cairn errors CONFIG_INVALID')"
+        )
+        self.assertEqual(errors.exit_for("CONFIG_INVALID", "routine"), code)
+
+    def test_unknown_routine_reports_code(self):
+        code, _out, err = self.cli("status", "nightly")
+        self.assertEqual(code, 2)
+        self.assertEqual(
+            err.splitlines()[1], "code: ROUTINE_UNKNOWN (run 'cairn errors ROUTINE_UNKNOWN')"
+        )
 
     def test_unknown_variable_in_argv_names_the_element(self):
         self.write_config(validate=["check", "{{NOPE}}"])
@@ -542,6 +573,7 @@ class TestRun(RoutineFixture):
             code, _out, err = self.cli("run", "daily", children=children)
         self.assertEqual(code, 2)
         self.assertIn("refusing to run inside a peer (CAIRN_INVOKE_DEPTH=1)", err)
+        self.assertTrue(err.endswith("code: ROUTINE_NESTED (run 'cairn errors ROUTINE_NESTED')\n"))
         self.assertEqual(children.calls, [])
 
     def test_run_command_keeps_non_utf8_child_output(self):
@@ -700,6 +732,9 @@ class TestLaunchd(RoutineFixture):
         code, _out, err = self.cli_launchd("install", "daily", fake=fake)
         self.assertEqual(code, 2)
         self.assertIn(f"prompt_file not found: {self.prompt}", err)
+        self.assertTrue(
+            err.endswith("code: ROUTINE_INPUT_INVALID (run 'cairn errors ROUTINE_INPUT_INVALID')\n")
+        )
         self.assertEqual(fake.calls, [])
 
     def test_uninstall_keeps_stamps(self):
@@ -952,7 +987,10 @@ class TestPauseResume(HardeningFixture):
         self.assertIn("day 2026-11-09 attempt 1 (would create", out)
 
     def test_pause_requires_reason_and_rejects_newline(self):
-        message = "cairn routine: --reason must be non-empty, one line, at most 200 characters\n"
+        message = (
+            "cairn routine: --reason must be non-empty, one line, at most 200 characters\n"
+            + "code: ROUTINE_USAGE (run 'cairn errors ROUTINE_USAGE')\n"
+        )
         for reason in ("", "   ", "one\ntwo", "x" * 201):
             with self.subTest(reason=reason):
                 code, _out, err = self.cli("pause", "daily", "--reason", reason)
@@ -1009,6 +1047,17 @@ class TestPauseResume(HardeningFixture):
         code, out, _err = self.cli("list", "--json")
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)[0]["state"], "paused")
+
+    def test_status_names_its_code_per_exit(self):
+        code, out, err = self.cli("status", "daily", "--json")
+        self.assertEqual((code, json.loads(out)["code"]), (1, "ROUTINE_NEEDS_ATTENTION"))
+        self.assertIn(
+            "code: ROUTINE_NEEDS_ATTENTION (run 'cairn errors ROUTINE_NEEDS_ATTENTION')", err
+        )
+        self.cli("pause", "daily", "--reason", "away")
+        code, out, err = self.cli("status", "daily", "--json")
+        self.assertEqual((code, json.loads(out)["code"]), (2, "ROUTINE_HELD"))
+        self.assertEqual(errors.exit_for("ROUTINE_HELD"), code)
 
     def test_doctor_reports_paused_and_disabled(self):
         self.cli("pause", "daily", "--reason", "moving house")
@@ -1340,8 +1389,10 @@ class TestRunReport(HardeningFixture):
         self.assertEqual((code, report["status"], report["schema_version"]), (1, "partial", 1))
         code, report, _err = self.json_run(children=Children(validate=1))
         self.assertEqual((code, report["status"]), (1, "failed"))
+        self.assertEqual(report["code"], "ROUTINE_DAY_FAILED")
+        self.assertEqual(self.last_run()["code"], "ROUTINE_DAY_FAILED")
         code, report, _err = self.json_run(children=Children())
-        self.assertEqual((code, report["status"]), (0, "ok"))
+        self.assertEqual((code, report["status"], report["code"]), (0, "ok", None))
         code, report, _err = self.json_run()
         self.assertEqual((code, report["status"], report["rows"]), (0, "clean", []))
         self.cli("pause", "daily", "--reason", "away")
@@ -1350,7 +1401,12 @@ class TestRunReport(HardeningFixture):
         self.assertEqual(self.last_run()["status"], "clean")  # a skip keeps the last real run
         code, _out, err = self.cli("run", "daily", "--json", "--dry-run")
         self.assertEqual(
-            (code, err), (2, "cairn routine: --json does not combine with --dry-run\n")
+            (code, err),
+            (
+                2,
+                "cairn routine: --json does not combine with --dry-run\n"
+                + "code: ROUTINE_USAGE (run 'cairn errors ROUTINE_USAGE')\n",
+            ),
         )
 
     def test_run_json_stdout_is_one_object_on_tty(self):

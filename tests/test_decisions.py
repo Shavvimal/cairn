@@ -659,7 +659,14 @@ class TestRecallDecisions(DecisionsFixture):
                 self.assertEqual([r["number"] for r in data["decisions"]], expected)
                 self.assertTrue(all(r["overdue"] for r in data["decisions"]))
         code, _, err = self.recall("--as-of", "2026-10-32")
-        self.assertEqual((code, err), (1, "Error: --as-of must be YYYY-MM-DD, got '2026-10-32'\n"))
+        self.assertEqual(
+            (code, err),
+            (
+                1,
+                "Error: --as-of must be YYYY-MM-DD, got '2026-10-32'\n"
+                "code: RECALL_FAILED (run 'cairn errors RECALL_FAILED')\n",
+            ),
+        )
 
     def test_json_shape_and_problems_list(self):
         bad = self.write_doc(

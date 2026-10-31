@@ -314,7 +314,9 @@ bad-ledger message.
 `action` is one of `added`, `created`, `updated`, `unchanged`, `skipped`, `removed`,
 `absent`, `none` (status). On exit 1, `--json` prints
 `{"harness": ..., "path": ..., "error": "<message>"}` to stdout, and the plain message
-goes to stderr.
+goes to stderr. From 2.19.0 that object is the error registry's failure object (`ok`,
+`code`, `error`, `exit`, `retryable`, `fix`) plus `harness` and `path`; see
+`docs/error-registry-spec.md`.
 
 ## 6. Failure modes
 

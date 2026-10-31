@@ -140,6 +140,35 @@ class TestRecallList(_RecallFixture):
         code, _ = self._run(["list", "whenever", "--all-projects"])
         self.assertEqual(code, 1)
 
+    def test_bad_date_json_failure_object(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code, out = self._run(["list", "whenever", "--all-projects", "--json"])
+        self.assertEqual(code, 1)
+        first, second = err.getvalue().splitlines()
+        self.assertTrue(first.startswith("Error: "))
+        self.assertEqual(second, "code: RECALL_FAILED (run 'cairn errors RECALL_FAILED')")
+        data = json.loads(out)
+        self.assertEqual(
+            (data["ok"], data["code"], data["error"], data["exit"], data["retryable"]),
+            (False, "RECALL_FAILED", first.removeprefix("Error: "), 1, False),
+        )
+        self.assertEqual(data["fix"]["verify"], ["cairn", "recall", "list", "today"])
+
+    def test_failed_refresh_names_its_code(self):
+        # A child export that fails: refresh() names the source, then the code line and,
+        # with --json, the failure object follow.
+        err = io.StringIO()
+        with redirect_stderr(err), patch.object(recall, "refresh", return_value=False):
+            code, out = self._run(["list", "today", "--all-projects", "--refresh", "--json"])
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            err.getvalue().splitlines()[-1],
+            "code: RECALL_FAILED (run 'cairn errors RECALL_FAILED')",
+        )
+        data = json.loads(out)
+        self.assertEqual((data["ok"], data["code"], data["exit"]), (False, "RECALL_FAILED", 1))
+
     def test_list_json_has_provenance_and_owner(self):
         code, out = self._run(["list", "today", "--all-projects", "--json"])
         self.assertEqual(code, 0)

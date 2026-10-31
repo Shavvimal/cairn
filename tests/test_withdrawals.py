@@ -479,7 +479,8 @@ class TestGuard(WithdrawalFixture):
                 3,
                 "",
                 "Error: claim withdrawn on 2026-10-30 (reason: hallucination, claude:3f2a9c1e "
-                "row #1); pass --force to add it again\n",
+                "row #1); pass --force to add it again\n"
+                + "code: DECISION_CLAIM_WITHDRAWN (run 'cairn errors DECISION_CLAIM_WITHDRAWN')\n",
             ),
         )
         self.assertEqual(path.read_bytes(), before)
@@ -749,7 +750,8 @@ class TestReading(WithdrawalFixture):
         self.assertEqual(
             err,
             f"Error: {self.ledger} line 2 is not a valid withdrawal record: missing ts, event, "
-            "source, session_id, row, fingerprint, norm, reason; fix or remove the line\n",
+            "source, session_id, row, fingerprint, norm, reason; fix or remove the line\n"
+            + "code: RECALL_FAILED (run 'cairn errors RECALL_FAILED')\n",
         )
         code, _, err = self.run_verb("decide", "Anything", "--session-id", SID)
         self.assertEqual(code, 1)

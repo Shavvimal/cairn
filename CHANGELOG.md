@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.0]
+
+### Added
+- `cairn errors [CODE] [--json]`: a registry of 38 stable failure codes. Each row gives the meaning,
+  why cairn stops, the next step, a verify command (it edits no config or instruction file; it can
+  create `data_root`, refresh the catalog cache, or finalise a dead invoke round), the exit status
+  and whether a retry can help. It reads no config. `docs/error-codes.md` is generated from it (`python -m cairn.errors
+  --render`) and a test keeps it current.
+- A converted failure keeps its first stderr line and adds `code: CODE (run 'cairn errors CODE')`.
+  With `--json`, `recall`, `invoke`, `config show` and `instructions` print a failure object
+  (`ok`, `code`, `error`, `exit`, `retryable`, `fix`) on stdout.
+- The invoke result line (runner, `result-NN.json`, `invoke wait`, busy) and `invoke publish --json`
+  carry `code` and `fix` for every round that did not succeed. `routine run --json`, `last-run.json`,
+  `routine status --json`, `recall digest --json` (empty day) and `recall verify --json` carry `code`.
+- `cairn doctor` lines end with ` [CODE]` for config, QMD, index, hook trust, Codex trust, parser
+  drift, gap check and recall-first findings.
+
+### Changed
+- Exit codes and first stderr lines are unchanged. A script that compared a whole stderr string, a
+  whole doctor line or the exact key set of these JSON objects sees the added line, suffix or keys.
+
 ## [2.18.0]
 
 ### Added

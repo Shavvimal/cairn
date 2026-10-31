@@ -33,6 +33,7 @@ _ADMIN: dict[str, str] = {
     "invoke": "cairn.invoke:main",
     "agents": "cairn.agents:main",
     "routine": "cairn.routine:main",
+    "errors": "cairn.errors:main",
 }
 
 _HELP = """\
@@ -101,6 +102,7 @@ orchestration / admin:
   cairn routine list | status NAME [--json]  state, stamps, last run; status exits 0/1/2
   cairn routine pause NAME --reason TEXT | resume NAME   skip runs until resumed
   cairn routine kickstart NAME [--force-restart]   ask launchd to start the job now
+  cairn errors [CODE] [--json]               what a failure code means and the next step
 
 other:
   cairn help                                 show this overview
@@ -136,13 +138,17 @@ def main() -> None:
     command, rest = argv[0], argv[1:]
     spec = _SOURCES.get(command) or _ADMIN.get(command)
     if spec is None:
+        from . import errors
+
         known = ", ".join(sorted([*_SOURCES, *_ADMIN, "help"]))
-        print(
-            f"cairn: unknown command {command!r}.\nknown commands: {known}\n"
-            f"run 'cairn help' for usage.",
-            file=sys.stderr,
+        sys.exit(
+            errors.fail(
+                "CLI_UNKNOWN_COMMAND",
+                f"cairn: unknown command {command!r}.\nknown commands: {known}\n"
+                f"run 'cairn help' for usage.",
+                exit=2,
+            )
         )
-        sys.exit(2)
 
     # Re-point argv at the target's own parser, then hand off. Sources call
     # sys.exit() themselves (via cli.run); admin/sync return an int - propagate it.
