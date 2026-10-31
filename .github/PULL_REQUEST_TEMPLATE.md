@@ -12,6 +12,7 @@
 
 - [ ] `make check` passes (ruff lint + format + mypy + unittest)
 - [ ] Tests added or updated for the change
+- [ ] Discrimination evidence for each new test: `<paste the line from make discriminates>`
 - [ ] Docs / reference updated (`skills/cairn/reference/`, `cairn.config.example.json`) if behavior changed
 - [ ] `__version__` bumped in `src/cairn/__init__.py` if `src/cairn/` changed
 - [ ] Commit messages are short and imperative

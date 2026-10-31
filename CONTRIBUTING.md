@@ -32,6 +32,81 @@ Individual targets are available too: `make lint`, `make format`, `make typechec
 
 CI runs the same checks across Python 3.11, 3.12, and 3.13. A PR must be green before it can merge.
 
+## A new test must fail without its fix
+
+A test that passes with and without its fix pins nothing, and it keeps passing after a
+later change breaks the behaviour. A comparable project audited its new tests and found
+that most of them passed on the baseline, without the fix they claimed to cover. cairn
+therefore asks for evidence with every new or changed test.
+
+Run the check for each new test:
+
+```bash
+make discriminates TEST=tests.test_x.TestY.test_z
+```
+
+On a stacked branch, name the parent so that only your change is reverted:
+
+```bash
+make discriminates TEST=tests.test_x.TestY.test_z SINCE=my-parent-branch
+```
+
+The script (`scripts/check-test-discriminates.py`) copies the working tree to a temporary
+directory and reverts the source files there to their content at the base ref. By default
+these are the files under `src/` that changed since the merge-base with `main`, and
+`FILES='hooks/launch.sh'` picks others. The script runs the test in the copy and requires
+it to fail. Then it runs the test in your real tree and requires it to pass. Your working
+tree is never modified, so an interrupted run cannot lose work. Paste the line it prints
+into the PR:
+
+```text
+reverted src/cairn/x.py (+12 -3) to f0ea1e1, ran tests.test_x.TestY.test_z -> FAIL (1), restored -> PASS
+```
+
+| Exit | Meaning | What to do |
+| --- | --- | --- |
+| 0 | the test fails without the fix and passes with it | paste the line |
+| 1 | the test passes without the fix | tighten the assertions |
+| 2 | usage or setup error | read the message |
+| 3 | the test did not run on one tree (import error, nothing ran, all skipped) | see below |
+| 4 | the test fails with the fix | fix the test or the code |
+
+Exit 3 usually means the test imports a name the fix adds. That proves a name changed,
+not that the behaviour did. Paste the line anyway, and add one mutation probe: break the
+new code on purpose (return the wrong value, drop the check), run the test, record how
+many tests failed, then undo the edit. A test of unchanged behaviour (a characterisation
+test) states that in place of the line.
+
+Assertions that pass on broken code, and that review will reject:
+
+- only `assertNotEqual(code, 0)`: a missing binary or a crash also exits non-zero;
+- a substring that the broken output also contains;
+- membership in a set that holds every value the code can return;
+- a mock of the function under test.
+
+### Save test output to a file
+
+Save test output to a file and read it with the real exit code. Never pipe a test run
+through `head` or `tail`:
+
+```bash
+make check > /tmp/cairn-check.txt 2>&1; echo "exit=$?"
+```
+
+A pipe reports the exit status of its last command, so `make check | tail` exits 0 when
+the tests fail. `tail` also drops the start of the log, where the first error is. Read
+the whole file, and report the number that `echo` printed.
+
+### Recording harness evidence
+
+An acceptance document for a harness (`docs/codex-acceptance.md`) opens with a dated
+table of three columns. "Behaviour" names one behaviour per row. "Automated evidence
+(test name, date)" names the test and the date and commit it last passed, or `none`. "Remaining manual evidence (what, who, how to record)" names
+what only a real host can show, who checks it, and where the result goes. A manual item
+moves to the automated column when a test covers it, and is never deleted. Use the
+template in `docs/test-discipline-spec.md`, section 5.2. When you add a file under
+`docs/`, add its row to `docs/README.md`.
+
 ## Documented commands must parse
 
 `tests/test_docs_cli.py` reads every `cairn ...` command in a fenced block, and every

@@ -28,3 +28,13 @@ published the moment it is pushed, and a force-push does not take it back.
 
 `make check` (ruff, ruff format, mypy, unittest) mirrors CI across Python 3.11 to 3.13.
 Commits carry no attribution trailer.
+
+## Tests
+
+- Save test output to a file and read it with the real exit code:
+  `make check > /tmp/cairn-check.txt 2>&1; echo "exit=$?"`. Never pipe a test run through
+  `head` or `tail`: the pipe reports the exit status of `tail`, and the cut log hides the
+  first error.
+- A new test comes with its discrimination evidence: run
+  `make discriminates TEST=tests.test_x.TestY.test_z` and paste the printed line into the
+  PR body. See CONTRIBUTING.md, "A new test must fail without its fix".

@@ -25,8 +25,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --group dev --extra granola
-      - run: uv run ruff check src tests
-      - run: uv run ruff format --check src tests
+      - run: uv run ruff check src tests scripts/check-test-discriminates.py
+      - run: uv run ruff format --check src tests scripts/check-test-discriminates.py
       - run: uv run mypy
       # The exact and title-bare recall qrels run the skills' rg pass; without rg they skip.
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep

@@ -694,7 +694,8 @@ plugin.json                # portable manifest (authoritative OpenAI settings)
 .codex-plugin/             # generated compatibility manifest
 references/harnesses/      # shared skill execution contract + host tool references
 references/peer-review.md  # adversarial review doctrine shared by the invoke skills
-docs/                      # design plans, research and acceptance evidence
+docs/                      # design plans, research and acceptance evidence (index: docs/README.md)
+scripts/                   # manifest sync; check-test-discriminates.py (make discriminates)
 hooks/hooks.json           # Claude SessionEnd
 hooks/codex.json           # Codex SessionEnd (explicit selection)
 hooks/antigravity.json     # Antigravity Stop (reference shape; `cairn hook install` writes the real one)
