@@ -25,10 +25,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --group dev --extra granola
-      - run: uv run ruff check src tests
-      - run: uv run ruff format --check src tests
+      - run: uv run ruff check src tests scripts/check-test-discriminates.py
+      - run: uv run ruff format --check src tests scripts/check-test-discriminates.py
       - run: uv run mypy
+      # The exact and title-bare recall qrels run the skills' rg pass; without rg they skip.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
       - run: uv run python -m unittest discover -s tests
+      # Tests must keep catalogs and lock files in their temp homes. Leaks come from
+      # subprocesses the tests spawn, so check the runner's real home afterwards.
+      - name: tests left nothing in the runner home
+        run: |
+          for d in ~/.local/state/cairn ~/.cache/cairn; do
+            if [ -e "$d" ]; then echo "::error::$d exists after the tests"; find "$d" | head -20; exit 1; fi
+          done
 
   version-bump:
     name: version-bump
@@ -48,7 +57,8 @@ jobs:
           # cache actually refreshes and stays locked to the engine. Docs/tests/CI are
           # not user-facing and never require a bump.
           changed=$(git diff --name-only "$BASE_SHA"...HEAD -- \
-            'src/cairn/**' 'skills/**' 'hooks/**' '.claude-plugin/**' 'commands/**' 'agents/**')
+            'src/cairn/**' 'skills/**' 'hooks/**' '.claude-plugin/**' '.codex-plugin/**' \
+            'plugin.json' '.agents/plugins/**' 'references/**' 'commands/**' 'agents/**')
           if [ -z "$changed" ]; then
             echo "No user-facing changes; version bump not required."
             exit 0

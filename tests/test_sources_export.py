@@ -12,17 +12,22 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import io
 import json
 import os
+import re
 import sqlite3
 import unittest
 import urllib.error
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
-from cairn import config
+from cairn import cli, config, decisions
+from cairn.frontmatter import parse_frontmatter
+from cairn.schema import SessionData
 
 
 def _write_config(root: Path, stores: dict[str, str]) -> Path:
@@ -54,6 +59,8 @@ class _AdapterFixture(unittest.TestCase):
     def setUp(self):
         self._tmp = TemporaryDirectory()
         self.root = Path(self._tmp.name)
+        self._home_patch = patch.dict(os.environ, {"HOME": str(self.root / "home")})
+        self._home_patch.start()
         self._prev = os.environ.get("CAIRN_CONFIG")
 
     def _activate(self, stores: dict[str, str]):
@@ -64,6 +71,7 @@ class _AdapterFixture(unittest.TestCase):
         return importlib.reload(module)
 
     def tearDown(self):
+        self._home_patch.stop()
         if self._prev is None:
             os.environ.pop("CAIRN_CONFIG", None)
         else:
@@ -77,6 +85,51 @@ class _AdapterFixture(unittest.TestCase):
 
 class TestCodexExport(_AdapterFixture):
     module_name = "cairn.sources.codex"
+
+    def test_current_response_users_exclude_context_and_deduplicate_legacy_events(self):
+        store = self.root / "codex-store"
+        store.mkdir()
+        mod = self._activate({"codex-sessions": str(store)})
+        records = [{"type": "session_meta", "payload": {"id": "current", "cwd": "/tmp"}}]
+        for turn in ("first", "second"):
+            records.append(
+                {"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn}}
+            )
+            for text, kind in (
+                ("Injected environment", "environments.environment_context"),
+                ("Investigate the widget bug", "user.text"),
+            ):
+                records.append(
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-10-16T12:00:00Z",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": text}],
+                            "internal_chat_message_metadata_passthrough": {
+                                "turn_id": turn,
+                                "content_item_kinds": [kind],
+                            },
+                        },
+                    }
+                )
+            if turn == "first":
+                records.append(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "Investigate the widget bug",
+                        },
+                    }
+                )
+        path = store / "rollout-current.jsonl"
+        path.write_text("\n".join(map(json.dumps, records)))
+        data = mod.parse_rollout(path)
+        self.assertEqual(data["user_messages"], ["Investigate the widget bug"] * 2)
+        self.assertEqual(data["message_count"], 2)
+        self.assertEqual(len(data["messages"]), 2)
 
     def test_rollout_parses_and_renders(self):
         store = self.root / "codex-store"
@@ -119,6 +172,115 @@ class TestCodexExport(_AdapterFixture):
         self.assertIn("date: 2026-01-15", text)
         self.assertIn("Investigate the widget bug", text)  # title + user turn
         self.assertIn("Found the off-by-one", text)  # assistant turn
+
+
+class TestClaudeProvenance(_AdapterFixture):
+    """Every Claude export carries ``provenance`` as the last head line before status."""
+
+    module_name = "cairn.sources.claude"
+    session_id = "abc12345-feed-0000-0000-000000000000"
+
+    def _write(self, store: Path, *texts: str) -> Path:
+        folder = store / "-tmp-demo"
+        folder.mkdir(parents=True, exist_ok=True)
+        records = [
+            {
+                "sessionId": self.session_id,
+                "timestamp": "2026-03-28T05:20:11Z",
+                "type": "user",
+                "message": {"role": "user", "content": text},
+            }
+            for text in texts
+        ]
+        path = folder / f"{self.session_id}.jsonl"
+        path.write_text("\n".join(map(json.dumps, records)) + "\n", encoding="utf-8")
+        return path
+
+    def _export(self, mod, transcript: Path) -> Path:
+        out = mod.ClaudeSource().sync_session(
+            self.session_id, str(transcript), quiet=True, project="demo"
+        )
+        assert out is not None
+        return out
+
+    def test_export_writes_provenance_before_status(self):
+        store = self.root / "claude-store"
+        mod = self._activate({"claude-code-sessions": str(store)})
+        out = self._export(mod, self._write(store, "Investigate the widget bug"))
+        lines = out.read_text(encoding="utf-8").split("\n")
+        index = lines.index("status: active")
+        self.assertEqual(lines[index - 1], "provenance: tool")
+        self.assertEqual(parse_frontmatter("\n".join(lines))["provenance"], "tool")
+
+    def test_reexport_keeps_provenance_and_annotations(self):
+        from cairn import mutations
+
+        store = self.root / "claude-store"
+        mod = self._activate({"claude-code-sessions": str(store)})
+        source = mod.ClaudeSource()
+        out = self._export(mod, self._write(store, "Investigate the widget bug"))
+        self.assertTrue(mutations.add_comment(source.find_file, self.session_id, "keep me"))
+        self.assertTrue(
+            mutations._mutate_file(
+                source.find_file, self.session_id, lambda fm: fm.__setitem__("tags", ["widget"])
+            )
+        )
+        text = out.read_text(encoding="utf-8")
+        placeholder = re.search(r"<!-- Add your notes here\.[^>]*-->", text)
+        assert placeholder is not None
+        text = text.replace(placeholder[0], "Hand-written follow-up")
+        # A hand edit of the key does not survive: the re-render recomputes it.
+        text = text.replace("\nprovenance: tool\n", "\nprovenance: user\n", 1)
+        out.write_text(text, encoding="utf-8")
+        self.assertEqual(parse_frontmatter(text)["provenance"], "user")
+        transcript = self._write(store, "Investigate the widget bug", "Now add a test")
+        self.assertEqual(self._export(mod, transcript), out)
+        text = out.read_text(encoding="utf-8")
+        fm = parse_frontmatter(text)
+        self.assertIn("Now add a test", text)  # the re-render happened
+        self.assertEqual(fm["provenance"], "tool")
+        self.assertEqual(fm["tags"], ["widget"])
+        self.assertIn("keep me", fm["comments"])
+        self.assertEqual(text.count("Hand-written follow-up"), 1)
+        self.assertEqual(text.count("\nprovenance:"), 1)
+
+
+class TestCodexProvenance(_AdapterFixture):
+    module_name = "cairn.sources.codex"
+
+    def test_peer_export_is_agent(self):
+        from cairn.invoke import preamble
+
+        store = self.root / "codex-store"
+        store.mkdir()
+        prompt = preamble("codex", None, 1, 600, owner="routine:example-daily") + "\n\nReview"
+        rollout = [
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "abc12345-feed-7000-8000-000000000000",
+                    "timestamp": "2026-01-15T10:00:00Z",
+                    "cwd": "/tmp/demo",
+                },
+            },
+            {"type": "event_msg", "payload": {"type": "user_message", "message": prompt}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "VERDICT: accept - fine"}],
+                },
+            },
+        ]
+        (store / "rollout-2026.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rollout) + "\n", encoding="utf-8"
+        )
+        mod = self._activate({"codex-sessions": str(store)})
+        self.assertEqual(mod.CodexSource().export_rollouts(date_filter=None, quiet=True), 1)
+        (output,) = (self.root / ".context" / "codex-sessions").rglob("*.md")
+        lines = output.read_text(encoding="utf-8").split("\n")
+        self.assertEqual(lines[lines.index("status: active") - 1], "provenance: agent")
 
 
 class TestCursorExport(_AdapterFixture):
@@ -207,6 +369,78 @@ class TestCursorExport(_AdapterFixture):
         self.assertNotIn("\ud83c", text)  # lone surrogate stripped
         self.assertIn("Trophy", text)
         self.assertIn("here", text)
+
+
+class TestGranolaExport(_AdapterFixture):
+    module_name = "cairn.sources.granola"
+
+    def test_export_is_imported(self):
+        mod = self._activate({"granola-sessions": str(self.root / "granola")})
+        data: SessionData = {"meeting_id": "m1", "date": "2026-07-01", "title": "Meeting"}
+        path = mod.GranolaSource().export_one("m1", data, None)
+        assert path is not None
+        lines = path.read_text(encoding="utf-8").split("\n")
+        self.assertEqual(lines[lines.index("status: raw") - 1], "provenance: imported")
+
+    def test_source_headings_do_not_erase_handwritten_notes_on_reexport(self):
+        mod = self._activate({"granola-sessions": str(self.root / "granola")})
+        for field in ("notes_markdown", "summary_markdown"):
+            with self.subTest(field=field):
+                source = mod.GranolaSource()
+                data: SessionData = {
+                    "meeting_id": field,
+                    "date": "2026-07-01",
+                    "title": "Meeting",
+                    "transcript_markdown": "Native transcript\n## My Notes\nTranscript text",
+                }
+                native_notes = "## Conversation\nCustomer feedback\n## Transcript\nMore notes"
+                if field == "notes_markdown":
+                    data["notes_markdown"] = native_notes
+                else:
+                    data["summary_markdown"] = native_notes
+                path = source.export_one(field, data, None)
+                assert path is not None
+                path.write_text(
+                    path.read_text().replace(
+                        "<!-- Add your notes here. This section is preserved across exports. -->",
+                        "Important handwritten follow-up\n```md\n## Conversation\n```",
+                    )
+                )
+                for _ in range(2):
+                    self.assertEqual(source.export_one(field, data, path), path)
+                    content = path.read_text()
+                    self.assertEqual(content.count("Important handwritten follow-up"), 1)
+                    self.assertEqual(content.count("Native transcript"), 1)
+                    self.assertEqual(content.count("Transcript text"), 1)
+                    self.assertIn("```md\n## Conversation\n```", content)
+
+    def test_decide_by_command_and_reexport_keep_the_table(self):
+        mod = self._activate({"granola-sessions": str(self.root / "granola")})
+        source = mod.GranolaSource()
+        data: SessionData = {
+            "meeting_id": "m-0001",
+            "date": "2026-07-01",
+            "title": "Meeting",
+            "notes_markdown": "## Decisions\nnative heading",
+            "transcript_markdown": "## Decisions\nsaid aloud",
+        }
+        path = source.export_one("m-0001", data, None)
+        assert path is not None
+        args = cli.build_parser(source).parse_args(
+            ["decide", "Hire", "--kind", "commitment", "--json", "--session-id", "m-0001"]
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = args.func(args)
+        source.flush_catalog()
+        self.assertEqual((code, err.getvalue()), (0, ""))
+        self.assertEqual(json.loads(out.getvalue())["row"]["ref"], "granola:m-0001#1")
+        written = path.read_bytes()
+        rows = decisions.parse(written.decode("utf-8"), conversation_heading=None)
+        self.assertEqual([(r.number, r.claim) for r in rows], [(1, "Hire")])
+        self.assertEqual(source.export_one("m-0001", data, path), path)
+        # Everything after the front matter (which holds the export time) is unchanged.
+        self.assertEqual(path.read_bytes().split(b"\n---\n", 1)[1], written.split(b"\n---\n", 1)[1])
 
 
 class TestGranolaHelpers(unittest.TestCase):
@@ -360,6 +594,274 @@ class TestGranolaHelpers(unittest.TestCase):
         ):
             rc = self.granola.GranolaSource().run_export(argparse.Namespace(all=True, quiet=True))
         self.assertEqual(rc, 1)
+
+
+# ---------------------------------------------------------------------------
+# Antigravity (agy): brain transcripts + conversation_summaries.db
+# ---------------------------------------------------------------------------
+
+# Record shapes vendored from agy 1.4.6 transcripts (2026-10-23), paths anonymised.
+AGY_CONVERSATION = "0ccaac42-fa89-4d4f-8d55-236fe26b984a"
+AGY_STEPS = [
+    {
+        "step_index": 0,
+        "source": "USER_EXPLICIT",
+        "type": "USER_INPUT",
+        "status": "DONE",
+        "created_at": "2026-10-23T09:30:11Z",
+        "content": "<USER_REQUEST>\nhelp me find out if Antigravity is using my GCP credits\n"
+        "</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-10-23T10:30:11"
+        "+01:00.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting "
+        "`Model Selection` from None to Gemini 4 Argon (High).\n</USER_SETTINGS_CHANGE>",
+    },
+    {
+        "step_index": 1,
+        "source": "MODEL",
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "created_at": "2026-10-23T09:30:11Z",
+        "input_tokens": 8045,
+        "cache_read_tokens": 0,
+        "output_tokens": 192,
+        "thinking": "**Checking Antigravity Usage**\n\nI will read the guide first.",
+        "tool_calls": [
+            {"name": "read_file", "args": {"Path": "/w/SKILL.md"}},
+            {"name": "run_command", "args": {"CommandLine": "gcloud billing projects describe p"}},
+        ],
+    },
+    {
+        "step_index": 2,
+        "source": "MODEL",
+        "type": "GENERIC",
+        "status": "DONE",
+        "created_at": "2026-10-23T09:30:18Z",
+        "content": "Created At: 2026-10-23T10:30:18+01:00\nCompleted At: 2026-10-23T10:30:18+01:00\n"
+        "Showing lines 1-2 of 2\n1: ---\n2: name: antigravity-guide",
+    },
+    {
+        "step_index": 3,
+        "source": "MODEL",
+        "type": "GENERIC",
+        "status": "ERROR",
+        "error": "permission check failed for run_command",
+        "created_at": "2026-10-23T09:30:30Z",
+        "content": "Created At: 2026-10-23T10:30:30+01:00\nCompleted At: 2026-10-23T10:31:06+01:00\n"
+        "Encountered error in step execution: permission check failed for run_command",
+    },
+    {
+        "step_index": 4,
+        "source": "SYSTEM",
+        "type": "SYSTEM_MESSAGE",
+        "status": "DONE",
+        "created_at": "2026-10-23T09:39:38Z",
+        "content": "The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n"
+        "<SYSTEM_MESSAGE>\n[Message] sender=task-19 content=Task was canceled\n</SYSTEM_MESSAGE>",
+    },
+    {
+        "step_index": 5,
+        "source": "MODEL",
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "created_at": "2026-10-23T09:40:00Z",
+        "input_tokens": 100,
+        "cache_read_tokens": 50,
+        "output_tokens": 20,
+        "content": "You are billed through Vertex AI on project p.",
+        "media": [{"mime_type": "image/png", "uri": "/w/shot.png"}],
+    },
+]
+AGY_COLUMNS = (
+    "conversation_id text primary key, title text, preview text, step_count integer, "
+    "last_modified_time text, last_user_input_time text, workspace_uris text, status text, "
+    "source text, agent_name text, parent_conversation_id text, nesting_depth integer"
+)
+
+
+class TestAntigravityExport(_AdapterFixture):
+    module_name = "cairn.sources.antigravity"
+
+    def setUp(self):
+        super().setUp()
+        self.store = self.root / "agy"
+        (self.store / "brain").mkdir(parents=True)
+        self.workspace = self.root / "home" / "Code" / "demo"
+        self.workspace.mkdir(parents=True)
+
+    def transcript(self, conversation_id, steps=AGY_STEPS, compact_only=False):
+        logs = self.store / "brain" / conversation_id / ".system_generated" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        body = "".join(json.dumps(step) + "\n" for step in steps)
+        (logs / "transcript.jsonl").write_text(body)
+        if not compact_only:
+            (logs / "transcript_full.jsonl").write_text(body)
+        return logs / ("transcript.jsonl" if compact_only else "transcript_full.jsonl")
+
+    def row(
+        self,
+        conversation_id,
+        title="Checking GCP Credits Usage",
+        last="2026-10-23 09:42:57.132013+00:00",
+        parent="",
+        depth=0,
+        status="CASCADE_RUN_STATUS_IDLE",
+    ):
+        db = sqlite3.connect(self.store / "conversation_summaries.db")
+        db.execute(f"create table if not exists conversation_summaries ({AGY_COLUMNS})")
+        db.execute(
+            "insert or replace into conversation_summaries values (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                conversation_id,
+                title,
+                "preview",
+                6,
+                last,
+                last,
+                json.dumps([self.workspace.as_uri()]),
+                status,
+                "",
+                "",
+                parent,
+                depth,
+            ),
+        )
+        db.commit()
+        db.close()
+
+    def activate(self):
+        return self._activate({"antigravity-sessions": str(self.store)})
+
+    def documents(self):
+        return sorted((self.root / ".context" / "antigravity-sessions").rglob("*.md"))
+
+    def test_transcript_parses_and_renders(self):
+        self.transcript(AGY_CONVERSATION)
+        mod = self.activate()
+        # First export before agy names the conversation: the prompt is the title.
+        self.assertEqual(mod.AntigravitySource().export_conversations(quiet=True), 1)
+        docs = self.documents()
+        self.assertEqual(
+            parse_frontmatter(docs[0].read_text())["title"],
+            "help me find out if Antigravity is using my GCP credits",
+        )
+        self.row(AGY_CONVERSATION)
+        self.assertEqual(mod.AntigravitySource().export_conversations(quiet=True), 1)
+        self.assertEqual(len(docs), 1)
+        text = docs[0].read_text(encoding="utf-8")
+        fm = parse_frontmatter(text)
+        self.assertEqual(fm["type"], "antigravity-session")
+        self.assertEqual(fm["session_id"], AGY_CONVERSATION)
+        self.assertEqual(fm["date"], "2026-10-23")
+        self.assertEqual(fm["title"], "Checking GCP Credits Usage")
+        self.assertEqual(fm["run_status"], "IDLE")
+        self.assertEqual(fm["messages"], "1")
+        self.assertEqual(fm["steps"], "6")
+        self.assertEqual(fm["step_errors"], "1")
+        self.assertEqual(fm["tokens"], "in=8145 out=212 cached=50")
+        self.assertEqual(fm["source"], "antigravity")
+        self.assertEqual(fm["native_id"], AGY_CONVERSATION)
+        self.assertEqual(fm["cwd"], str(self.workspace))
+        self.assertEqual(fm["activity_dates"], ["2026-10-23"])
+        self.assertEqual(fm["status"], "active")  # the preserved tail, not agy's run status
+        # Body: the prompt without its wrapper, thinking folded, paired tool results.
+        self.assertIn("### User - 2026-10-23T09:30:11Z", text)
+        self.assertIn("help me find out if Antigravity is using my GCP credits", text)
+        for leaked in (
+            "<USER_REQUEST>",
+            "ADDITIONAL_METADATA",
+            "USER_SETTINGS_CHANGE",
+            "Created At:",
+        ):
+            self.assertNotIn(leaked, text)
+        self.assertIn("<details><summary>Reasoning</summary>", text)
+        self.assertIn('<tool name="read_file" status="done">', text)
+        self.assertIn("2: name: antigravity-guide", text)
+        self.assertIn('<tool name="run_command" status="error">', text)
+        self.assertIn("permission check failed for run_command", text)
+        self.assertIn("### System - 2026-10-23T09:39:38Z", text)
+        self.assertIn("[Message] sender=task-19 content=Task was canceled", text)
+        self.assertNotIn("not actually sent by the user", text)
+        self.assertIn("You are billed through Vertex AI on project p.", text)
+        self.assertIn("[media image/png](/w/shot.png)", text)
+        # Re-export is a no-op until the native snapshot changes.
+        self.assertEqual(mod.AntigravitySource().export_conversations(quiet=True), 0)
+        # A later index change re-renders, but a title that is no longer the prompt is
+        # treated as the user's and preserved.
+        self.row(AGY_CONVERSATION, title="Renamed by agy", last="2026-10-23 09:50:00+00:00")
+        self.assertEqual(mod.AntigravitySource().export_conversations(quiet=True), 1)
+        self.assertEqual(
+            parse_frontmatter(docs[0].read_text())["title"], "Checking GCP Credits Usage"
+        )
+
+    def test_without_an_index_row_or_full_transcript(self):
+        self.transcript("bbbbbbbb-0000-4000-8000-000000000001", compact_only=True)
+        (self.store / "brain" / "cccccccc-0000-4000-8000-000000000002").mkdir()  # no transcript
+        mod = self.activate()
+        source = mod.AntigravitySource()
+        self.assertEqual(source.export_conversations(quiet=True), 1)
+        docs = self.documents()
+        self.assertEqual(len(docs), 1)
+        fm = parse_frontmatter(docs[0].read_text())
+        self.assertEqual(fm["title"], "help me find out if Antigravity is using my GCP credits")
+        self.assertNotIn("run_status", fm)
+        self.assertEqual(docs[0].parent.name, "antigravity-sessions")  # no workspace: root
+        self.assertEqual(
+            source.conversations(),
+            {
+                "bbbbbbbb-0000-4000-8000-000000000001": self.transcript(
+                    "bbbbbbbb-0000-4000-8000-000000000001", compact_only=True
+                )
+            },
+        )
+
+    def test_window_uses_the_index_time(self):
+        self.transcript(AGY_CONVERSATION)
+        self.row(AGY_CONVERSATION, last="2026-01-01 00:00:00+00:00")
+        mod = self.activate()
+        cutoff = datetime(2026, 6, 1, tzinfo=UTC).timestamp()
+        self.assertEqual(
+            mod.AntigravitySource().export_conversations(date_filter=cutoff, quiet=True), 0
+        )
+        self.assertEqual(
+            mod.AntigravitySource().export_conversations(date_filter=None, quiet=True), 1
+        )
+
+    def test_export_target_prefers_the_full_sibling_and_checks_identity(self):
+        compact = self.transcript(AGY_CONVERSATION).with_name("transcript.jsonl")
+        self.row(AGY_CONVERSATION)
+        mod = self.activate()
+        source = mod.AntigravitySource()
+        document = source.export_target(AGY_CONVERSATION, str(compact))
+        self.assertTrue(document.is_file())
+        self.assertEqual(source.export_target(AGY_CONVERSATION, None), document)
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            source.export_target("other-id", str(compact))
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            source.export_target("dddddddd-0000-4000-8000-000000000004", None)
+
+    def test_child_conversation_lands_in_the_parent_folder(self):
+        child = "eeeeeeee-0000-4000-8000-000000000005"
+        self.transcript(AGY_CONVERSATION)
+        self.row(AGY_CONVERSATION)
+        self.transcript(child, steps=AGY_STEPS[:2])
+        self.row(child, title="Worker: billing check", parent=AGY_CONVERSATION, depth=1)
+        mod = self.activate()
+        self.assertEqual(mod.AntigravitySource().export_conversations(quiet=True), 2)
+        docs = self.documents()
+        parent_doc = next(d for d in docs if d.name.endswith(f"{AGY_CONVERSATION[:8]}.md"))
+        child_doc = next(d for d in docs if d.name == f"agent-{child[:8]}.md")
+        self.assertEqual(child_doc.parent, parent_doc.with_suffix(""))
+        child_fm = parse_frontmatter(child_doc.read_text())
+        self.assertEqual(child_fm["type"], "antigravity-subagent")
+        self.assertEqual(child_fm["parent_session_id"], AGY_CONVERSATION)
+        self.assertEqual(child_fm["spawn_depth"], "1")
+        parent_text = parent_doc.read_text()
+        self.assertIn("## Subagents", parent_text)
+        self.assertIn(
+            f"[Worker: billing check](./{parent_doc.stem}/agent-{child[:8]}.md)", parent_text
+        )
+        # A targeted export of the child refreshes the whole family.
+        source = mod.AntigravitySource()
+        self.assertEqual(source.export_target(child, None), child_doc)
 
 
 if __name__ == "__main__":

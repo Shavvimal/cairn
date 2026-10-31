@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${PLUGIN_ROOT}/hooks/launch.sh\" --harness codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

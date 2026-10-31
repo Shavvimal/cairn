@@ -17,7 +17,13 @@ import re
 
 from .schema import CodeBlockData, Message, ToolCallData
 
-_ROLE_HEADERS = {"user": "### User", "assistant": "### Assistant", "tool": "### Tool"}
+_ROLE_HEADERS = {
+    "user": "### User",
+    "assistant": "### Assistant",
+    "tool": "### Tool",
+    "agent": "### Agent",  # a message between agents (subagent -> parent, Codex collab)
+    "system": "### System",  # injected by the host (agy SYSTEM_MESSAGE steps)
+}
 
 # Unpaired UTF-16 surrogate code points. A correctly-paired emoji is a single
 # non-surrogate code point in a Python str, so anything left in this range is a lone
@@ -99,6 +105,7 @@ def render_conversation(messages: list[Message]) -> list[str]:
     """Markdown lines for the '## Conversation' body - interleaved turns."""
     lines = ["## Conversation", ""]
     for message in messages:
+        turn_start = len(lines)
         header = _ROLE_HEADERS.get(message.get("role", ""), "### Message")
         timestamp = message.get("timestamp")
         if timestamp:
@@ -125,6 +132,10 @@ def render_conversation(messages: list[Message]) -> list[str]:
             lines.extend([_render_tool_call(tool_call), ""])
         for code_block in message.get("code_blocks", []):
             lines.extend([_render_code_block(code_block), ""])
+        # The declared length must equal what the final join writes after the
+        # marker line: the body, a newline, and the blank separator line.
+        body = strip_lone_surrogates("\n".join(lines[turn_start:])).rstrip("\n")
+        lines[turn_start:] = [f"<!-- cairn:turn {len(body) + 2} -->", body, ""]
     return lines
 
 

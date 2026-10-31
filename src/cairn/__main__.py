@@ -16,21 +16,24 @@ import importlib
 import sys
 
 # name -> "module:function". Values are strings so nothing imports until dispatch.
-_SOURCES: dict[str, str] = {
-    "claude": "cairn.sources.claude:main",
-    "codex": "cairn.sources.codex:main",
-    "cursor": "cairn.sources.cursor:main",
-    "granola": "cairn.sources.granola:main",
-    "service-docs": "cairn.sources.service_docs:main",
-}
+from .registry import SOURCES
+
+_SOURCES = {source.source: source.entrypoint for source in SOURCES}
 
 # Top-level orchestration / admin commands.
 _ADMIN: dict[str, str] = {
+    "hook": "cairn.hooks:main",
+    "instructions": "cairn.instructions:main",
+    "resume": "cairn.resume:main",
     "sync": "cairn.sync:main",
     "recall": "cairn.recall:main",
     "doctor": "cairn.admin:doctor_main",
     "config": "cairn.admin:config_main",
     "cron": "cairn.admin:cron_main",
+    "invoke": "cairn.invoke:main",
+    "agents": "cairn.agents:main",
+    "routine": "cairn.routine:main",
+    "errors": "cairn.errors:main",
 }
 
 _HELP = """\
@@ -42,29 +45,75 @@ usage:
 sources (each forwards its remaining args to that source's CLI):
   cairn claude export [--since 7d | --all]   export Claude Code sessions
   cairn claude resume --pick                 resume a Claude session (interactive)
+  cairn claude memory import --dry-run       add Claude auto-memory notes as decision rows
   cairn codex export                         export Codex CLI sessions (last 24h)
+  cairn antigravity export [--all]           export Google Antigravity (agy) conversations
   cairn cursor export --all                  export Cursor IDE sessions
   cairn granola export --since 2w            export Granola meetings + transcripts
   cairn service-docs export [--clean]        mirror service docs into one collection
 
-shared per-source commands: export, list, context, note, close, log
+shared per-source commands: export, list, context, note, close, log, decide, supersede, forget
   cairn claude list --json
   cairn codex note "got it working"
+  cairn codex decide "Use one PR per layer" --kind decision --revisit-by 2026-12-01
+  cairn codex forget 3 --reason hallucination
   cairn cursor log --status done --tags "x,y" --rating 8
 
-recall (temporal view over native Claude sessions; topic search is qmd's job):
+recall (temporal view over shared exported sessions; topic search is qmd's job):
   cairn recall list yesterday                sessions from a date window
   cairn recall list "last week" --json       machine-readable session list
-  cairn recall expand <session-id>           condensed transcript for one session
+  cairn recall expand <source:session-id>           condensed transcript for one session
+  cairn recall digest yesterday --all-projects --json   one UTC day condensed, cited by f<N>
+  cairn recall frame <source:session-id> N [--frames FILE]   print frame N, check its hash
+  cairn recall gaps --json                   what recall cannot see right now
+  cairn recall verify FILE --digest DIR [--fix]   check a journal's [SOURCE:ID fN] citations and quotes
+  cairn recall decisions [DATE] [--overdue] [--json]   ## Decisions rows across sessions
+
+peer agents (one foreground round per call; run it in the background):
+  cairn invoke codex --prompt TEXT [--effort E] [--profile review|edit|full] [--json]
+  cairn invoke claude --prompt-file FILE [--model M] [--permission-mode MODE]
+  cairn invoke antigravity --prompt TEXT [--model M] [--mode plan|accept-edits|auto]
+  cairn invoke codex --resume THREAD_ID --prompt TEXT   follow up in the same thread
+  cairn invoke status THREAD_ID [--follow] [--json]     health, progress and answer
+  cairn invoke tail THREAD_ID [--round N] [--no-follow]  one line per tool call, until the final event
+  cairn invoke wait THREAD_ID [--json]                  block until the round exits, print its result line
+  cairn invoke cancel THREAD_ID                         stop a running round
+  cairn invoke publish THREAD_ID                        finish pending exports/index
+  cairn hook install --harness claude|codex|antigravity  register the session-end hook
+  cairn invoke list-models [--json]                     the Codex model catalogue
+
+agents (peer runs and subagents of a session):
+  cairn agents list [--session SOURCE:ID] [--all] [--json] [--watch]
+  cairn agents wait [--session SOURCE:ID | ID...] [--timeout-s N] [--stall-after-s N]
 
 orchestration / admin:
   cairn sync [--hook | --cron | --all]       sync every source, then refresh QMD
-  cairn doctor                               check install, config, qmd, cron, PATH
-  cairn config init | path                   create / locate the per-user config
+  cairn hook install [--harness H]           register a host hook / record the launcher
+  cairn hook status                          inspect hook runs and the queue
+  cairn hook worker                          drain / retry queued sync work
+  cairn instructions install --harness claude|codex   add the recall-first block to the user instruction file
+  cairn instructions remove --harness claude|codex    delete the block and record an opt-out
+  cairn instructions show --harness claude|codex      print the block for a paste by hand
+  cairn instructions status [--json]         the block state per harness
+  cairn resume <source:session-id>            print the correct native resume command
+  cairn doctor [--strict-index]              check install, config, qmd + index, rg, cron, PATH
+  cairn config init                          create the per-user config
+  cairn config path                          print the resolved config path
   cairn config show [--json]                 print the resolved config + integrations
   cairn config set KEY VALUE                 set one config value (e.g. claude.store …)
+  cairn config unset KEY                     remove a routine, routine field or invoke profile
   cairn config add-service-doc NAME PATH     mirror a docs folder into service-docs
-  cairn cron install | uninstall             manage the hourly sync crontab entry
+  cairn cron install                         add / refresh the hourly sync crontab entry
+  cairn cron uninstall                       remove the cairn cron entry
+  cairn routine install NAME                 add the launchd job (macOS)
+  cairn routine uninstall NAME               remove the launchd job; stamps are kept
+  cairn routine run NAME [--day D] [--force] [--dry-run] [--json]   run due days now
+  cairn routine list [--json]                every configured routine
+  cairn routine status NAME [--json]         state, stamps, last run; exits 0/1/2
+  cairn routine pause NAME --reason TEXT     skip runs until resumed
+  cairn routine resume NAME                  remove the pause
+  cairn routine kickstart NAME [--force-restart]   ask launchd to start the job now
+  cairn errors [CODE] [--json]               what a failure code means and the next step
 
 other:
   cairn help                                 show this overview
@@ -100,13 +149,17 @@ def main() -> None:
     command, rest = argv[0], argv[1:]
     spec = _SOURCES.get(command) or _ADMIN.get(command)
     if spec is None:
+        from . import errors
+
         known = ", ".join(sorted([*_SOURCES, *_ADMIN, "help"]))
-        print(
-            f"cairn: unknown command {command!r}.\nknown commands: {known}\n"
-            f"run 'cairn help' for usage.",
-            file=sys.stderr,
+        sys.exit(
+            errors.fail(
+                "CLI_UNKNOWN_COMMAND",
+                f"cairn: unknown command {command!r}.\nknown commands: {known}\n"
+                f"run 'cairn help' for usage.",
+                exit=2,
+            )
         )
-        sys.exit(2)
 
     # Re-point argv at the target's own parser, then hand off. Sources call
     # sys.exit() themselves (via cli.run); admin/sync return an int - propagate it.

@@ -2,12 +2,22 @@
 
 Annotate the current session with title, tags, status, rating, comments, and an
 auto-generated summary. Works for any **conversation** source - substitute the source name
-in `cairn <source> note/close/log` (Claude shown below; the same verbs exist for codex,
-cursor, and granola). service-docs is a file mirror and has no annotation verbs.
+in `cairn <source> note|close|log|decide|supersede|forget` (Claude shown below; the same verbs exist
+for codex, antigravity, cursor, and granola). service-docs is a file mirror and has no annotation verbs.
 
-## Behavior
+## Contents
 
-- **Always generates a summary** via a haiku subagent (analyzes the conversation)
+- Via CLI: note, close, log
+- Via voice/text (agent workflow)
+- Record a decision: "record that decision", "log what we decided", "replace that decision"
+- Withdraw a claim: "forget that decision", "withdraw that claim"
+- Import Claude memories: `workflows/memory-import.md`
+- Finding the current session
+- Status values, tags, frontmatter
+
+## Behaviour
+
+- **Always generates a summary** from the available conversation context
 - Reads valid tags from `../schema/tags.yaml`
 - Updates frontmatter via the cairn CLI
 - Fields: title, tags, status, rating, comments, summary
@@ -33,7 +43,7 @@ current one).
 
 User says: "log session - Enhanced sync skill, done, implementation automation, 8"
 
-Claude:
+Agent:
 
 1. Parses intent from natural language:
    - title: "Enhanced sync skill"
@@ -42,7 +52,7 @@ Claude:
    - rating: 8
    - comment: (auto-generated from context)
 2. Reads `../schema/tags.yaml` to validate tags
-3. Runs a haiku subagent to generate a 2-3 line summary
+3. Writes a 2-3 line summary from the conversation; do not require a host-specific subagent
 4. Updates via CLI (`cairn claude log`, `cairn claude note`, `cairn claude close`)
 
 ### Example inputs
@@ -61,12 +71,80 @@ Claude:
 - **Tags:** match against `../schema/tags.yaml`
 - **Comment:** everything else, or auto-generate
 
-## Finding the current session
+## Record a decision
+
+A decision, fact, commitment or hunch that the session established goes in the
+`## Decisions` table, one row per claim, not in a comment. The table sits directly after
+`## My Notes`, survives every re-export, and `cairn recall decisions` lists it.
 
 ```bash
-echo $CLAUDE_SESSION_ID
-# Session file pattern: claude-code-sessions/YYYY-MM-DD-{session_id[:8]}.md
+cairn claude decide "One PR per layer, each based on the layer below" \
+  --kind decision --confidence high --source "[claude:3f2a9c1e f12]"
+cairn claude decide "Send the review notes" --kind commitment --revisit-by 2026-11-15
+cairn claude supersede 3 "Keep confidence as three words until grading lands"
 ```
+
+"replace that decision" is `supersede`: find N with `cairn recall decisions --json` first.
+
+- **Kind** (`--kind`, default `decision`): `decision` is a choice between options,
+  `fact` is something observed and checkable, `commitment` is something promised
+  (`--revisit-by` is its due date), `hunch` is a belief not yet checked.
+- **Confidence** (`--confidence`, default `medium`): `high`, `medium` or `low`.
+- **Citation** (`--source`): one or more frame citations `[<source>:<shortid> f<N>]`,
+  separated by single spaces. `N` is the 0-based frame ordinal from
+  `cairn recall digest` or `cairn recall frame`.
+- **Correction:** never edit a row's claim. Run `supersede N`: row N is struck as
+  `~~claim~~ superseded by #M` and the new row M gets `supersedes #N` in its source cell.
+  The new row keeps row N's kind unless `--kind` is given. It does not keep `revisit_by`.
+- **Export first:** the verbs write to the exported document. If the live session is not
+  exported yet, run `cairn <source> export` before you annotate it, or `decide` exits 1
+  with `Session file not found`.
+- A claim is one line of at most 500 characters and must not contain `~~`.
+
+## Withdraw a claim
+
+A row that is wrong and has no replacement is withdrawn, not deleted. If a replacement
+exists, use `supersede` instead.
+
+```bash
+cairn claude forget 3 --reason hallucination
+```
+
+`forget N` strikes row N as `~~claim~~ withdrawn: <reason>` (a superseded row keeps its
+marker: `superseded by #4, withdrawn: <reason>`). It also appends a fingerprint of the
+claim to `withdrawn.jsonl` in the data root. After that, `decide` or `supersede` with the
+same claim, in any session and any source, exits 3. Case, punctuation and spacing do not
+matter to the match.
+
+| `--reason`          | Use when                                                    |
+| ------------------- | ----------------------------------------------------------- |
+| `stale`             | It was true and is no longer                                |
+| `wrong_source`      | The source cell points at the wrong session, file or person |
+| `hallucination`     | No source supports it                                       |
+| `cross_attribution` | It is true of a different project, repo or person           |
+| `private`           | It must not be recalled                                     |
+| `other`             | None of the above                                           |
+
+- **Do not pass `--force` on your own.** `decide --force` adds a withdrawn claim again
+  and records it as unwithdrawn. Use it only when the user confirms the claim is true now.
+- **Withdrawn is not erased.** The claim text stays in the session document and in the
+  QMD index until someone edits the file. `--reason private` prints a note that says so.
+- Run `forget` again on the same row: it reports `already withdrawn` and changes nothing.
+
+## Import Claude memories
+
+`cairn claude memory import` adds Claude Code auto-memory notes as decision rows. Follow
+`workflows/memory-import.md`: dry run, counts, consent, import, then check. Rows in a
+project decisions document take `--session-id memory:<project>` for `decide`,
+`supersede` and `forget`.
+
+## Finding the current session
+
+Use the harness reference for current-session metadata, or select a source-qualified
+record from `cairn recall list DATE --all-projects --json`. Pass the full native ID with
+`--session-id`. If the target is ambiguous, ask; do not guess from recent filenames.
+The CLI annotates comments/status/tags/rating; put a proposed title or summary in the
+comment rather than inventing unsupported flags.
 
 ## Status values
 
@@ -82,7 +160,7 @@ echo $CLAUDE_SESSION_ID
 **Tag vocabulary (resolved per machine):** read the user's own tags file if present -
 `~/.config/cairn/tags.yaml` (or `$XDG_CONFIG_HOME/cairn/tags.yaml`) - otherwise fall back
 to the bundled `../schema/tags.yaml`. The bundled file ships universal **type tags** plus
-**example project tags** the user customizes; their real project taxonomy lives in the
+**example project tags** the user customises; their real project taxonomy lives in the
 local file (so it isn't committed to the plugin).
 
 **Type tags (universal):** research, implementation, debugging, planning, brainstorm,

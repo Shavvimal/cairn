@@ -13,24 +13,37 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
+import os
+import re
 import sys
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .. import cli
 from ..config import get_config
 from ..frontmatter import (
+    FrontmatterParseError,
+    _escape_scalar,
     head_close,
     head_open,
+    read_frontmatter_head,
     resolve_title,
     title_line,
 )
-from ..jsonl import iter_jsonl
+from ..jsonl import JsonlStats, iter_jsonl
+from ..paths import session_dir_of, subagent_path
 from ..projects import project_from_folder_path, repo_label
-from ..schema import SessionData
+from ..schema import SessionData, SubagentRef
+from ..store import file_revision, is_current
 from ..timeutil import today_str
 from .base import ConversationSource
+from .codex_lineage import Lineage, rollout_id, rollout_lineage, spawn_fields
+from .codex_replay import LIVE_CHILD_WINDOW_S, REPLAY_HEURISTIC_VERSION, ReplayCut
+from .guards import DRIFT_KINDS, ERROR, INFO, Finding
+from .spec_targets import SPEC_TARGETS
 
 COLLECTION = "codex-sessions"
 _config = get_config()
@@ -73,8 +86,105 @@ def _reasoning_summary(summary) -> str:
     return "\n".join(parts)
 
 
-def parse_rollout(file_path: Path) -> dict | None:
-    """Parse a Codex rollout JSONL into structured session data (None if unusable)."""
+def _tool_output_text(output: object, items_as_text: bool) -> str:
+    """Normalise a tool result: ``{"output": ...}``, ``input_text`` lists, or JSON.
+
+    ``items_as_text`` joins a list of text items (``custom_tool_call_output``); a
+    ``function_call_output`` list keeps its JSON rendering.
+    """
+    if isinstance(output, dict):
+        output = output.get("output", "")
+    if items_as_text and isinstance(output, list):
+        text = _content_text(output)
+        if text or not output:
+            return text
+    if isinstance(output, str):
+        return output
+    try:
+        return json.dumps(output)
+    except (TypeError, ValueError):
+        return str(output)
+
+
+def _append_tool_call(
+    messages: list[dict],
+    pending: dict[str, int],
+    call_id: object,
+    name: str,
+    arguments: object,
+    timestamp: str | None,
+) -> None:
+    """One assistant turn carrying a tool call; its result arrives later by ``call_id``."""
+    tool_call = {"name": name, "arguments": arguments, "status": None, "result": None}
+    messages.append(
+        {"role": "assistant", "timestamp": timestamp, "text": "", "tool_calls": [tool_call]}
+    )
+    if isinstance(call_id, str) and call_id:
+        pending[call_id] = len(messages) - 1
+
+
+def _resolve_tool_output(
+    messages: list[dict],
+    pending: dict[str, int],
+    call_id: object,
+    output: str,
+    timestamp: str | None,
+) -> None:
+    """Attach a result to its call, or keep it as a standalone tool turn."""
+    idx = pending.pop(call_id, None) if isinstance(call_id, str) and call_id else None
+    if idx is not None:
+        messages[idx]["tool_calls"][0]["result"] = output
+        return
+    messages.append(
+        {
+            "role": "tool",
+            "timestamp": timestamp,
+            "text": "",
+            "tool_calls": [{"name": "tool", "arguments": None, "status": None, "result": output}],
+        }
+    )
+
+
+def _agent_message_text(payload: dict) -> str:
+    """``from <author> to <recipient>`` plus the plaintext header; the body is encrypted."""
+    content = payload.get("content")
+    items = content if isinstance(content, list) else []
+    header = _content_text(items)
+    encrypted = any(
+        isinstance(item, dict)
+        and (item.get("type") == "encrypted_content" or item.get("encrypted_content"))
+        for item in items
+    )
+    author = payload.get("author") or "unknown"
+    recipient = payload.get("recipient") or "unknown"
+    body = "\n".join(part for part in (header, "[encrypted]" if encrypted else "") if part)
+    return f"from {author} to {recipient}" + (f"\n\n{body}" if body else "")
+
+
+def _sandbox_label(policy: object) -> str | None:
+    if isinstance(policy, dict):
+        policy = policy.get("type")
+    return policy if isinstance(policy, str) and policy else None
+
+
+def _subagent_title(data: dict) -> str | None:
+    """``<agent_type> <agent_nickname>: <agent_path>`` from the parts that exist."""
+    who = " ".join(part for part in (data.get("agent_type"), data.get("agent_nickname")) if part)
+    where = data.get("agent_path")
+    if who and where:
+        return f"{who}: {where}"
+    return who or where or None
+
+
+def _scan_rollout(
+    file_path: Path, honour_replay: bool, stats: JsonlStats | None = None
+) -> tuple[dict | None, bool]:
+    """One pass over a rollout. Returns ``(data, still_replaying_at_eof)``.
+
+    The first ``session_meta`` names the thread. A second one (a forked child) starts
+    the replayed parent history, which :class:`ReplayCut` skips when ``honour_replay``;
+    otherwise later metas are ignored and every record counts.
+    """
     data: dict[str, Any] = {
         "session_id": None,
         "cwd": None,
@@ -83,21 +193,60 @@ def parse_rollout(file_path: Path) -> dict | None:
         "cli_version": None,
         "branch": None,
         "commit": None,
+        "originator": None,
+        "thread_source": None,
+        "forked_from_id": None,
+        "parent_session_id": None,
+        "spawn_depth": None,
+        "agent_type": None,
+        "agent_nickname": None,
+        "agent_path": None,
+        "effort": None,
+        "sandbox": None,
+        "approval_policy": None,
+        "finished": False,
         "first_timestamp": None,
         "last_timestamp": None,
         "user_messages": [],
         "messages": [],
     }
 
-    pending_calls = {}  # call_id -> index of the assistant message carrying it
+    pending_calls: dict[str, int] = {}  # call_id -> index of the assistant message carrying it
+    turn_id = ""
+    user_occurrences: dict[tuple[str, str], dict[str, int]] = {}
+    cut: ReplayCut | None = None
 
-    for _, record in iter_jsonl(file_path):
+    def user_message(text: str, timestamp: str | None, origin: str) -> None:
+        # Older clients mirror a prompt in event_msg and response_item. Keep the
+        # larger occurrence count, not both copies; repeated prompts still count.
+        counts = user_occurrences.setdefault((turn_id, text), {"event": 0, "response": 0})
+        counts[origin] += 1
+        other = "response" if origin == "event" else "event"
+        if counts[origin] <= counts[other]:
+            return
+        data["user_messages"].append(text)
+        data["messages"].append(
+            {"role": "user", "timestamp": timestamp, "text": text, "tool_calls": []}
+        )
+
+    for _, record in iter_jsonl(file_path, stats=stats):
         rtype = record.get("type")
         payload = record.get("payload")
         if not isinstance(payload, dict):
             continue
 
         ts = record.get("timestamp") or payload.get("timestamp")
+
+        if rtype == "session_meta" and data["session_id"]:
+            # A later meta is replayed history (or a duplicate); the first meta won.
+            if honour_replay and payload.get("id") != data["session_id"]:
+                cut = cut.with_meta() if cut else ReplayCut.start(data["session_id"])
+            continue
+        if cut is not None and not cut.ended:
+            cut = cut.observe(rtype, payload)
+            if not cut.ended:
+                continue
+
         if ts:
             if not data["first_timestamp"]:
                 data["first_timestamp"] = ts
@@ -107,6 +256,10 @@ def parse_rollout(file_path: Path) -> dict | None:
             data["session_id"] = payload.get("id")
             data["cwd"] = payload.get("cwd")
             data["cli_version"] = payload.get("cli_version")
+            for key in ("originator", "thread_source", "forked_from_id"):
+                value = payload.get(key)
+                data[key] = value if isinstance(value, str) and value else None
+            data.update(spawn_fields(payload))
             meta_ts = payload.get("timestamp") or ts
             if meta_ts:
                 data["date"] = meta_ts.split("T")[0]
@@ -119,33 +272,57 @@ def parse_rollout(file_path: Path) -> dict | None:
             continue
 
         if rtype == "turn_context":
+            turn_id = payload.get("turn_id") or turn_id
             if payload.get("model"):
                 data["model"] = payload["model"]
+            effort = payload.get("effort")
+            if isinstance(effort, str) and effort:
+                data["effort"] = effort
+            sandbox = _sandbox_label(payload.get("sandbox_policy"))
+            if sandbox:
+                data["sandbox"] = sandbox
+            approval = payload.get("approval_policy")
+            if isinstance(approval, str) and approval:
+                data["approval_policy"] = approval
             continue
 
         if rtype == "event_msg":
             ptype = payload.get("type")
+            if ptype == "task_started":
+                turn_id = payload.get("turn_id") or turn_id
+                data["finished"] = False
             if ptype in ("token_count", "rate_limits", "task_started", "task_complete"):
                 continue
             if ptype == "user_message":
                 message = payload.get("message", "")
                 if isinstance(message, str) and message.strip():
-                    text = message.strip()
-                    data["user_messages"].append(text)
-                    data["messages"].append(
-                        {
-                            "role": "user",
-                            "timestamp": ts,
-                            "text": text,
-                            "tool_calls": [],
-                        }
-                    )
+                    user_message(message.strip(), ts, "event")
             continue
 
         if rtype == "response_item":
             ptype = payload.get("type")
             if ptype == "message":
+                if payload.get("role") == "user":
+                    metadata = payload.get("internal_chat_message_metadata_passthrough") or {}
+                    kinds = metadata.get("content_item_kinds")
+                    content = payload.get("content")
+                    if kinds is not None:
+                        # New clients serialize harness context as user messages
+                        # too, but label actual user input explicitly.
+                        if not isinstance(content, list) or len(content) != len(kinds):
+                            continue
+                        content = [
+                            c for c, k in zip(content, kinds, strict=True) if k == "user.text"
+                        ]
+                    text = _content_text(content)
+                    if text and not text.startswith(
+                        ("<environment_context>", "# AGENTS.md instructions for ", "<skill>")
+                    ):
+                        turn_id = metadata.get("turn_id") or turn_id
+                        user_message(text, ts, "response")
                 if payload.get("role") == "assistant":
+                    if payload.get("phase") == "final_answer":
+                        data["finished"] = True
                     text = _content_text(payload.get("content"))
                     if text:
                         data["messages"].append(
@@ -157,58 +334,39 @@ def parse_rollout(file_path: Path) -> dict | None:
                             }
                         )
                 continue
-            if ptype == "function_call":
-                call_id = payload.get("call_id")
-                name = payload.get("name", "tool")
-                arguments = payload.get("arguments")
-                if arguments is None:
-                    arguments = payload.get("rawArgs")
-                tool_call = {
-                    "name": name,
-                    "arguments": arguments,
-                    "status": None,
-                    "result": None,
-                }
+            if ptype in ("function_call", "custom_tool_call"):
+                if ptype == "custom_tool_call":
+                    arguments = payload.get("input")
+                else:
+                    arguments = payload.get("arguments")
+                    if arguments is None:
+                        arguments = payload.get("rawArgs")
+                _append_tool_call(
+                    data["messages"],
+                    pending_calls,
+                    payload.get("call_id"),
+                    payload.get("name", "tool"),
+                    arguments,
+                    ts,
+                )
+                continue
+            if ptype in ("function_call_output", "custom_tool_call_output"):
+                text_output = _tool_output_text(
+                    payload.get("output", ""), items_as_text=ptype == "custom_tool_call_output"
+                )
+                _resolve_tool_output(
+                    data["messages"], pending_calls, payload.get("call_id"), text_output, ts
+                )
+                continue
+            if ptype == "agent_message":
                 data["messages"].append(
                     {
-                        "role": "assistant",
+                        "role": "agent",
                         "timestamp": ts,
-                        "text": "",
-                        "tool_calls": [tool_call],
+                        "text": _agent_message_text(payload),
+                        "tool_calls": [],
                     }
                 )
-                if call_id:
-                    pending_calls[call_id] = len(data["messages"]) - 1
-                continue
-            if ptype == "function_call_output":
-                call_id = payload.get("call_id")
-                output = payload.get("output", "")
-                if isinstance(output, dict):
-                    output = output.get("output", "")
-                if not isinstance(output, str):
-                    try:
-                        output = json.dumps(output)
-                    except (TypeError, ValueError):
-                        output = str(output)
-                idx = pending_calls.pop(call_id, None) if call_id else None
-                if idx is not None:
-                    data["messages"][idx]["tool_calls"][0]["result"] = output
-                else:
-                    data["messages"].append(
-                        {
-                            "role": "tool",
-                            "timestamp": ts,
-                            "text": "",
-                            "tool_calls": [
-                                {
-                                    "name": "tool",
-                                    "arguments": None,
-                                    "status": None,
-                                    "result": output,
-                                }
-                            ],
-                        }
-                    )
                 continue
             if ptype == "reasoning":
                 summary = payload.get("summary")
@@ -237,8 +395,12 @@ def parse_rollout(file_path: Path) -> dict | None:
             continue
 
     if not data["session_id"]:
-        return None
+        return None, False
+    return data, cut is not None and not cut.ended
 
+
+def _finish_rollout(data: dict) -> dict:
+    """Derived fields shared by every parse outcome: date, project, counts, title."""
     if not data["date"]:
         if data["first_timestamp"]:
             data["date"] = data["first_timestamp"].split("T")[0]
@@ -257,9 +419,50 @@ def parse_rollout(file_path: Path) -> dict | None:
     title = None
     if data["user_messages"]:
         title = data["user_messages"][0].replace("\n", " ").strip()[:80]
+    elif data.get("parent_session_id"):
+        title = _subagent_title(data)
     data["title"] = title or "Untitled Session"
-
     return data
+
+
+def parse_rollout(file_path: Path, stats: JsonlStats | None = None) -> dict | None:
+    """Parse a Codex rollout JSONL into structured session data (None if unusable).
+
+    A forked child whose replayed parent history has no recognisable end is a live
+    child when the file changed within :data:`LIVE_CHILD_WINDOW_S` (``None``: skipped
+    this run, no error). An older one exports the whole file with
+    ``replay_unresolved: True`` and a warning. Replay problems never raise.
+    ``stats`` (optional) receives the line counts of the first pass.
+    """
+    data, replaying = _scan_rollout(file_path, honour_replay=True, stats=stats)
+    if data is None:
+        return None
+    if replaying:
+        try:
+            age = time.time() - file_path.stat().st_mtime
+        except OSError:
+            return None
+        if age < LIVE_CHILD_WINDOW_S:
+            return None
+        print(
+            f"Warning: {file_path}: replayed parent history has no recognisable end "
+            f"({REPLAY_HEURISTIC_VERSION} rules); exporting it whole with replay_unresolved",
+            file=sys.stderr,
+        )
+        data, _ = _scan_rollout(file_path, honour_replay=False)
+        if data is None:
+            return None
+        data["replay_unresolved"] = True
+    return _finish_rollout(data)
+
+
+def record_kind(record: dict) -> str | None:
+    """``type/payload.type`` (plus ``/role`` for a message), for the drift guard."""
+    payload = record.get("payload")
+    if not isinstance(payload, dict) or not payload.get("type"):
+        return None
+    kind = f"{record.get('type')}/{payload.get('type')}"
+    return f"{kind}/{payload.get('role')}" if payload.get("type") == "message" else kind
 
 
 def _get_all_rollout_files() -> list[Path]:
@@ -267,6 +470,107 @@ def _get_all_rollout_files() -> list[Path]:
     if not SESSIONS_DIR.is_dir():
         return []
     return [f for f in SESSIONS_DIR.rglob("rollout-*.jsonl") if f.stat().st_size > 0]
+
+
+# Head keys from session_meta / turn_context, then the lineage keys of a child.
+_CONTEXT_KEYS = (
+    "originator",
+    "thread_source",
+    "effort",
+    "sandbox",
+    "approval_policy",
+    "forked_from_id",
+)
+_CHILD_KEYS = ("parent_session_id", "spawn_depth", "agent_type", "agent_nickname", "agent_path")
+_PLAIN_SCALAR = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _scalar_line(key: str, value: object) -> str:
+    """``key: value``, double-quoted unless the value is a plain token."""
+    text = str(value)
+    if _PLAIN_SCALAR.fullmatch(text) and key not in ("agent_nickname", "agent_path"):
+        return f"{key}: {text}"
+    return f'{key}: "{_escape_scalar(text.replace(chr(10), " "))}"'
+
+
+def _depth(session_id: str, best: dict[str, tuple[float, dict]]) -> int:
+    """Ancestors of ``session_id`` present in this run (cycle-safe)."""
+    seen = {session_id}
+    depth = 0
+    parent = best[session_id][1].get("parent_session_id")
+    while parent and parent in best and parent not in seen:
+        seen.add(parent)
+        depth += 1
+        parent = best[parent][1].get("parent_session_id")
+    return depth
+
+
+def _subagent_ref(
+    child_id: str, child: dict, targets: dict[str, Path], parent_doc: Path
+) -> SubagentRef:
+    rel = Path(os.path.relpath(targets[child_id], parent_doc.parent)).as_posix()
+    return {
+        "agent_id": child_id,
+        "title": child.get("title") or "Untitled Session",
+        "agent_type": child.get("agent_type"),
+        "finished": bool(child.get("finished")),
+        "path": rel,
+    }
+
+
+def _parent_revision(file_rev: str, refs: list[SubagentRef]) -> str:
+    """The parent's revision folds in the index it renders (link paths included), so a
+    new, retitled, finished or relocated child re-renders an unchanged parent rollout."""
+    rows = sorted(
+        (
+            ref["agent_id"],
+            ref.get("title"),
+            ref.get("agent_type"),
+            ref.get("finished"),
+            ref.get("path"),
+        )
+        for ref in refs
+    )
+    return hashlib.sha256(f"{file_rev}|{rows!r}".encode()).hexdigest()
+
+
+def _family(lineage: Lineage, session_id: str) -> list[str]:
+    """Thread ids of ``session_id``'s whole family: its root ancestor and every
+    transitive descendant of that root (cycle-safe)."""
+    root = session_id
+    seen = {root}
+    while (parent := lineage.parent_of(root)) and parent not in seen:
+        seen.add(parent)
+        root = parent
+    family = [root]
+    queue = [root]
+    visited = {root}
+    while queue:
+        for child in lineage.children_of(queue.pop()):
+            meta = lineage.meta_of(child)
+            if meta is not None and meta.id not in visited:
+                visited.add(meta.id)
+                family.append(meta.id)
+                queue.append(meta.id)
+    return family
+
+
+def _subagent_index(refs: list[SubagentRef]) -> list[str]:
+    """``## Subagents`` lines for a parent document (empty without children)."""
+    if not refs:
+        return []
+    lines = ["## Subagents", ""]
+    for ref in refs:
+        title = ref.get("title", "").replace("[", "\\[").replace("]", "\\]")
+        rel = ref.get("path", "")
+        link = rel if rel.startswith("../") else f"./{rel}"
+        parts = [f"`{ref['agent_id']}`"]
+        if ref.get("agent_type"):
+            parts.append(str(ref["agent_type"]))
+        parts.append("finished" if ref.get("finished") else "running")
+        lines.append(f"- [{title}]({link}) - {', '.join(parts)}")
+    lines.append("")
+    return lines
 
 
 # =============================================================================
@@ -277,11 +581,14 @@ def _get_all_rollout_files() -> list[Path]:
 class CodexSource(ConversationSource):
     name = "codex-sessions"
     version = "2.0.0"
+    spec_target = SPEC_TARGETS["codex"]
     output_dir = OUTPUT_DIR
     session_type = "codex-session"
+    subagent_type = "codex-subagent"
     collection = "codex-sessions"
     list_default = "not-done"
     id_field = "session_id"
+    session_env_var = "CODEX_THREAD_ID"
     preserved_note = "exports"
 
     def short_id(self, session_id: str) -> str:
@@ -298,7 +605,13 @@ class CodexSource(ConversationSource):
     def render_document(
         self, data: SessionData, existing_fm: dict | None, my_notes: str | None
     ) -> str:
-        head = head_open(self.session_type, data["date"], self.id_field, data["session_id"])
+        child = bool(data.get("parent_session_id"))
+        head = head_open(
+            self.subagent_type if child else self.session_type,
+            data["date"],
+            self.id_field,
+            data["session_id"],
+        )
         if data.get("repo"):
             head.append(f"repo: {data['repo']}")
         if data.get("branch"):
@@ -307,26 +620,106 @@ class CodexSource(ConversationSource):
             head.append(f"commit: {data['commit']}")
         if data.get("model"):
             head.append(f"model: {data['model']}")
+        keys = _CONTEXT_KEYS + (_CHILD_KEYS if child else ())
+        head.extend(_scalar_line(key, data.get(key)) for key in keys if data.get(key))
+        if data.get("replay_unresolved"):
+            head.append("replay_unresolved: true")
 
         title = resolve_title(data, existing_fm)
         head.append(title_line(title))
         head.extend(head_close(data.get("last_timestamp"), data["message_count"]))
 
-        return self.assemble(head, [], title, existing_fm, my_notes, data["messages"])
+        body_extra = _subagent_index(data.get("subagents") or [])
+        default_status = "done" if child and data.get("finished") else None
+        return self.assemble(
+            head, body_extra, title, existing_fm, my_notes, data["messages"], default_status
+        )
 
     # ---- export driver ----
-    def export_rollouts(self, date_filter: float | None = None, quiet: bool = False) -> int:
-        rollouts = _get_all_rollout_files()
-        exported = 0
+    def _parse_rollouts(
+        self, rollouts: list[Path], since: float | None = None
+    ) -> tuple[list[tuple[Path, dict]], list[Path]]:
+        """Parse each rollout exactly once, stamping its native revision.
 
-        # Codex resume/fork writes a *new* rollout per resume but keeps the same
-        # session_meta.id, so several files map to one logical session. Keep the
-        # most complete fragment (most user messages, then latest activity / mtime).
-        best: dict[str, tuple] = {}  # session_id -> (score, source_mtime, data)
+        Returns ``(parsed, failed)``: a file that cannot be decoded, or that the
+        parser-drift guard refuses, is reported on stderr and listed in ``failed``
+        so the others still export. A rollout without a ``session_meta`` id that is
+        older than :data:`LIVE_CHILD_WINDOW_S` is checked under its filename id.
+
+        The guard verdict is per logical session, not per file: when any fragment of
+        a session is refused, its healthy fragments are held too (listed in
+        ``failed``), so an older fragment never replaces the document a newer one
+        wrote, and a session's finding clears only when no fragment raised one. An
+        info finding is stored only for a session with no clean fragment, so a
+        control-only resume beside a real fragment costs no write per run.
+
+        ``since`` (the export's ``--since`` cutoff) makes the guard quiet for a file
+        last changed before it: its finding is stored but not printed and does not
+        fail the run, and a refused session is held without counting as failed.
+        """
+        parsed = []
+        failed = []
+        refused: dict[str, bool] = {}  # session -> refused by a file inside the window
+        flagged: set[str] = set()  # sessions with an error or warn finding
+        clean: set[str] = set()
+        infos: dict[str, Finding] = {}
         for rollout in rollouts:
-            data = parse_rollout(rollout)
-            if not data:
+            stats = JsonlStats(kind_of=record_kind)
+            try:
+                revision = file_revision(rollout)
+                data = parse_rollout(rollout, stats)
+                mtime = rollout.stat().st_mtime
+            except (OSError, ValueError) as exc:
+                print(f"Error parsing {rollout}: {exc}", file=sys.stderr)
+                failed.append(rollout)
                 continue
+            loud = since is None or mtime >= since
+            if data:
+                sid = data["session_id"]
+                top_level = not data.get("parent_session_id")
+                finding = self.classify_parse(
+                    sid, rollout, stats, data, top_level=top_level, loud=loud, record_info=False
+                )
+            elif time.time() - mtime >= LIVE_CHILD_WINDOW_S:
+                sid = rollout_id(rollout)
+                finding = self.classify_parse(sid, rollout, stats, None, loud=loud)
+            else:
+                continue
+            if finding is None:
+                clean.add(sid)
+            elif finding.severity == INFO:
+                infos.setdefault(sid, finding)
+            else:
+                flagged.add(sid)
+            if finding is not None and finding.severity == ERROR:
+                refused[sid] = refused.get(sid, False) or loud
+                if loud:
+                    failed.append(rollout)
+                continue
+            if data:
+                data["source_revision"] = revision
+                parsed.append((rollout, data))
+        failed += [rollout for rollout, data in parsed if refused.get(data["session_id"])]
+        parsed = [(rollout, data) for rollout, data in parsed if data["session_id"] not in refused]
+        for sid in sorted(clean - flagged):
+            self.findings.clear(f"{self.source_name}:{sid}", DRIFT_KINDS)
+        for sid, finding in sorted(infos.items()):
+            if sid not in clean and sid not in flagged:
+                self.findings.record(finding)
+        return parsed, failed
+
+    @staticmethod
+    def _best_fragments(parsed: list[tuple[Path, dict]]) -> dict[str, tuple[float, dict]]:
+        """Pick the most complete fragment per logical session.
+
+        Codex resume/fork writes a *new* rollout per resume but keeps the same
+        session_meta.id, so several files map to one logical session. Keep the
+        most complete fragment (most user messages, then latest activity / mtime).
+        A forked subagent keys on its own id (the first meta), so it never merges
+        with its parent.
+        """
+        best: dict[str, tuple] = {}  # session_id -> (score, source_mtime, data)
+        for rollout, data in parsed:
             source_mtime = rollout.stat().st_mtime
             score = (
                 len(data["user_messages"]),
@@ -337,20 +730,92 @@ class CodexSource(ConversationSource):
             prev = best.get(data["session_id"])
             if prev is None or score > prev[0]:
                 best[data["session_id"]] = (score, source_mtime, data)
+        return {sid: (mtime, data) for sid, (_score, mtime, data) in best.items()}
 
-        for session_id, (_score, source_mtime, data) in best.items():
-            if date_filter and source_mtime < date_filter:
+    def _safe_target(self, session_id: str, planned: Path, claimed: dict[Path, str]) -> Path:
+        """``planned``, or its collision-suffixed form when another session already
+        holds it on disk or earlier in this run (mirrors :meth:`export_one`), so the
+        parent index links where the child is really written."""
+        holder = claimed.get(planned)
+        if holder is None and planned.exists():
+            try:
+                holder = read_frontmatter_head(planned).get(self.id_field)
+            except FrontmatterParseError:
+                holder = session_id  # export_one refuses it and records the finding
+        if holder is not None and holder != session_id:
+            digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+            planned = planned.with_stem(planned.stem + "-" + digest)
+        return planned
+
+    def _plan_targets(
+        self, best: dict[str, tuple[float, dict]], order: list[str]
+    ) -> dict[str, Path]:
+        """Document path per session: an existing record's path, else the child folder
+        of the parent's (planned or existing) document, else the canonical path; new
+        paths get the same collision suffix :meth:`export_one` would give them."""
+        targets: dict[str, Path] = {}
+        claimed: dict[Path, str] = {}
+        for sid in order:
+            data = best[sid][1]
+            record = self.find_record(sid)
+            if record is not None:
+                targets[sid] = record.path
+                claimed[record.path] = sid
+                continue
+            parent = data.get("parent_session_id")
+            parent_doc = targets.get(parent) if parent else None
+            if parent and parent_doc is None:
+                parent_record = self.find_record(parent)
+                parent_doc = parent_record.path if parent_record else None
+            if parent_doc is not None:
+                planned = subagent_path(session_dir_of(parent_doc), self.short_id(sid))
+            else:
+                planned = self.output_path(
+                    sid, data["date"], data.get("project"), data.get("repo_subdir")
+                )
+            targets[sid] = self._safe_target(sid, planned, claimed)
+            claimed[targets[sid]] = sid
+        return targets
+
+    def export_rollouts(
+        self,
+        date_filter: float | None = None,
+        quiet: bool = False,
+        parsed: list[tuple[Path, dict]] | None = None,
+    ) -> int:
+        if parsed is None:
+            parsed, _failed = self._parse_rollouts(_get_all_rollout_files())
+        best = self._best_fragments(parsed)
+        children: dict[str, list[str]] = {}
+        for sid, (_mtime, data) in best.items():
+            parent = data.get("parent_session_id")
+            if parent and parent != sid:
+                children.setdefault(parent, []).append(sid)
+        # Parents before children, so a child lands in its parent's folder.
+        order = sorted(best, key=lambda sid: (_depth(sid, best), sid))
+        targets = self._plan_targets(best, order)
+
+        exported = 0
+        for session_id in order:
+            source_mtime, data = best[session_id]
+            kids = sorted(children.get(session_id, []))
+            newest = max([source_mtime] + [best[kid][0] for kid in kids])
+            if date_filter and newest < date_filter:
+                continue
+            if kids:
+                data = dict(data)
+                refs = [
+                    _subagent_ref(kid, best[kid][1], targets, targets[session_id]) for kid in kids
+                ]
+                data["subagents"] = refs
+                data["source_revision"] = _parent_revision(data["source_revision"], refs)
+
+            record = self.find_record(session_id)
+            if is_current(record, data["source_revision"]):
                 continue
 
-            existing_file = self.find_file(session_id)
-            output_file = existing_file or self.output_path(
-                session_id, data["date"], data.get("project"), data.get("repo_subdir")
-            )
-
-            if output_file.exists() and output_file.stat().st_mtime >= source_mtime:
-                continue
-
-            if self.export_one(session_id, data, existing_file) is None:
+            output_file = self.export_one(session_id, cast(SessionData, data), targets[session_id])
+            if output_file is None:
                 continue
 
             exported += 1
@@ -361,6 +826,49 @@ class CodexSource(ConversationSource):
             print("  All sessions up to date, nothing to export")
 
         return exported
+
+    def export_target(self, session_id: str, transcript_path: str | None) -> Path:
+        path = Path(transcript_path) if transcript_path else None
+        candidates = [p for p in SESSIONS_DIR.rglob("*.jsonl") if session_id in p.name]
+        if path:
+            if not path.is_file():
+                raise ValueError(f"Codex transcript unavailable: {path}")
+            if path not in candidates:
+                candidates.append(path)
+        if not candidates:
+            raise ValueError(f"Codex transcript unavailable for {session_id}")
+        # Every document this call rewrites renders an index, so load the whole family:
+        # the root above the target (each ancestor's index is refreshed) and every
+        # transitive descendant of that root (no index renders from a partial set).
+        lineage = rollout_lineage(SESSIONS_DIR)
+        for thread_id in _family(lineage, session_id):
+            candidates += [p for p in lineage.paths_of(thread_id) if p not in candidates]
+        # One parse per candidate; the event's own transcript must carry the event's id.
+        parsed, failed = self._parse_rollouts(candidates)
+        own = [(p, d) for p, d in parsed if d["session_id"] == session_id]
+        if path and path not in failed and not any(p == path for p, _ in own):
+            raise ValueError("transcript session ID does not match requested session")
+        if not own and not failed:
+            raise ValueError(f"No readable Codex transcript for {session_id}")
+        self.export_rollouts(quiet=True, parsed=parsed)
+        drift = self.drift_error()
+        if drift is not None:
+            raise drift
+        if failed:
+            # Readable documents are written; fail so the durable hook job retries.
+            names = ", ".join(str(p) for p in failed)
+            raise ValueError(f"Codex export for {session_id} incomplete; unreadable: {names}")
+        result = self.find_file(session_id)
+        if result is None:
+            raise ValueError(f"Codex export failed for {session_id}")
+        return result
+
+    def add_extra_parsers(
+        self, subparsers: argparse._SubParsersAction, common: argparse.ArgumentParser
+    ) -> None:
+        from ..resume import add_source_parser
+
+        add_source_parser(subparsers, common, "codex")
 
     def run_export(self, args: argparse.Namespace) -> int:
         if not SESSIONS_DIR.is_dir():
@@ -374,9 +882,18 @@ class CodexSource(ConversationSource):
             else "Exporting sessions in the selected window..."
         )
 
-        exported = self.export_rollouts(date_filter, quiet=args.quiet)
+        parsed, failed = self._parse_rollouts(_get_all_rollout_files(), date_filter)
+        exported = self.export_rollouts(date_filter, quiet=args.quiet, parsed=parsed)
         print(f"\nExported {exported} sessions to {OUTPUT_DIR}")
+        if failed:
+            print(f"Error: {len(failed)} rollout(s) failed to parse", file=sys.stderr)
+            return 1
         return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """The ``cairn codex`` parser, built without running a command."""
+    return cli.build_parser(CodexSource(), prog="cairn codex")
 
 
 def main() -> None:

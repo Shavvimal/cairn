@@ -1,0 +1,27 @@
+{"intent": "sync all my claude and codex sessions now", "expected": "cairn"}
+{"intent": "export the last week of sessions to markdown", "expected": "cairn"}
+{"intent": "export my codex threads from today", "expected": "cairn"}
+{"intent": "export the cursor chats for this workspace", "expected": "cairn"}
+{"intent": "export yesterday's granola meetings", "expected": "cairn"}
+{"intent": "resume the session I had open on the hooks branch", "expected": "cairn"}
+{"intent": "add a note to this session saying the fix is in PR 33", "expected": "cairn"}
+{"intent": "close out this session as done", "expected": "cairn"}
+{"intent": "log this session with a one-line summary", "expected": "cairn"}
+{"intent": "sync the service docs from the config", "expected": "cairn"}
+{"intent": "pull in the transcripts from today's meetings", "expected": "cairn"}
+{"intent": "is my scheduled journal routine still running", "expected": "cairn"}
+{"intent": "resume my last codex session", "expected": "cairn", "ambiguous_with": ["invoke-codex"]}
+{"intent": "sync the docs listed in my config", "expected": "cairn"}
+{"intent": "import the auto memories that claude saved for this repo", "expected": "cairn"}
+{"intent": "export my antigravity conversations from today", "expected": "cairn"}
+{"intent": "please record the decision to ship one PR per layer", "expected": "cairn"}
+{"intent": "log that we decided to keep BM25", "expected": "cairn"}
+{"intent": "replace the old cache decision with the new rule", "expected": "cairn"}
+{"intent": "forget the second decision in this session, it was wrong", "expected": "cairn"}
+{"intent": "withdraw the claim about the cache, it is stale", "expected": "cairn"}
+{"intent": "pause the journal routine until monday", "expected": "cairn"}
+{"intent": "resume the daily routine now that I am back", "expected": "cairn"}
+{"intent": "check whether my journal routine is healthy", "expected": "cairn"}
+{"intent": "do the daily check on cairn before standup", "expected": "cairn"}
+{"intent": "remove the block of cairn instructions from AGENTS.md", "expected": "cairn"}
+{"intent": "cairn printed error code ROUTINE_HELD, what does it mean", "expected": "cairn"}

@@ -1,0 +1,9 @@
+{"intent": "have antigravity look over this pull request and review it", "expected": "invoke-antigravity"}
+{"intent": "can you ask the antigravity agent whether the plan is sound", "expected": "invoke-antigravity"}
+{"intent": "ask the agy cli to check the exporter", "expected": "invoke-antigravity"}
+{"intent": "get gemini to review the hook code", "expected": "invoke-antigravity"}
+{"intent": "invoke an antigravity run on the failing test", "expected": "invoke-antigravity"}
+{"intent": "I want a second opinion on the schema from antigravity", "expected": "invoke-antigravity"}
+{"intent": "resume the antigravity conversation from earlier", "expected": "invoke-antigravity"}
+{"intent": "run a gemini pass to review the plan", "expected": "invoke-antigravity"}
+{"intent": "review the diff with antigravity and with codex", "expected": "invoke-antigravity", "ambiguous_with": ["invoke-codex"]}

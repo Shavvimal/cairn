@@ -13,6 +13,7 @@ mutated file is byte-for-byte what a fresh export would produce.
 
 from __future__ import annotations
 
+import re
 import sys
 from collections.abc import Callable
 from datetime import datetime
@@ -20,12 +21,40 @@ from pathlib import Path
 from typing import Final
 
 from .frontmatter import FrontmatterParseError, rewrite_preserved_tail
+from .registry import SOURCES
+from .storage import atomic_write, document_lock, locked
 
 # The session lifecycle vocabulary. Declared here, at the mutation boundary, so an
 # invalid status is rejected no matter which caller writes it (not only the CLI).
 VALID_STATUSES: Final[frozenset[str]] = frozenset({"active", "done", "blocked", "handoff"})
 
 FindFile = Callable[[str], "Path | None"]
+
+# Lineage roles a ``links:`` entry can carry, and the ``<source>:<id>`` reference
+# shape it points at. Declared here so every writer validates links identically.
+LINK_ROLES: Final[frozenset[str]] = frozenset({"parent", "child", "peer"})
+_LINK_SOURCES: Final[tuple[str, ...]] = tuple(s.source for s in SOURCES if s.session_type)
+_LINK_REF: Final[re.Pattern[str]] = re.compile(rf"^({'|'.join(_LINK_SOURCES)}):\S+$")
+
+# An owner label (``cairn invoke --owner``): safe to emit unquoted in front matter.
+OWNER_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+# ``cairn routine run`` invokes its peer with ``--owner routine:<name>``; the digest
+# leaves sessions with this owner prefix out of the next day's input.
+ROUTINE_OWNER_PREFIX: Final[str] = "routine:"
+
+
+def valid_owner(owner: str) -> bool:
+    """Whether ``owner`` is an owner label: :data:`OWNER_RE`, and never the YAML null
+    spellings that ``preserved_tail`` would drop."""
+    return bool(OWNER_RE.match(owner)) and owner.lower() not in ("null", "none")
+
+
+def invalid_owner_message(owner: str) -> str:
+    """Canonical error text for an owner label outside :data:`OWNER_RE`."""
+    return (
+        "--owner must be 1 to 128 characters from A-Z, a-z, 0-9, '.', '_', ':' and '-', "
+        f"got {owner!r}"
+    )
 
 
 def is_valid_status(status: str) -> bool:
@@ -43,6 +72,23 @@ def invalid_status_message(status: str) -> str:
     return f"invalid status {status!r}. Must be one of: {valid}"
 
 
+def locate(find_file: FindFile, session_id: str) -> Path | None:
+    """The session's exported file, or ``None`` with the reason on stderr.
+
+    An ambiguous id (``FileExistsError`` from ``find_file``) and a missing file are
+    both refused here, so every in-place writer reports them with the same words.
+    """
+    try:
+        session_file = find_file(session_id)
+    except FileExistsError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return None
+    if not session_file or not session_file.exists():
+        print(f"Error: Session file not found for {session_id[:8]}", file=sys.stderr)
+        return None
+    return session_file
+
+
 def _mutate_file(find_file: FindFile, session_id: str, mutate: Callable[[dict], None]) -> bool:
     """Locate the session file, apply ``mutate`` to its frontmatter, write it back.
 
@@ -50,26 +96,26 @@ def _mutate_file(find_file: FindFile, session_id: str, mutate: Callable[[dict], 
     frontmatter block, has unparseable frontmatter, or its short id is ambiguous -
     we never silently no-op.
     """
-    try:
-        session_file = find_file(session_id)
-    except FileExistsError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return False
-    if not session_file or not session_file.exists():
-        print(f"Error: Session file not found for {session_id[:8]}", file=sys.stderr)
+    session_file = locate(find_file, session_id)
+    if session_file is None:
         return False
 
-    content = session_file.read_text(encoding="utf-8")
-    try:
-        new_content = rewrite_preserved_tail(content, mutate)
-    except FrontmatterParseError as e:
-        print(f"Error: cannot parse frontmatter in {session_file.name}: {e}", file=sys.stderr)
-        return False
-    if new_content is None:
-        print(f"Error: No frontmatter block in {session_file.name}", file=sys.stderr)
-        return False
+    with locked(document_lock(session_file)):
+        # Preserve transcript characters exactly: converting CRLF would invalidate
+        # length-framed turns even though this mutation only changes frontmatter.
+        with session_file.open(encoding="utf-8", newline="") as handle:
+            content = handle.read()
+        try:
+            new_content = rewrite_preserved_tail(content, mutate)
+        except FrontmatterParseError as e:
+            print(f"Error: cannot parse frontmatter in {session_file.name}: {e}", file=sys.stderr)
+            return False
+        if new_content is None:
+            print(f"Error: No frontmatter block in {session_file.name}", file=sys.stderr)
+            return False
 
-    session_file.write_text(new_content, encoding="utf-8")
+        atomic_write(session_file, new_content)
+
     return True
 
 
@@ -126,12 +172,85 @@ def set_session_tags(find_file: FindFile, session_id: str, tags: list[str]) -> b
     return _mutate_file(find_file, session_id, mutate)
 
 
+def _bare_link(item: object) -> str:
+    """One ``links:`` entry without surrounding quotes or stray whitespace."""
+    text = str(item).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1]
+    return text.strip()
+
+
+def add_link(find_file: FindFile, session_id: str, role: str, ref: str) -> bool:
+    """Append a ``"<role> <source>:<id>"`` entry to a session's ``links:`` list.
+
+    ``role`` must be one of LINK_ROLES and ``ref`` must match ``<source>:<id>``
+    for a known source. Newlines are stripped so a link can never inject a new
+    frontmatter key. Idempotent: an entry that is already present returns True
+    without a message.
+    """
+    role = role.replace("\n", " ").strip()
+    ref = ref.replace("\n", "").replace("\r", "").strip()
+    if role not in LINK_ROLES:
+        valid = ", ".join(sorted(LINK_ROLES))
+        print(f"Error: invalid link role {role!r}. Must be one of: {valid}", file=sys.stderr)
+        return False
+    if not _LINK_REF.match(ref):
+        print(
+            f"Error: invalid link reference {ref!r}. Expected <{'|'.join(_LINK_SOURCES)}>:<id>",
+            file=sys.stderr,
+        )
+        return False
+    entry = f"{role} {ref}"
+    added = False
+
+    def mutate(fm: dict) -> None:
+        nonlocal added
+        existing = fm.get("links")
+        # A hand-edited quoted entry ("peer claude:x") parses with its quotes; compare
+        # and store the bare form so one relationship can never appear twice.
+        links = [_bare_link(item) for item in existing] if isinstance(existing, list) else []
+        if entry not in links:
+            links.append(entry)
+            added = True
+        fm["links"] = links
+
+    if not _mutate_file(find_file, session_id, mutate):
+        return False
+    if added:
+        print(f"Added link: {entry}")
+    return True
+
+
+def set_owner(find_file: FindFile, session_id: str, owner: str) -> bool:
+    """Set the owner label (``owner:`` in the preserved tail) of a session document.
+
+    Newlines are stripped and the label must match :data:`OWNER_RE`. Idempotent.
+    """
+    owner = owner.replace("\n", "").replace("\r", "").strip()
+    if not valid_owner(owner):
+        print(f"Error: {invalid_owner_message(owner)}", file=sys.stderr)
+        return False
+
+    def mutate(fm: dict) -> None:
+        fm["owner"] = owner
+
+    return _mutate_file(find_file, session_id, mutate)
+
+
 __all__ = [
+    "LINK_ROLES",
+    "OWNER_RE",
+    "ROUTINE_OWNER_PREFIX",
     "VALID_STATUSES",
     "add_comment",
+    "add_link",
+    "invalid_owner_message",
     "invalid_status_message",
     "is_valid_status",
+    "locate",
+    "set_owner",
     "set_session_rating",
     "set_session_status",
     "set_session_tags",
+    "valid_owner",
 ]

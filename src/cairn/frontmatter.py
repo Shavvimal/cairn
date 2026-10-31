@@ -3,8 +3,9 @@
 Two halves of every exported session file are source-agnostic:
 
 1. The **preserved tail** of the frontmatter - ``status``, ``tags``, ``rating``,
-   ``comments``, ``projects`` - which is round-tripped identically across syncs
-   so user edits survive. Every adapter emits these the same way.
+   ``comments``, ``projects`` and (only when non-empty) ``links`` and ``owner`` - which is
+   round-tripped identically across syncs so user edits survive. Every adapter
+   emits these the same way.
 2. The **My Notes** block and the trailing ``## Conversation`` body.
 
 Each adapter owns only its frontmatter *head* (the per-source fields like
@@ -18,16 +19,30 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 # Fields preserved across re-syncs so manual edits survive: the tail fields are
 # re-emitted by preserved_tail(); ``title`` is preserved separately via
 # resolve_title() in each adapter's head. (Informational - not used as control flow.)
-PRESERVED_FIELDS = {"comments", "projects", "status", "tags", "rating", "title"}
+PRESERVED_FIELDS = {
+    "comments",
+    "projects",
+    "status",
+    "tags",
+    "rating",
+    "title",
+    "links",
+    "owner",
+}
 PRESERVED_SECTION = "## My Notes"
+# The decisions table: preserved like My Notes, but only directly after it.
+DECISIONS_SECTION = "## Decisions"
+# A ``(start, end)`` range of line indexes, end exclusive.
+Span = tuple[int, int]
 
 _DOCUMENT_RE = re.compile(r"\A(---\n)(.*?)(\n---\n)(.*)\Z", re.DOTALL)
-_TAIL_KEYS = ("status:", "tags:", "rating:", "comments:", "projects:")
+_TAIL_KEYS = ("status:", "tags:", "rating:", "comments:", "projects:", "links:", "owner:")
 
 
 class FrontmatterParseError(ValueError):
@@ -97,7 +112,10 @@ def parse_frontmatter(content: str) -> dict:
                 )
             if not isinstance(frontmatter.get(current_array), list):
                 frontmatter[current_array] = []
-            frontmatter[current_array].append(line[4:].strip())
+            item = line[4:].strip()
+            if len(item) >= 2 and item[0] == '"' and item[-1] == '"':
+                item = _unescape_scalar(item[1:-1])
+            frontmatter[current_array].append(item)
             continue
 
         if not line.strip():
@@ -143,15 +161,179 @@ def parse_frontmatter(content: str) -> dict:
     return frontmatter
 
 
-def extract_my_notes_section(content: str) -> str | None:
-    """Extract the '## My Notes' section from existing content."""
-    if PRESERVED_SECTION not in content:
-        return None
-    pattern = rf"({re.escape(PRESERVED_SECTION)}.*?)(?=\n## |\Z)"
-    match = re.search(pattern, content, re.DOTALL)
-    if match:
-        return match.group(1).rstrip()
-    return None
+# A frontmatter block larger than this is not something cairn ever writes; refuse
+# rather than read an arbitrarily large file looking for a closing fence.
+MAX_FRONTMATTER_BYTES = 4 * 1024 * 1024
+
+
+def read_frontmatter_head(path: Path, limit: int = MAX_FRONTMATTER_BYTES) -> dict:
+    """Parse a file's frontmatter by reading only up to its closing fence.
+
+    Behaves like ``parse_frontmatter(path.read_text())`` for every file cairn
+    writes, without reading the (often multi-megabyte) body. A file without an
+    opening fence yields ``{}``; a block that exceeds ``limit`` raises
+    :class:`FrontmatterParseError` instead of scanning the whole file.
+    """
+    with path.open(encoding="utf-8") as handle:
+        first = handle.readline()
+        if first != "---\n":
+            return {}
+        parts = [first]
+        total = len(first)
+        for line in handle:
+            parts.append(line)
+            total += len(line)
+            if line == "---\n":
+                break
+            if total > limit:
+                raise FrontmatterParseError(f"frontmatter block exceeds {limit} bytes")
+    return parse_frontmatter("".join(parts))
+
+
+def extract_my_notes_section(
+    content: str, *, conversation_heading: str | None = "## Conversation"
+) -> str | None:
+    """Extract the '## My Notes' section from existing content.
+
+    A ``## `` heading inside a fenced code block does not end the section. A fence
+    left open to the end of the file is treated as plain text instead: otherwise
+    the section would swallow the conversation that follows it, and every export
+    would append one more copy of that conversation to the file.
+
+    Chat sources stop before their conversation so transcript text cannot become
+    annotations. Meetings pass ``None``: their native notes and summaries precede
+    My Notes and may legitimately contain any heading, including Conversation.
+    """
+    lines = content.splitlines()
+    notes, _decisions = scan_annotations(lines, conversation_heading=conversation_heading)
+    return _section_text(lines, notes)
+
+
+def extract_annotations(
+    content: str, *, conversation_heading: str | None = "## Conversation"
+) -> str | None:
+    """The preserved annotation block: My Notes, then ``## Decisions`` when it follows.
+
+    Each part is right-stripped and the two are joined by one blank line, so a
+    document rendered from this value (through :func:`notes_block`) gives the same
+    value again. Without a Decisions section the result equals
+    :func:`extract_my_notes_section`.
+    """
+    lines = content.splitlines()
+    notes, decisions = scan_annotations(lines, conversation_heading=conversation_heading)
+    text = _section_text(lines, notes)
+    if text is None or decisions is None:
+        return text
+    return f"{text}\n\n{_section_text(lines, decisions)}"
+
+
+def _section_text(lines: list[str], span: Span | None) -> str | None:
+    return "\n".join(lines[span[0] : span[1]]).rstrip() if span is not None else None
+
+
+def scan_annotations(
+    lines: list[str], *, conversation_heading: str | None = "## Conversation"
+) -> tuple[Span | None, Span | None]:
+    """The ``(start, end)`` line ranges of My Notes and of the Decisions section.
+
+    ``lines`` may carry their line endings (``splitlines(keepends=True)``) or not.
+    My Notes runs from its heading to the next ``## `` line outside a fence. A
+    Decisions section counts only when its heading is the line where My Notes ends,
+    so a ``## Decisions`` line in a summary, in meeting notes or in a conversation is
+    never captured. It runs to the next ``## `` line outside a fence, or to the end.
+    Each scan falls back to a scan without fences when a fence is left open.
+    """
+    bare = [_bare_line(line) for line in lines]
+    notes = _scan_my_notes(bare, track_fences=True, conversation_heading=conversation_heading)
+    if notes == "unclosed":
+        notes = _scan_my_notes(bare, track_fences=False, conversation_heading=conversation_heading)
+    if not isinstance(notes, tuple):
+        return None, None
+    end = notes[1]
+    if end >= len(bare) or bare[end] != DECISIONS_SECTION:
+        return notes, None
+    decisions_end = _section_end(bare, end + 1, track_fences=True, anchor=conversation_heading)
+    if decisions_end is None:
+        decisions_end = _section_end(bare, end + 1, track_fences=False)
+    assert decisions_end is not None  # the scan without fences always ends
+    return notes, (end, decisions_end)
+
+
+_TURN_MARKER = "<!-- cairn:turn "
+_LINE_BREAKS = "\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def _bare_line(line: str) -> str:
+    """``line`` without the line break that ``splitlines(keepends=True)`` kept."""
+    return line.rstrip(_LINE_BREAKS)
+
+
+def _fence_token(line: str) -> str | None:
+    match = re.match(r"(`{3,}|~{3,})", line.lstrip())
+    return match[1] if match else None
+
+
+def _scan_my_notes(
+    lines: list[str], *, track_fences: bool, conversation_heading: str | None
+) -> Span | str | None:
+    """My Notes as a line range, ``None`` when absent, or ``"unclosed"`` (fence open)."""
+    start = None
+    fence = None
+    for index, line in enumerate(lines):
+        if track_fences:
+            token = _fence_token(line)
+            if token:
+                if fence is None:
+                    fence = token
+                elif token[0] == fence[0] and len(token) >= len(fence):
+                    fence = None
+                continue
+            if fence is not None:
+                continue
+        if start is None:
+            if line == conversation_heading:
+                return None
+            if line == PRESERVED_SECTION:
+                start = index
+        elif line.startswith("## "):
+            return start, index
+    if start is not None and fence is not None:
+        return "unclosed"
+    return (start, len(lines)) if start is not None else None
+
+
+def _section_end(
+    lines: list[str], begin: int, *, track_fences: bool, anchor: str | None = None
+) -> int | None:
+    """The index of the next ``## `` line at or after ``begin`` outside a fence, the
+    line count at the end, or ``None`` when a fence is left open to the end.
+
+    An ``anchor`` heading followed by a blank line and a turn marker (the frame anchor)
+    ends the section even inside a fence, so a fence left open in the section cannot
+    pair with the conversation's fences and pull the conversation in."""
+    fence = None
+    for index in range(begin, len(lines)):
+        line = lines[index]
+        if anchor is not None and line == anchor and _turn_follows(lines, index):
+            return index
+        if track_fences:
+            token = _fence_token(line)
+            if token:
+                if fence is None:
+                    fence = token
+                elif token[0] == fence[0] and len(token) >= len(fence):
+                    fence = None
+                continue
+            if fence is not None:
+                continue
+        if line.startswith("## "):
+            return index
+    return None if fence is not None else len(lines)
+
+
+def _turn_follows(lines: list[str], index: int) -> bool:
+    following = lines[index + 1 : index + 3]
+    return len(following) == 2 and following[0] == "" and following[1].startswith(_TURN_MARKER)
 
 
 def resolve_title(
@@ -168,9 +350,11 @@ def title_line(title: str) -> str:
     """The ``title: "..."`` frontmatter line, with quotes and backslashes escaped.
 
     Symmetric with :func:`parse_frontmatter`'s unescaping, so titles round-trip
-    instead of accumulating backslashes on every sync.
+    instead of accumulating backslashes on every sync. Line breaks are flattened to
+    spaces: a title is one frontmatter line, whatever the source put in it.
     """
-    return f'title: "{_escape_scalar(title)}"'
+    flat = " ".join(title.split())  # any line break or whitespace run becomes one space
+    return f'title: "{_escape_scalar(flat)}"'
 
 
 def head_open(session_type: str, date: str, id_field: str, id_value: str) -> list[str]:
@@ -196,11 +380,22 @@ def head_close(last_activity: str | None, message_count: int | None = None) -> l
     return lines
 
 
+def _list_item(value: object) -> str:
+    """A block-list item as written: bare, unless it starts with a quote, in which case
+    it is quoted and escaped so that :func:`parse_frontmatter` reads it back unchanged."""
+    text = str(value)
+    return f'"{_escape_scalar(text)}"' if text.startswith('"') else text
+
+
 def preserved_tail(existing_fm: dict | None, default_status: str = "active") -> list[str]:
     """The identical frontmatter tail every source emits.
 
-    Order: status, tags, rating, comments, projects. Values come from the
-    existing file's frontmatter (round-tripped) so manual edits survive a sync.
+    Order: status, tags, rating, comments, projects, then ``links`` (a block list
+    of ``"<role> <source>:<id>"`` entries) only when non-empty, so a document
+    without links stays byte-identical to a pre-links export, then ``owner`` (the
+    owner label a ``cairn invoke --owner`` round set) only when non-empty, with the
+    same guarantee. Values come from the existing file's frontmatter (round-tripped)
+    so manual edits survive a sync.
     """
     lines = []
 
@@ -211,7 +406,7 @@ def preserved_tail(existing_fm: dict | None, default_status: str = "active") -> 
     if isinstance(tags, list) and tags:
         lines.append("tags:")
         for tag in tags:
-            lines.append(f"  - {tag}")
+            lines.append(f"  - {_list_item(tag)}")
     else:
         lines.append("tags: []")
 
@@ -233,9 +428,19 @@ def preserved_tail(existing_fm: dict | None, default_status: str = "active") -> 
     if isinstance(projects, list) and projects:
         lines.append("projects:")
         for proj in projects:
-            lines.append(f"  - {proj}")
+            lines.append(f"  - {_list_item(proj)}")
     else:
         lines.append("projects: []")
+
+    links = existing_fm.get("links") if existing_fm else None
+    if isinstance(links, list) and links:
+        lines.append("links:")
+        for link in links:
+            lines.append(f"  - {link}")
+
+    owner = existing_fm.get("owner") if existing_fm else None
+    if isinstance(owner, str) and owner.strip() and owner != "null":
+        lines.append(f"owner: {owner.strip()}")
 
     return lines
 
@@ -281,9 +486,11 @@ def notes_block(my_notes: str | None, preserved_note: str = "syncs") -> list[str
 
 
 __all__ = [
+    "DECISIONS_SECTION",
     "PRESERVED_FIELDS",
     "PRESERVED_SECTION",
     "FrontmatterParseError",
+    "extract_annotations",
     "extract_my_notes_section",
     "head_close",
     "head_open",
@@ -292,5 +499,6 @@ __all__ = [
     "preserved_tail",
     "resolve_title",
     "rewrite_preserved_tail",
+    "scan_annotations",
     "title_line",
 ]

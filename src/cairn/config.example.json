@@ -6,8 +6,37 @@
   "qmd_binary": "qmd",
   "//cron": "Optional. Schedule for 'cairn sync --cron' as a standard 5-field crontab expression. Defaults to '7 * * * *' (hourly at minute 7) when omitted.",
   "cron": { "schedule": "7 * * * *" },
-  "//collections": "Each key is BOTH the QMD collection name AND the output subdirectory under data_root.",
-  "//sync": "Per-collection sync policy (config-as-data). 'enabled' is the integration on/off switch the engine reads - disabled sources are skipped by 'cairn sync'. 'since' is the export window (today|yesterday|Nd|Nw|YYYY-MM-DD). 'on_hook' runs the source on the fast SessionEnd hook (default: Claude only). Omitting the whole block means enabled with a 1d window.",
+  "//invoke": "Optional. Defaults for 'cairn invoke <peer>' (codex, claude or antigravity run headlessly from either host). model/effort null = let the peer CLI choose. profile: review (read-only) | edit (workspace writes) | full (no sandbox). Timeouts in seconds: timeout_s is the wall clock, idle_timeout_s kills a run with no activity, quiet_after_s/stall_after_s drive the activity labels in 'cairn invoke status'.",
+  "invoke": {
+    "codex": { "model": "gpt-6-astra", "effort": "high", "profile": "review", "timeout_s": 1800, "idle_timeout_s": 900, "quiet_after_s": 120, "stall_after_s": 600 },
+    "claude": {
+      "model": null, "effort": null, "profile": "review", "timeout_s": 1800, "idle_timeout_s": 900, "quiet_after_s": 120, "stall_after_s": 600,
+      "profiles": { "scheduled": { "base": "edit", "extra_args": ["--permission-mode", "dontAsk", "--allowedTools", "Read,Glob,Grep,Edit,Write,Bash(cairn recall verify *)", "--add-dir", "{{JOURNAL_DIR}}"] } }
+    },
+    "antigravity": { "model": null, "effort": null, "profile": "review", "timeout_s": 1800, "idle_timeout_s": 900, "quiet_after_s": 120, "stall_after_s": 600, "billing": { "route": "inherit", "project": null, "location": null } }
+  },
+  "//invoke.profiles": "Optional, claude and codex only: named permission profiles. Each takes a built-in 'base' (review | edit | full) plus 'extra_args', a native argv list emitted after the base's flags. A profile cannot drop its base's deny rules or switch to a looser permission mode. Claude Bash rules 'Bash(git push *)' and 'Bash(git push:*)' are the same trailing wildcard; --settings, --mcp-config and --permission-prompt-tool need base full. Codex extra_args take only '--add-dir DIR' and '-c KEY=VALUE' pairs. {{NAME}} tokens are rendered by 'cairn routine run' only. 'invoke.<peer>.profile' and 'cairn invoke --profile' accept these names.",
+  "//invoke.antigravity.billing": "Optional, antigravity only: which credits a headless agy run bills. route: inherit (the host shell's environment decides, the default) | plan (consumer plan quota: AGY_ADC_AUTH is stripped) | gcp (Vertex AI through Application Default Credentials, billed to the GCP quota project; the run is refused before anything is spawned unless the ADC file and a quota project exist, and the route agy took is read back from its log). project/location export GOOGLE_CLOUD_QUOTA_PROJECT / GOOGLE_CLOUD_LOCATION when set; null leaves the ADC file's quota_project_id and agy's default location. `cairn invoke antigravity --billing ROUTE` overrides the route for one round.",
+  "//routines": "Optional. Scheduled peer runs: 'cairn routine install NAME' adds a launchd job (macOS) that runs 'cairn routine run NAME' daily at 'at' (local time). Each run handles every UTC day in the last catch_up_days without a done stamp: refresh sources, render prompt_file, run prepare, invoke the peer, run validate. Exit 0 from validate marks the day done, 3 marks it done and empty, anything else failed. Template variables: {{DAY}}, {{DATA_ROOT}}, {{ATTEMPT_DIR}}, {{DIGEST_DIR}}, and one {{UPPER_KEY}} per outputs key. The example below runs nothing until it is installed, and its prompt_file is a placeholder. Its prepare writes the day's digest into {{DIGEST_DIR}} (sessions a routine owns are left out); its validate runs 'cairn recall verify', which exits 4 when a [SOURCE:ID fN] citation or a quote in {{JOURNAL_DIR}}/{{DAY}}.md does not match the digest, so the day fails and is retried. The prompt must tell the peer to write that path and cite frames in that form.",
+  "//routines.terminal_hook": "Optional, default null. An argv list whose first element is an absolute path (~ expands). It runs once each time a day's done or failed stamp is written, with a 10 s timeout, the day's report row as one JSON line on stdin and CAIRN_ROUTINE, CAIRN_ROUTINE_DAY, CAIRN_ROUTINE_OUTCOME, CAIRN_ROUTINE_REASON, CAIRN_ROUTINE_ATTEMPT, CAIRN_ROUTINE_ATTEMPT_DIR and CAIRN_ROUTINE_RUN_ID in its environment. No template variables. Its exit is logged and never changes a stamp or the run exit.",
+  "//routines.stale_sources": "Optional, default warn. warn, refuse or ignore: what a run does when a digest source outside its sources was last exported more than 24 h ago. refuse fails the days with stale-source, which costs no attempt. 'cairn routine run --stale-sources MODE' overrides it for one run.",
+  "routines": {
+    "example-daily": {
+      "peer": "claude",
+      "prompt_file": "~/projects/site/prompts/daily.md",
+      "cd": "~/projects/site",
+      "profile": "scheduled",
+      "at": "05:20",
+      "sources": ["claude", "codex"],
+      "outputs": { "journal_dir": "{{DATA_ROOT}}/journal" },
+      "prepare": ["cairn", "recall", "digest", "{{DAY}}", "--all-projects", "--json", "--out", "{{DIGEST_DIR}}"],
+      "validate": ["cairn", "recall", "verify", "{{JOURNAL_DIR}}/{{DAY}}.md", "--digest", "{{DIGEST_DIR}}"]
+    }
+  },
+  "//collections": "Each key is BOTH the QMD collection name AND the output subdirectory under data_root. antigravity-sessions.store is the agy app-data directory (the CLI's ~/.gemini/antigravity-cli; the IDE and the Antigravity 2.0 app use ~/.gemini/antigravity-ide and ~/.gemini/antigravity with the same layout).",
+  "//sync": "Per-collection sync policy (config-as-data). 'enabled' is the integration on/off switch the engine reads - disabled sources are skipped by 'cairn sync'. 'since' is the export window (today|yesterday|Nd|Nw|YYYY-MM-DD). 'on_hook': false opts out of the originating host's SessionEnd sync (otherwise enabled). Legacy 'sync --hook' still defaults to Claude. Omitting the whole block means enabled with a 1d window.",
+  "//journal": "Optional. Markdown a routine writes under <data_root>/journal (see 'routines'). A store-less collection: nothing is exported into it. 'cairn sync' only registers and indexes it once it holds markdown.",
+  "//decisions": "Optional. Project decisions documents that 'cairn claude memory import' writes under <data_root>/decisions, one per project, for Claude Code auto-memory notes whose session was not exported. Store-less, like journal: without this key 'recall decisions' still lists the rows, but QMD does not index them.",
   "collections": {
     "claude-code-sessions": {
       "store": "~/.claude/projects",
@@ -15,6 +44,10 @@
     },
     "codex-sessions": {
       "store": "~/.codex/sessions",
+      "sync": { "enabled": true, "since": "1d" }
+    },
+    "antigravity-sessions": {
+      "store": "~/.gemini/antigravity-cli",
       "sync": { "enabled": true, "since": "1d" }
     },
     "cursor-sessions": {
@@ -38,7 +71,9 @@
         }
       },
       "sync": { "enabled": true }
-    }
+    },
+    "journal": { "sync": { "enabled": true } },
+    "decisions": { "sync": { "enabled": true } }
   },
   "//path_resolution": "Optional. Used to map agent project dirs to project/repo names. home_slug_prefixes is derived from your home dir if omitted.",
   "path_resolution": {

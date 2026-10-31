@@ -1,0 +1,20 @@
+{
+  "fixture_id": "codex/child",
+  "source": "codex",
+  "spec_target": "2026-10-30",
+  "expected_roles": [
+    "assistant",
+    "assistant"
+  ],
+  "expected_messages": [
+    {
+      "role": "assistant",
+      "text_contains": "shell"
+    },
+    {
+      "role": "assistant",
+      "text_contains": "holds retry.py only"
+    }
+  ],
+  "expected_finding": null
+}

@@ -7,7 +7,7 @@ in two parent parsers so they are declared once and attached everywhere:
 * ``window`` - ``--since`` / ``--all`` (the time filter for ``export``).
 
 Verbs are stable across sources: ``export``, ``list``, ``context``, ``note``,
-``close``, ``log``, plus any source-specific extras (Claude adds ``sync`` / ``resume``).
+``close``, ``log``, ``decide``, ``supersede``, ``forget``, plus any source-specific extras (Claude adds ``sync`` / ``resume``).
 The source supplies only its native ``run_export`` driver and, optionally, extra
 positionals on ``export`` (via :meth:`ConversationSource.extend_export_parser`).
 """
@@ -15,8 +15,11 @@ positionals on ``export`` (via :meth:`ConversationSource.extend_export_parser`).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import sys
 
+from . import export_receipt
 from .sources.base import ConversationSource
 from .timeutil import parse_since
 
@@ -54,13 +57,15 @@ def _window_parent() -> argparse.ArgumentParser:
     return p
 
 
-def build_parser(source: ConversationSource) -> argparse.ArgumentParser:
+def build_parser(source: ConversationSource, prog: str | None = None) -> argparse.ArgumentParser:
     common = _common_parent()
     window = _window_parent()
 
-    # prog is left to argparse: invoked via the dispatcher, sys.argv[0] is already
-    # "cairn <source>", so usage/help read naturally without hardcoding a name.
+    # prog defaults to argparse's: invoked via the dispatcher, sys.argv[0] is already
+    # "cairn <source>", so usage/help read naturally without hardcoding a name. A
+    # caller that builds the parser outside a run (a test) passes it explicitly.
     parser = argparse.ArgumentParser(
+        prog=prog,
         description=f"Export and annotate {source.name} to markdown.",
         formatter_class=_HelpFormatter,
     )
@@ -114,10 +119,89 @@ def build_parser(source: ConversationSource) -> argparse.ArgumentParser:
     p_log.add_argument("--session-id", help="target item id (defaults to the current one)")
     p_log.set_defaults(func=source.cmd_log)
 
+    # decide / supersede / forget - rows of the ## Decisions table in the document body
+    _add_decision_parsers(sub, common, source)
+
     # source-specific extras (e.g. Claude sync / resume) share the common flags too
     source.add_extra_parsers(sub, common)
 
     return parser
+
+
+def _run_export(source: ConversationSource, args: argparse.Namespace) -> int:
+    """Run ``export`` / ``sync``: exit 1 on an error finding, one JSON object for ``--json``.
+
+    With ``export --json`` every human line goes to stderr and stdout carries only
+    the run's report (documents written, drift findings, the spec target).
+    """
+    as_json = args.command == "export" and bool(getattr(args, "json", False))
+    if as_json:
+        args.quiet = True
+    with contextlib.redirect_stdout(sys.stderr) if as_json else contextlib.nullcontext():
+        result = args.func(args)
+    if source.report.errors:
+        result = result or 1
+    if as_json:
+        report = source.report.as_dict(
+            source.source_name, result, source.version, source.spec_target
+        )
+        print(json.dumps(report, indent=2))
+    return result
+
+
+def _add_decision_parsers(sub, common: argparse.ArgumentParser, source: ConversationSource) -> None:
+    from .decisions import CONFIDENCES, DEFAULT_CONFIDENCE, KINDS
+
+    p_decide = sub.add_parser(
+        "decide", parents=[common], help="add a row to the ## Decisions table"
+    )
+    p_decide.add_argument("claim", nargs="+", help="the claim (one line, at most 500 characters)")
+    p_supersede = sub.add_parser(
+        "supersede", parents=[common], help="strike row N of ## Decisions and add its replacement"
+    )
+    p_supersede.add_argument("number", type=int, metavar="N", help="the row to strike")
+    p_supersede.add_argument("claim", nargs="+", help="the replacement claim")
+    for parser, kind_help in (
+        (p_decide, "kind of claim (default: decision)"),
+        (p_supersede, "kind of the new row (default: the kind of row N)"),
+    ):
+        parser.add_argument("--kind", choices=KINDS, help=kind_help)
+        parser.add_argument(
+            "--confidence",
+            choices=CONFIDENCES,
+            default=DEFAULT_CONFIDENCE,
+            help=f"confidence (default: {DEFAULT_CONFIDENCE})",
+        )
+        parser.add_argument(
+            "--revisit-by", default="", metavar="YYYY-MM-DD", help="date to review the row"
+        )
+        parser.add_argument(
+            "--source",
+            default="",
+            metavar="CITE",
+            help="frame citations like '[claude:3f2a9c1e f12]', separated by spaces",
+        )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="add the claim even if it was withdrawn with forget (recorded as unwithdrawn)",
+        )
+        parser.add_argument("--session-id", help="target item id (defaults to the current one)")
+        parser.set_defaults(func=source.cmd_decide)
+
+    from .withdrawals import REASONS
+
+    p_forget = sub.add_parser(
+        "forget",
+        parents=[common],
+        help="withdraw row N of ## Decisions: strike it and record its fingerprint",
+    )
+    p_forget.add_argument("number", type=int, metavar="N", help="the row to withdraw")
+    p_forget.add_argument(
+        "--reason", required=True, choices=REASONS, help="why the claim is withdrawn"
+    )
+    p_forget.add_argument("--session-id", help="target item id (defaults to the current one)")
+    p_forget.set_defaults(func=source.cmd_forget)
 
 
 def run(source: ConversationSource, argv: list[str] | None = None) -> None:
@@ -128,7 +212,24 @@ def run(source: ConversationSource, argv: list[str] | None = None) -> None:
     """
     parser = build_parser(source)
     args = parser.parse_args(argv)
-    sys.exit(args.func(args))
+    if args.command in ("export", "sync"):
+        from .storage import lock_path, locked
+
+        with locked(lock_path(source.output_dir, "operation")):
+            try:
+                result = _run_export(source, args)
+                if args.command == "export" and not getattr(args, "file", None):
+                    export_receipt.record(source, args.command, result)  # collection-wide only
+            finally:
+                # Persist the catalog before the lock is released so the next
+                # reader sees this run's write-through entries.
+                source.flush_catalog()
+        sys.exit(result)
+    try:
+        result = args.func(args)
+    finally:
+        source.flush_catalog()
+    sys.exit(result)
 
 
 __all__ = ["build_parser", "run"]

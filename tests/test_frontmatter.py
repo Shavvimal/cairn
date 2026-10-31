@@ -15,6 +15,7 @@ from cairn.frontmatter import (
     parse_frontmatter,
     preserved_tail,
     rewrite_preserved_tail,
+    scan_annotations,
     title_line,
 )
 
@@ -121,6 +122,30 @@ class MutationScoping(unittest.TestCase):
     def test_no_frontmatter_returns_none(self):
         self.assertIsNone(rewrite_preserved_tail("no frontmatter here", lambda fm: None))
 
+    def test_provenance_survives_tail_mutations(self):
+        # The provenance key sits in the head, directly before status: every tail
+        # mutation keeps the head, so the key survives byte for byte.
+        doc = CANONICAL.replace("\nstatus: active", "\nprovenance: tool\nstatus: active", 1)
+        head = doc.split("\nstatus:", 1)[0]
+        mutations: tuple[tuple[str, object], ...] = (
+            ("status", "done"),
+            ("tags", ["widget"]),
+            ("rating", 7),
+            ("comments", "a note"),
+            ("owner", "routine:example-daily"),
+            ("links", ["parent claude:abc12345-feed-0000-0000-000000000000"]),
+        )
+        for key, value in mutations:
+            with self.subTest(key=key):
+
+                def mutate(fm: dict, k: str = key, v: object = value) -> None:
+                    fm[k] = v
+
+                out = rewrite_preserved_tail(doc, mutate)
+                assert out is not None
+                self.assertTrue(out.startswith(head + "\nstatus:"))
+                self.assertEqual(parse_frontmatter(out)["provenance"], "tool")
+
 
 class ParserHardening(unittest.TestCase):
     """The hardened parser fails loudly on YAML it can't faithfully round-trip,
@@ -203,3 +228,72 @@ class HeadHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTitleLineFlattening(unittest.TestCase):
+    def test_line_breaks_become_spaces(self):
+        from cairn.frontmatter import parse_frontmatter, title_line
+
+        line = title_line("First line\nSecond line\r\nThird")
+        self.assertEqual(line, 'title: "First line Second line Third"')
+        self.assertEqual(
+            parse_frontmatter(f"---\n{line}\n---\n")["title"], "First line Second line Third"
+        )
+
+
+class TestQuotedLinkDedupe(unittest.TestCase):
+    def test_hand_quoted_link_is_not_duplicated(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from cairn.mutations import add_link
+
+        # add_link takes a document lock under $HOME; keep it in the temp dir.
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"HOME": str(Path(tmp) / "home")}),
+        ):
+            doc = Path(tmp) / "s.md"
+            doc.write_text(
+                "---\ntype: codex-session\nsession_id: abc\nstatus: active\ntags: []\n"
+                'rating: null\ncomments: ""\nprojects: []\nlinks:\n  - "peer claude:x"\n---\n'
+            )
+            self.assertTrue(add_link(lambda _sid: doc, "abc", "peer", "claude:x"))
+            text = doc.read_text()
+            self.assertEqual(text.count("peer claude:x"), 1)
+            self.assertNotIn('"peer claude:x"', text)
+
+
+class TestQuotedListItems(unittest.TestCase):
+    def test_quoted_list_item_round_trips(self):
+        from cairn.frontmatter import parse_frontmatter
+
+        text = '---\nartifacts:\n  - "dir/a \\"b\\": c.md"\n  - plain.md\n---\nbody\n'
+        parsed = parse_frontmatter(text)
+        self.assertEqual(parsed["artifacts"], ['dir/a "b": c.md', "plain.md"])
+        from cairn.frontmatter import preserved_tail
+
+        quoted = (
+            '---\nstatus: active\ntags:\n  - "\\"q\\""\n  - a b\nprojects:\n  - "\\"p\\""\n---\nx\n'
+        )
+        fm = parse_frontmatter(quoted)
+        self.assertEqual(fm["tags"], ['"q"', "a b"])
+        again = parse_frontmatter("---\n" + "\n".join(preserved_tail(fm)) + "\n---\nx\n")
+        self.assertEqual(again["tags"], ['"q"', "a b"])
+        self.assertEqual(again["projects"], ['"p"'])
+
+
+class TestScanAnnotations(unittest.TestCase):
+    def test_scan_annotations_unclosed_fence_fallback(self):
+        notes = "## My Notes\n\n```md\n## Not a heading\n```\nmine\n\n"
+        table = "## Decisions\n\n| # | claim |\n```python\n| left open\n"
+        body = "## Conversation\n\n<!-- cairn:turn 9 -->\n### User\nhi\n"
+        lines = (notes + table + body).splitlines()
+        # The fence in My Notes is closed, so its heading stays inside My Notes; the
+        # fence in Decisions is not, so that section falls back to ending at the
+        # next heading instead of swallowing the conversation.
+        self.assertEqual(scan_annotations(lines), ((0, 7), (7, 12)))
+        self.assertEqual(lines[12], "## Conversation")
+        self.assertEqual(scan_annotations(lines, conversation_heading=None), ((0, 7), (7, 12)))

@@ -1,0 +1,8 @@
+{"intent": "install cairn on this machine", "expected": "setup"}
+{"intent": "set up cairn for me", "expected": "setup"}
+{"intent": "update cairn to the latest version", "expected": "setup"}
+{"intent": "onboard me to cairn", "expected": "setup"}
+{"intent": "reinstall the cairn engine and the hourly sync", "expected": "setup"}
+{"intent": "wire up the cairn hooks and check qmd works", "expected": "setup"}
+{"intent": "upgrade the cairn plugin and keep my config", "expected": "setup"}
+{"intent": "I just cloned cairn, get it working", "expected": "setup"}

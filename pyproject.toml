@@ -48,7 +48,12 @@ known-first-party = ["cairn"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["src", "tests"]
+files = [
+    "src",
+    "tests",
+    "scripts/check-test-discriminates.py",
+    ".agents/skills/skill-review/scripts/measure.py",
+]
 check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true

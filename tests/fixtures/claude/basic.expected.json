@@ -1,0 +1,35 @@
+{
+  "fixture_id": "claude/basic",
+  "source": "claude",
+  "spec_target": "2026-10-30",
+  "expected_roles": [
+    "user",
+    "assistant",
+    "assistant",
+    "user",
+    "assistant"
+  ],
+  "expected_messages": [
+    {
+      "role": "user",
+      "text_contains": "Investigate the widget timeout"
+    },
+    {
+      "role": "assistant",
+      "text_contains": "read the retry loop"
+    },
+    {
+      "role": "assistant",
+      "text_contains": "off-by-one"
+    },
+    {
+      "role": "user",
+      "text_contains": "regression test"
+    },
+    {
+      "role": "assistant",
+      "text_contains": "test_retry_count"
+    }
+  ],
+  "expected_finding": null
+}

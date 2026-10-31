@@ -1,7 +1,8 @@
 # Granola Meetings
 
 Export Granola AI meeting notes (summaries + transcripts) to markdown. Shared verbs
-(`export`, `list`, `context`, `note`, `close`, `log`) work as documented in `../SKILL.md`.
+(`export`, `list`, `context`, `note`, `close`, `log`, `decide`, `supersede`, `forget`) work
+as documented in `../SKILL.md`.
 Windowed - `export` defaults to the last 24h; use `--since` / `--all`.
 
 ## Data source (dual)
@@ -38,6 +39,8 @@ Each meeting file includes (when available):
 - **## Summary** - AI-generated summary (ProseMirror JSON panels → clean markdown)
 - **## Notes** - user-written notes from Granola
 - **## My Notes** - preserved across re-exports (your annotations)
+- **## Decisions** - the table `cairn granola decide` writes, directly after My Notes;
+  preserved across re-exports
 - **## Transcript** - full transcript with speaker labels + timestamps. Speaker source:
   `microphone` = you (rendered **You**), `system` = others on the call
 
@@ -56,5 +59,5 @@ status: raw
 tags: []
 ```
 
-Preserved on re-export: `## My Notes` plus frontmatter `status`, `tags`, `rating`,
+Preserved on re-export: `## My Notes`, the `## Decisions` table after it, plus frontmatter `status`, `tags`, `rating`,
 `comments`, `title`, `projects`. New meetings export with `status: raw`.

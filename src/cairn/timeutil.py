@@ -55,6 +55,15 @@ def parse_since(token: str) -> float:
         ) from None
 
 
+def _utcnow() -> datetime:
+    """The current UTC time: the one clock :func:`parse_date_range` reads.
+
+    A seam for tests: patching ``cairn.timeutil._utcnow`` pins every relative recall
+    expression (``yesterday``, ``last week``) to a fixed anchor.
+    """
+    return datetime.now(UTC)
+
+
 def parse_date_range(expr: str) -> tuple[datetime, datetime]:
     """Parse a recall date expression into a ``(start, end)`` UTC day-boundary range.
 
@@ -65,7 +74,7 @@ def parse_date_range(expr: str) -> tuple[datetime, datetime]:
     on anything else so the caller fails loudly instead of recalling the wrong window.
     """
     key = expr.strip().lower()
-    now = datetime.now(UTC)
+    now = _utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     if key == "today":

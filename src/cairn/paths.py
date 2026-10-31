@@ -26,22 +26,32 @@ def get_output_path(
     return output_dir / f"{date}-{short_id}.md"
 
 
-def find_session_file(output_dir: Path, short_id: str) -> Path | None:
-    """Find an existing markdown file for a session (searches all subfolders).
-
-    Returns ``None`` if nothing matches. Raises :class:`FileExistsError` if more
-    than one file matches the short id - picking an arbitrary one could mutate the
-    wrong session, so an ambiguous id must be resolved explicitly by the caller.
-    """
-    matches = sorted(output_dir.rglob(f"*-{short_id}.md"))
-    if not matches:
-        return None
-    if len(matches) > 1:
-        listed = ", ".join(str(m) for m in matches)
-        raise FileExistsError(
-            f"Ambiguous short id {short_id!r} matches {len(matches)} files: {listed}"
-        )
-    return matches[0]
+def session_dir(
+    output_dir: Path,
+    short_id: str,
+    date: str,
+    project: str | None = None,
+    repo_subdir: str | None = None,
+) -> Path:
+    """Folder holding everything one session spawned (subagent transcripts, peer
+    exchanges): the session document's path without its ``.md`` suffix."""
+    return get_output_path(output_dir, short_id, date, project, repo_subdir).with_suffix("")
 
 
-__all__ = ["find_session_file", "get_output_path"]
+def session_dir_of(document: Path) -> Path:
+    """The same folder derived from an already-resolved session document, so a
+    collision-suffixed or legacy-located parent keeps its children beside it."""
+    return document.with_suffix("")
+
+
+def subagent_path(session_folder: Path, agent_short: str) -> Path:
+    """Child document for one subagent transcript inside a session folder."""
+    return session_folder / f"agent-{agent_short}.md"
+
+
+def exchange_path(session_folder: Path, peer: str, thread_short: str) -> Path:
+    """Exchange document for one peer thread inside a session folder."""
+    return session_folder / f"exchange-{peer}-{thread_short}.md"
+
+
+__all__ = ["exchange_path", "get_output_path", "session_dir", "session_dir_of", "subagent_path"]

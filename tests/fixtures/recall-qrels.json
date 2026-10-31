@@ -1,0 +1,454 @@
+{
+  "schema_version": 1,
+  "anchor_now": "2026-03-16T10:00:00Z",
+  "k": 5,
+  "queries": [
+    {
+      "id": "t01",
+      "family": "temporal",
+      "query": "2026-03-02",
+      "args": [
+        "--all-projects"
+      ],
+      "relevant": [
+        "claude-code-sessions/harbour/api/2026-03-02-c1000001.md",
+        "codex-sessions/harbour/api/2026-03-02-0195a001b000.md",
+        "cursor-sessions/harbour/web/2026-03-02-u1000001.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-02-c1000001.md",
+      "note": "three sources on one day, sorted by started_at"
+    },
+    {
+      "id": "t02",
+      "family": "temporal",
+      "query": "yesterday",
+      "args": [
+        "--all-projects"
+      ],
+      "relevant": [
+        "claude-code-sessions/harbour/api/2026-03-15-c1000013.md",
+        "codex-sessions/lantern/2026-03-15-0195a010b000.md",
+        "cursor-sessions/harbour/web/2026-03-15-u1000008.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-15-c1000013.md",
+      "note": "yesterday is the UTC day before the anchor; the exchange document is not a session"
+    },
+    {
+      "id": "t03",
+      "family": "temporal",
+      "query": "2026-03-09",
+      "args": [
+        "--all-projects"
+      ],
+      "relevant": [
+        "claude-code-sessions/harbour/api/2026-03-05-c1000004.md",
+        "cursor-sessions/harbour/web/2026-03-09-u1000005.md",
+        "codex-sessions/fieldnotes/2026-03-09-0195a006b000.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-05-c1000004.md",
+      "note": "a resumed session lists on its later day and sorts by its first start"
+    },
+    {
+      "id": "t04",
+      "family": "temporal",
+      "query": "2026-03-07",
+      "args": [
+        "--all-projects"
+      ],
+      "relevant": [
+        "codex-sessions/harbour/api/2026-03-07-0195a004b000.md"
+      ],
+      "expected_top1": "codex-sessions/harbour/api/2026-03-07-0195a004b000.md",
+      "note": "subagent K05 hidden by default"
+    },
+    {
+      "id": "t05",
+      "family": "temporal",
+      "query": "2026-03-07",
+      "args": [
+        "--all-projects",
+        "--include-subagents"
+      ],
+      "relevant": [
+        "codex-sessions/harbour/api/2026-03-07-0195a004b000.md",
+        "codex-sessions/harbour/api/2026-03-07-0195a004b000/agent-0195a005b000.md"
+      ],
+      "expected_top1": "codex-sessions/harbour/api/2026-03-07-0195a004b000.md",
+      "note": "--include-subagents lists the child after its parent"
+    },
+    {
+      "id": "t06",
+      "family": "temporal",
+      "query": "2026-03-11",
+      "args": [
+        "--all-projects"
+      ],
+      "relevant": [
+        "claude-code-sessions/harbour/api/2026-03-10-c1000008.md",
+        "codex-sessions/lantern/2026-03-11-0195a007b000.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-10-c1000008.md",
+      "note": "session crossing UTC midnight lists on both days; C09 (2 msgs) hidden by --min-msgs 3"
+    },
+    {
+      "id": "t07",
+      "family": "temporal",
+      "query": "2026-03-11",
+      "args": [
+        "--all-projects",
+        "--min-msgs",
+        "1"
+      ],
+      "relevant": [
+        "claude-code-sessions/harbour/api/2026-03-10-c1000008.md",
+        "claude-code-sessions/fieldnotes/2026-03-11-c1000009.md",
+        "codex-sessions/lantern/2026-03-11-0195a007b000.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-10-c1000008.md",
+      "note": "--min-msgs 1 shows the two-message session"
+    },
+    {
+      "id": "t08",
+      "family": "temporal",
+      "query": "2026-03-08",
+      "args": [
+        "--all-projects"
+      ],
+      "relevant": [
+        "claude-code-sessions/quarry/2026-03-04-c1000012.md",
+        "claude-code-sessions/quarry/2026-03-08-c1000007.md"
+      ],
+      "expected_top1": "claude-code-sessions/quarry/2026-03-04-c1000012.md",
+      "note": "pre-schema file matches on its endpoints and sorts by its date"
+    },
+    {
+      "id": "t09",
+      "family": "temporal",
+      "query": "2026-03-06",
+      "args": [
+        "--all-projects"
+      ],
+      "relevant": [
+        "cursor-sessions/quarry/2026-03-06-u1000004.md",
+        "claude-code-sessions/lantern/2026-03-06-c1000005.md"
+      ],
+      "expected_top1": "cursor-sessions/quarry/2026-03-06-u1000004.md",
+      "note": "subagent C06 hidden; two sources sorted by start"
+    },
+    {
+      "id": "t10",
+      "family": "temporal",
+      "query": "last week",
+      "args": [
+        "--project",
+        "harbour"
+      ],
+      "relevant": [
+        "claude-code-sessions/harbour/api/2026-03-05-c1000004.md",
+        "cursor-sessions/harbour/web/2026-03-09-u1000005.md",
+        "claude-code-sessions/harbour/api/2026-03-10-c1000008.md",
+        "claude-code-sessions/harbour/web/2026-03-12-c1000010.md",
+        "cursor-sessions/harbour/api/2026-03-14-u1000009.md",
+        "codex-sessions/harbour/web/2026-03-14-0195a009b000.md",
+        "claude-code-sessions/harbour/api/2026-03-15-c1000013.md",
+        "cursor-sessions/harbour/web/2026-03-15-u1000008.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-05-c1000004.md",
+      "note": "project label filter over a relative window (anchor Mon 03-16)"
+    },
+    {
+      "id": "t11",
+      "family": "temporal",
+      "query": "last friday",
+      "args": [
+        "--project",
+        "lantern"
+      ],
+      "relevant": [
+        "claude-code-sessions/lantern/2026-03-13-c1000011.md"
+      ],
+      "expected_top1": "claude-code-sessions/lantern/2026-03-13-c1000011.md",
+      "note": "last <weekday> from a Monday anchor is the Friday before"
+    },
+    {
+      "id": "t12",
+      "family": "temporal",
+      "query": "this week",
+      "args": [
+        "--all-projects"
+      ],
+      "relevant": [],
+      "expected_top1": null,
+      "note": "empty window returns no rows, not an error"
+    },
+    {
+      "id": "t13",
+      "family": "temporal",
+      "query": "4 days ago",
+      "args": [
+        "--project",
+        "/tmp/corpus/quarry"
+      ],
+      "relevant": [
+        "codex-sessions/quarry/2026-03-12-0195a008b000.md",
+        "cursor-sessions/quarry/2026-03-12-u1000007.md"
+      ],
+      "expected_top1": "codex-sessions/quarry/2026-03-12-0195a008b000.md",
+      "note": "project given as a working directory matches by cwd"
+    },
+    {
+      "id": "t14",
+      "family": "temporal",
+      "query": "last 3 days",
+      "args": [
+        "--project",
+        "lantern"
+      ],
+      "relevant": [
+        "claude-code-sessions/lantern/2026-03-13-c1000011.md",
+        "codex-sessions/lantern/2026-03-15-0195a010b000.md"
+      ],
+      "expected_top1": "claude-code-sessions/lantern/2026-03-13-c1000011.md",
+      "note": "last N days includes today and the N days before it"
+    },
+    {
+      "id": "t15",
+      "family": "temporal",
+      "query": "2026-03-05",
+      "args": [
+        "--all-projects",
+        "--source",
+        "codex"
+      ],
+      "relevant": [
+        "codex-sessions/quarry/2026-03-05-0195a003b000.md"
+      ],
+      "expected_top1": "codex-sessions/quarry/2026-03-05-0195a003b000.md",
+      "note": "--source keeps one source"
+    },
+    {
+      "id": "e01",
+      "family": "exact",
+      "query": "ECONNRESET",
+      "relevant": [
+        "claude-code-sessions/harbour/web/2026-03-12-c1000010.md",
+        "cursor-sessions/harbour/web/2026-03-09-u1000005.md",
+        "codex-sessions/harbour/api/2026-03-02-0195a001b000.md",
+        "claude-code-sessions/harbour/api/2026-03-02-c1000001.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/web/2026-03-12-c1000010.md",
+      "note": "error code across three sources; -i also finds the lower-case log line"
+    },
+    {
+      "id": "e02",
+      "family": "exact",
+      "query": "retry_with_backoff",
+      "relevant": [
+        "codex-sessions/harbour/api/2026-03-02-0195a001b000.md",
+        "claude-code-sessions/harbour/api/2026-03-02-c1000001.md"
+      ],
+      "expected_top1": "codex-sessions/harbour/api/2026-03-02-0195a001b000.md",
+      "note": "identifier with underscores; newest first"
+    },
+    {
+      "id": "e03",
+      "family": "exact",
+      "query": "IdempotencyKeyConflict",
+      "relevant": [
+        "codex-sessions/harbour/api/2026-03-07-0195a004b000/agent-0195a005b000.md",
+        "codex-sessions/harbour/api/2026-03-07-0195a004b000.md",
+        "claude-code-sessions/harbour/api/2026-03-03-c1000002.md"
+      ],
+      "expected_top1": "codex-sessions/harbour/api/2026-03-07-0195a004b000/agent-0195a005b000.md",
+      "note": "exception name in a subagent transcript that is newer than its parent"
+    },
+    {
+      "id": "e04",
+      "family": "exact",
+      "query": "FrontmatterParseError: unterminated block list",
+      "relevant": [
+        "claude-code-sessions/lantern/2026-03-06-c1000005.md"
+      ],
+      "expected_top1": "claude-code-sessions/lantern/2026-03-06-c1000005.md",
+      "note": "error line with a colon and spaces"
+    },
+    {
+      "id": "e05",
+      "family": "exact",
+      "query": "parse_block_list",
+      "relevant": [
+        "cursor-sessions/lantern/2026-03-10-u1000006.md",
+        "claude-code-sessions/lantern/2026-03-06-c1000005/agent-c1000006a.md",
+        "claude-code-sessions/lantern/2026-03-06-c1000005.md"
+      ],
+      "expected_top1": "cursor-sessions/lantern/2026-03-10-u1000006.md",
+      "note": "identifier in a subagent transcript is found; newest first"
+    },
+    {
+      "id": "e06",
+      "family": "exact",
+      "query": "Hydration failed because the server rendered HTML didn't match the client",
+      "relevant": [
+        "cursor-sessions/harbour/web/2026-03-04-u1000002.md",
+        "claude-code-sessions/harbour/web/2026-03-04-c1000003.md"
+      ],
+      "expected_top1": "cursor-sessions/harbour/web/2026-03-04-u1000002.md",
+      "note": "long error string with an apostrophe"
+    },
+    {
+      "id": "e07",
+      "family": "exact",
+      "query": "retry(attempt=3)",
+      "relevant": [
+        "codex-sessions/harbour/web/2026-03-14-0195a009b000.md"
+      ],
+      "expected_top1": "codex-sessions/harbour/web/2026-03-14-0195a009b000.md",
+      "note": "regex metacharacters need -F"
+    },
+    {
+      "id": "e08",
+      "family": "exact",
+      "query": "src/harbour/billing/invoice_pdf.py",
+      "relevant": [
+        "claude-code-sessions/harbour/api/2026-03-05-c1000004.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-05-c1000004.md",
+      "note": "file path with slashes and dots"
+    },
+    {
+      "id": "e09",
+      "family": "exact",
+      "query": "LedgerMismatch",
+      "relevant": [
+        "claude-code-sessions/harbour/api/2026-03-15-c1000013/exchange-codex-0195b0eee000.md",
+        "claude-code-sessions/harbour/api/2026-03-15-c1000013.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-15-c1000013/exchange-codex-0195b0eee000.md",
+      "note": "rg finds the exchange document, which recall list hides"
+    },
+    {
+      "id": "e10",
+      "family": "exact",
+      "query": "OSError: [WinError 123]",
+      "relevant": [
+        "codex-sessions/lantern/2026-03-11-0195a007b000.md"
+      ],
+      "expected_top1": "codex-sessions/lantern/2026-03-11-0195a007b000.md",
+      "note": "brackets in an error string"
+    },
+    {
+      "id": "e11",
+      "family": "exact",
+      "query": "tokenize_markdown",
+      "relevant": [
+        "cursor-sessions/quarry/2026-03-12-u1000007.md",
+        "codex-sessions/quarry/2026-03-05-0195a003b000.md"
+      ],
+      "expected_top1": "cursor-sessions/quarry/2026-03-12-u1000007.md",
+      "note": "identifier in two sources; newest first"
+    },
+    {
+      "id": "e12",
+      "family": "exact",
+      "query": "--sortr modified",
+      "relevant": [
+        "codex-sessions/quarry/2026-03-12-0195a008b000.md",
+        "claude-code-sessions/fieldnotes/2026-03-11-c1000009.md"
+      ],
+      "expected_top1": "codex-sessions/quarry/2026-03-12-0195a008b000.md",
+      "note": "a query that starts with a dash was read as an rg flag (exit 2) before -e"
+    },
+    {
+      "id": "b01",
+      "family": "title-bare",
+      "query": "Fix ECONNRESET in webhook retry loop",
+      "relevant": [
+        "claude-code-sessions/harbour/web/2026-03-12-c1000010.md",
+        "claude-code-sessions/harbour/api/2026-03-02-c1000001.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-02-c1000001.md",
+      "note": "known miss: a newer session quotes this title, and mtime order puts it first"
+    },
+    {
+      "id": "b02",
+      "family": "title-bare",
+      "query": "Add idempotency keys to payment intents",
+      "relevant": [
+        "claude-code-sessions/harbour/api/2026-03-03-c1000002.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-03-c1000002.md",
+      "note": "bare title of a Claude session"
+    },
+    {
+      "id": "b03",
+      "family": "title-bare",
+      "query": "Investigate slow invoice PDF export",
+      "relevant": [
+        "claude-code-sessions/harbour/api/2026-03-05-c1000004.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-05-c1000004.md",
+      "note": "bare title of a resumed session"
+    },
+    {
+      "id": "b04",
+      "family": "title-bare",
+      "query": "Rewrite frontmatter parser for block lists",
+      "relevant": [
+        "claude-code-sessions/lantern/2026-03-06-c1000005.md"
+      ],
+      "expected_top1": "claude-code-sessions/lantern/2026-03-06-c1000005.md",
+      "note": "bare title of a parent with a subagent"
+    },
+    {
+      "id": "b05",
+      "family": "title-bare",
+      "query": "Profile the tokenizer on large transcripts",
+      "relevant": [
+        "codex-sessions/quarry/2026-03-05-0195a003b000.md"
+      ],
+      "expected_top1": "codex-sessions/quarry/2026-03-05-0195a003b000.md",
+      "note": "bare title of a Codex session"
+    },
+    {
+      "id": "b06",
+      "family": "title-bare",
+      "query": "Debug the hydration mismatch on checkout",
+      "relevant": [
+        "cursor-sessions/harbour/web/2026-03-04-u1000002.md"
+      ],
+      "expected_top1": "cursor-sessions/harbour/web/2026-03-04-u1000002.md",
+      "note": "bare title of a Cursor session"
+    },
+    {
+      "id": "b07",
+      "family": "title-bare",
+      "query": "Plan the ledger reconciliation job",
+      "relevant": [
+        "cursor-sessions/harbour/web/2026-03-15-u1000008.md",
+        "claude-code-sessions/harbour/api/2026-03-15-c1000013.md"
+      ],
+      "expected_top1": "claude-code-sessions/harbour/api/2026-03-15-c1000013.md",
+      "note": "known miss: a newer session quotes this title, and mtime order puts it first"
+    },
+    {
+      "id": "b08",
+      "family": "title-bare",
+      "query": "Audit retry(attempt=3) call sites",
+      "relevant": [
+        "codex-sessions/harbour/web/2026-03-14-0195a009b000.md"
+      ],
+      "expected_top1": "codex-sessions/harbour/web/2026-03-14-0195a009b000.md",
+      "note": "bare title with regex metacharacters"
+    },
+    {
+      "id": "b09",
+      "family": "title-bare",
+      "query": "Explain the \"invoice PDF\" timeout",
+      "relevant": [
+        "cursor-sessions/harbour/api/2026-03-14-u1000009.md"
+      ],
+      "expected_top1": "cursor-sessions/harbour/api/2026-03-14-u1000009.md",
+      "note": "quoted title: the frontmatter escapes the quotes, the heading keeps them"
+    }
+  ]
+}

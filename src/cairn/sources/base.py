@@ -26,10 +26,17 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from .. import frontmatter as fm_mod
-from .. import listing, mutations, qmd
-from ..paths import find_session_file, get_output_path
+from .. import listing, mutations, provenance, qmd
+from ..catalog import Catalog, load_catalog
+from ..jsonl import JsonlStats
+from ..paths import get_output_path
+from ..registry import SOURCES
 from ..rendering import render_conversation, strip_lone_surrogates
 from ..schema import Message, SessionData
+from ..storage import atomic_write, document_lock, lock_path, locked
+from ..store import SessionRecord, metadata_lines, native_id_of, record_from_frontmatter
+from . import guards
+from .spec_targets import SpecTarget
 
 
 class ConversationSource(ABC):
@@ -38,18 +45,23 @@ class ConversationSource(ABC):
     version: str = "2.0.0"
     output_dir: Path = Path(".")  # collection output directory
     session_type: str = "session"  # frontmatter `type` value
+    subagent_type: str = ""  # frontmatter `type` of child (subagent) documents, if any
     collection: str = "sessions"  # QMD collection name
 
     # `list` default: "active" -> status == "active"; "not-done" -> status != "done"
     list_default: str = "active"
     # env var consulted to resolve the "current" session for mutations
-    session_env_var: str = "CLAUDE_SESSION_ID"
+    session_env_var: str = ""
     # frontmatter key holding the id (claude/codex: session_id; cursor: composer_id)
     id_field: str = "session_id"
     # default status written when no existing file (cursor overrides per-composer)
     default_status: str = "active"
     # preserved-section wording in the My Notes placeholder ("syncs" vs "exports")
     preserved_note: str = "syncs"
+    # Chat transcript boundary; meetings have native notes before My Notes instead.
+    conversation_heading: str | None = "## Conversation"
+    # The dated host version the parser's record shapes were checked against.
+    spec_target: SpecTarget | None = None
 
     # ====================================================================
     # Overridable per source
@@ -110,8 +122,225 @@ class ConversationSource(ABC):
     # Shared concrete helpers
     # ====================================================================
 
+    @property
+    def source_name(self) -> str:
+        """The registry source verb for this collection (``claude``, ``codex`` …)."""
+        return next(s.source for s in SOURCES if s.collection == self.collection)
+
+    @property
+    def session_types(self) -> tuple[str, ...]:
+        """Every document ``type`` this source owns: the session and its children.
+
+        Other documents in the same folder (peer exchanges) are excluded by type;
+        that filter is the only thing keeping them out of the session index.
+        """
+        return tuple(t for t in (self.session_type, self.subagent_type) if t)
+
+    @property
+    def catalog(self) -> Catalog:
+        """The collection's stat-validated catalog, refreshed once per process.
+
+        Export runs hold the collection's operation lock, so within one run the only
+        other writers are annotations, which :meth:`Catalog.get` re-validates per hit.
+        """
+        if self._catalog is None:
+            self._catalog = load_catalog(self.output_dir)
+        return self._catalog
+
+    _catalog: Catalog | None = None
+    _index: dict[str, list[str]] | None = None
+    _index_generation = -1
+
+    _report: guards.ExportReport | None = None
+    _findings: guards.FindingsStore | None = None
+
+    @property
+    def report(self) -> guards.ExportReport:
+        """What this process's export wrote and found (``export --json``)."""
+        if self._report is None:
+            self._report = guards.ExportReport()
+        return self._report
+
+    @property
+    def findings(self) -> guards.FindingsStore:
+        """The parser-drift findings under the configured ``data_root``."""
+        if self._findings is None:
+            from ..config import get_config
+
+            self._findings = guards.FindingsStore(get_config().data_root)
+        return self._findings
+
+    def _raise_finding(self, finding: guards.Finding) -> None:
+        """Persist, print and report one error or warn finding."""
+        self.findings.record(finding)
+        self.report.findings.append(finding)
+        print(finding.line, file=sys.stderr)
+
+    def guard_parse(
+        self,
+        native_id: str,
+        source_file: Path,
+        stats: JsonlStats,
+        data: SessionData | dict | None,
+        *,
+        top_level: bool = True,
+    ) -> bool:
+        """Check one parse for format drift; ``False`` means do not write it.
+
+        An error finding (records but no messages, no line parses, no session id)
+        is printed, stored and returned as ``False``: the caller skips the session
+        and the export exits 1. A warn finding (no user turn) is printed and stored,
+        and the document is still written. An info finding (only ignored record
+        types) is stored silently. A clean parse clears any open finding for the id.
+        """
+        finding = self.classify_parse(native_id, source_file, stats, data, top_level=top_level)
+        if finding is None:
+            self.findings.clear(f"{self.source_name}:{native_id}", guards.DRIFT_KINDS)
+            return True
+        return finding.severity != guards.ERROR
+
+    def classify_parse(
+        self,
+        native_id: str,
+        source_file: Path,
+        stats: JsonlStats,
+        data: SessionData | dict | None,
+        *,
+        top_level: bool = True,
+        loud: bool = True,
+        record_info: bool = True,
+    ) -> guards.Finding | None:
+        """Classify one parse and record its finding, but clear nothing.
+
+        For a source whose session spans several files (Codex fragments), the caller
+        decides per session when every file parsed cleanly; :meth:`guard_parse` is
+        the one-file form. ``loud=False`` (a file outside the export's ``--since``
+        window) stores an error or warn finding without printing or reporting it, so
+        an old drift stays visible in doctor and the sync log but does not fail
+        every windowed run. ``record_info=False`` leaves an info finding to the
+        caller.
+        """
+        finding = guards.check_parse(
+            source=self.source_name,
+            native_id=native_id,
+            path=source_file,
+            stats=stats,
+            data=data,
+            target=self.spec_target,
+            adapter_version=self.version,
+            top_level=top_level,
+        )
+        if finding is None:
+            return None
+        if finding.severity == guards.INFO:
+            if record_info:
+                self.findings.record(finding)
+        elif loud:
+            self._raise_finding(finding)
+        else:
+            self.findings.record(finding)
+        return finding
+
+    def drift_error(self, native_ids: set[str] | None = None) -> guards.ParserDrift | None:
+        """The first error finding of this run (among ``native_ids``), as an exception."""
+        for finding in self.report.errors:
+            if native_ids is None or finding.native_id in native_ids:
+                return guards.ParserDrift(finding.message)
+        return None
+
+    def refusal(self, native_id: str) -> guards.ParserDrift:
+        """The exception for a parse :meth:`guard_parse` refused."""
+        return self.drift_error({native_id}) or guards.ParserDrift(
+            f"parser drift: {self.source_name}:{native_id}; see 'cairn doctor'"
+        )
+
+    def flush_catalog(self) -> None:
+        """Persist catalog changes (no-op when nothing changed or never loaded)."""
+        if self._catalog is not None:
+            self._catalog.save()
+
+    def _id_index(self) -> dict[str, list[str]]:
+        """native_id -> relative paths, rebuilt whenever the catalog changed."""
+        catalog = self.catalog
+        if self._index is None or self._index_generation != catalog.generation:
+            index: dict[str, list[str]] = {}
+            for rel, entry in catalog.entries.items():
+                fm = entry.frontmatter
+                if fm.get("type") not in self.session_types:
+                    continue
+                native_id = native_id_of(fm, self.id_field)
+                if native_id is not None:
+                    index.setdefault(native_id, []).append(rel)
+            self._index = index
+            self._index_generation = catalog.generation
+        return self._index
+
+    def _record_at(self, rel: str) -> SessionRecord | None:
+        entry = self.catalog.get(rel)
+        if entry is None:
+            return None
+        try:
+            return record_from_frontmatter(
+                self.catalog.path_of(rel),
+                entry.frontmatter,
+                self.source_name,
+                self.id_field,
+                self.session_types,
+            )
+        except ValueError:
+            return None
+
+    def record_at(self, path: Path) -> SessionRecord | None:
+        """The record for a document at a known path (catalog hit plus one ``stat``).
+
+        Child exporters know each child's planned path, so they check currency here
+        instead of through :meth:`find_record`, which would rebuild the id index after
+        every write.
+        """
+        try:
+            rel = path.resolve().relative_to(self.output_dir.resolve()).as_posix()
+        except ValueError:
+            return None
+        return self._record_at(rel)
+
+    def find_record(self, session_id: str) -> SessionRecord | None:
+        """Locate a session by full id, unique prefix, or ``source:id`` reference.
+
+        Served from the catalog: a dictionary hit plus one ``stat`` of the file.
+        Raises :class:`FileExistsError` when the id is ambiguous, so a mutation can
+        never silently land on the wrong session. Returns ``None`` when nothing
+        matches (including a reference that names another source).
+        """
+        source, prefix = session_id.split(":", 1) if ":" in session_id else (None, session_id)
+        if source is not None and source != self.source_name:
+            return None
+        for _attempt in range(2):  # once more if the hit's identity changed on disk
+            index = self._id_index()
+            if prefix in index:
+                native_id, rels = prefix, index[prefix]
+            else:
+                matches = [(nid, rels) for nid, rels in index.items() if nid.startswith(prefix)]
+                if not matches:
+                    return None
+                if len(matches) > 1:
+                    choices = ", ".join(f"{self.source_name}:{nid}" for nid, _ in sorted(matches))
+                    raise FileExistsError(f"ambiguous session {session_id!r}; choose {choices}")
+                native_id, rels = matches[0]
+            if len(rels) > 1:
+                paths = ", ".join(str(self.catalog.path_of(rel)) for rel in sorted(rels))
+                raise FileExistsError(
+                    f"ambiguous session {session_id!r}: {len(rels)} files carry it: {paths}"
+                )
+            record = self._record_at(rels[0])
+            if record is not None and record.session_id == native_id:
+                return record
+            # The file vanished or now holds a different session: the index was
+            # rebuilt by the re-validation, so look once more before giving up.
+        return None
+
     def find_file(self, session_id: str) -> Path | None:
-        return find_session_file(self.output_dir, self.short_id(session_id))
+        record = self.find_record(session_id)
+        return record.path if record else None
 
     def output_path(
         self,
@@ -124,7 +353,9 @@ class ConversationSource(ABC):
             self.output_dir, self.short_id(session_id), date, project, repo_subdir
         )
 
-    def load_existing(self, output_file: Path) -> tuple[dict | None, str | None, bool]:
+    def load_existing(
+        self, output_file: Path, source_id: str | None = None
+    ) -> tuple[dict | None, str | None, bool]:
         """Load preserved frontmatter + My Notes from a prior export of this session.
 
         Returns ``(existing_fm, my_notes, ok)``. ``ok`` is False only when the file
@@ -138,9 +369,16 @@ class ConversationSource(ABC):
         try:
             existing_fm = fm_mod.parse_frontmatter(content)
         except fm_mod.FrontmatterParseError as e:
-            print(f"Warning: skipping {output_file}: {e}", file=sys.stderr)
+            if source_id is None:
+                print(f"Warning: skipping {output_file}: {e}", file=sys.stderr)
+            else:
+                self._unparseable_document(source_id, output_file, e)
             return None, None, False
-        return existing_fm, fm_mod.extract_my_notes_section(content), True
+        # My Notes plus a ## Decisions section that follows it, preserved as one block.
+        my_notes = fm_mod.extract_annotations(
+            content, conversation_heading=self.conversation_heading
+        )
+        return existing_fm, my_notes, True
 
     def export_one(
         self, source_id: str, data: SessionData, existing_file: Path | None
@@ -160,25 +398,115 @@ class ConversationSource(ABC):
         output_file = existing_file or self.output_path(
             source_id, data["date"], data.get("project"), data.get("repo_subdir")
         )
-        existing_fm, my_notes, ok = self.load_existing(output_file)
-        if not ok:
-            return None
-        markdown = strip_lone_surrogates(self.render_document(data, existing_fm, my_notes))
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_file.write_text(markdown, encoding="utf-8")
+        # Collection lock protects filename allocation; document lock coordinates
+        # read/merge/write with annotations. Readers see the old or new whole file.
+        with locked(lock_path(self.output_dir, "export")):
+            if output_file.exists():
+                try:
+                    existing = fm_mod.parse_frontmatter(output_file.read_text(encoding="utf-8"))
+                except fm_mod.FrontmatterParseError as exc:
+                    self._unparseable_document(source_id, output_file, exc)
+                    return None
+                if existing.get(self.id_field) != source_id:
+                    import hashlib
+
+                    output_file = output_file.with_stem(
+                        output_file.stem + "-" + hashlib.sha256(source_id.encode()).hexdigest()[:16]
+                    )
+            with locked(document_lock(output_file)):
+                existing_fm, my_notes, ok = self.load_existing(output_file, source_id)
+                if not ok:
+                    return None
+                markdown = strip_lone_surrogates(self.render_document(data, existing_fm, my_notes))
+                metadata = "\n".join(
+                    metadata_lines(self.source_name, source_id, data)
+                    + self.exporter_lines()
+                    + provenance.head_lines(self.source_name, markdown, data)
+                )
+                markdown = markdown.replace("\nstatus:", "\n" + metadata + "\nstatus:", 1)
+                # Validate before replacing the file: a document the catalog cannot
+                # parse must never land on disk (it would be flagged on every listing
+                # and lose the user's round-trip guarantee).
+                try:
+                    rendered_fm = fm_mod.parse_frontmatter(markdown)
+                except fm_mod.FrontmatterParseError as exc:
+                    print(
+                        f"Error: refusing to write {output_file}: rendered frontmatter "
+                        f"does not parse ({exc})",
+                        file=sys.stderr,
+                    )
+                    return None
+                if rendered_fm.get(self.id_field) != source_id:
+                    print(
+                        f"Error: refusing to write {output_file}: rendered {self.id_field} "
+                        f"is not {source_id!r}",
+                        file=sys.stderr,
+                    )
+                    return None
+                atomic_write(output_file, markdown)
+                # Write-through while the document lock is held: the recorded stat
+                # identity is this write's, not a concurrent annotation's.
+                self.catalog.put(output_file, rendered_fm)
+        self.report.add_written(output_file)
+        self.findings.clear(f"{self.source_name}:{source_id}", (guards.DOCUMENT_KIND,))
         return output_file
 
+    def _unparseable_document(self, source_id: str, output_file: Path, exc: Exception) -> None:
+        """Record that a document with bad frontmatter blocks this session's re-export."""
+        self._raise_finding(
+            guards.document_finding(
+                self.source_name, source_id, output_file, str(exc), self.version, self.spec_target
+            )
+        )
+
+    def exporter_lines(self) -> list[str]:
+        """The parser stamp: adapter version and spec-target date, two flat keys.
+
+        Regenerated on every export like the other metadata lines. A nested mapping
+        would not parse (the frontmatter parser and the catalog take flat values).
+        """
+        lines = [f'exporter_version: "{fm_mod._escape_scalar(self.version)}"']
+        if self.spec_target is not None:
+            lines.append(f'exporter_spec_target: "{self.spec_target.checked}"')
+        return lines
+
     def all_sessions(self) -> list[tuple[Path, dict]]:
-        return listing.get_session_files(self.output_dir, self.session_type)
+        return listing.get_session_files(self.output_dir, self.session_type, self.catalog)
 
     def active_sessions(self) -> list[tuple[Path, dict]]:
-        return listing.get_active_sessions(self.output_dir, self.session_type)
+        return listing.get_active_sessions(self.output_dir, self.session_type, self.catalog)
 
     def current_session_id(self, explicit: str | None) -> str | None:
         """Resolve the session to act on: explicit id, then env var, then the single
         active session. Refuses to guess when more than one session is active so a
         mutation can never silently land on the wrong one."""
-        sid = explicit or os.environ.get(self.session_env_var)
+        from ..harnesses import detect_harness, get_harness
+
+        source = next((s.source for s in SOURCES if s.collection == self.collection), None)
+        try:
+            if not explicit and source in ("claude", "codex"):
+                active_host = detect_harness()
+                hints = any(
+                    os.environ.get(name)
+                    for name in (
+                        "CLAUDE_CODE_SESSION_ID",
+                        "CLAUDE_SESSION_ID",
+                        "CODEX_THREAD_ID",
+                        "CODEX_SESSION_ID",
+                    )
+                )
+                if active_host != source and (active_host or hints):
+                    raise ValueError(
+                        f"cannot infer the current {source} session from mixed or other-host hints; pass --session-id"
+                    )
+            sid = explicit or (
+                get_harness(source).current_id()
+                if source in ("claude", "codex")
+                else os.environ.get(self.session_env_var)
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return None
         if sid:
             return sid
 
@@ -187,8 +515,7 @@ class ConversationSource(ABC):
             return None
         if len(active) > 1:
             print(
-                f"Error: {len(active)} active sessions found; pass --session-id or set "
-                f"{self.session_env_var} to choose one.",
+                f"Error: {len(active)} active sessions found; pass --session-id to choose one.",
                 file=sys.stderr,
             )
             return None
@@ -203,7 +530,8 @@ class ConversationSource(ABC):
         sid = self.current_session_id(explicit)
         if not sid:
             print(
-                f"Error: No session_id. Use --session-id or set {self.session_env_var}",
+                "Error: No session_id. Use --session-id"
+                + (f" or set {self.session_env_var}" if self.session_env_var else ""),
                 file=sys.stderr,
             )
         return sid
@@ -297,6 +625,27 @@ class ConversationSource(ABC):
             print("Error: No note text provided", file=sys.stderr)
             return 2
         return 0 if mutations.add_comment(self.find_file, session_id, text) else 1
+
+    def cmd_decide(self, args: argparse.Namespace) -> int:
+        """``decide`` and ``supersede N``: write a row of the ``## Decisions`` table."""
+        from .. import decisions
+
+        session_id = self._require_session_id(getattr(args, "session_id", None))
+        if not session_id:
+            return 1
+        return decisions.cmd_decide(self, session_id, args)
+
+    def cmd_forget(self, args: argparse.Namespace) -> int:
+        """``forget N --reason R``: strike row N of ``## Decisions`` as withdrawn."""
+        from .. import decisions
+
+        if args.number < 1:
+            print(f"Error: row number must be 1 or greater, got {args.number}", file=sys.stderr)
+            return 2
+        session_id = self._require_session_id(getattr(args, "session_id", None))
+        if not session_id:
+            return 1
+        return decisions.cmd_forget(self, session_id, args)
 
     def cmd_close(self, args: argparse.Namespace) -> int:
         session_id = self._require_session_id(getattr(args, "session_id", None))
