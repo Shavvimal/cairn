@@ -26,7 +26,7 @@ from pathlib import Path
 from .config import CairnConfig, ConfigError, get_config, user_config_path
 from .harnesses import SessionEvent, get_harness
 from .procs import run_capped
-from .qmd import ensure_collection, list_collections, locked_index
+from .qmd import ensure_collection, list_collections, locked_index, record_update
 from .registry import BY_NAME
 from .runtime import background_environment
 from .storage import atomic_write, lock_path, locked
@@ -193,11 +193,13 @@ def _update_index(config: CairnConfig, collection: str, lock_timeout_s: float) -
                 )
                 if status not in ("added", "exists"):
                     raise RuntimeError(f"collection registration {status}: {collection}")
+                started_ns = time.time_ns()
                 result = run_capped([config.qmd_binary, "update"], timeout=EXPORT_TIMEOUT_S)
                 if result.returncode:
                     raise RuntimeError(
                         f"qmd update failed: {(result.stderr or result.stdout)[-2000:]}"
                     )
+                record_update(started_ns, known | {collection})
             return
         except BlockingIOError:
             if time.monotonic() >= deadline:

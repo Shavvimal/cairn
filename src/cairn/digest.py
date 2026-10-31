@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from itertools import pairwise
@@ -48,6 +49,7 @@ from .frames import (
 from .frames import sha1_8 as frame_sha1_8
 from .frontmatter import _escape_scalar
 from .mutations import _LINK_REF, _bare_link
+from .recall_gaps import coverage_note
 from .storage import atomic_write
 from .store import SessionRecord
 from .timeutil import parse_date_range
@@ -397,13 +399,21 @@ def write(out: Path, digests: list[Digest]) -> None:
 
 
 def run_digest(
-    args: argparse.Namespace, records: list[SessionRecord], window: tuple[datetime, datetime]
+    args: argparse.Namespace,
+    records: list[SessionRecord],
+    window: tuple[datetime, datetime],
+    *,
+    coverage: Callable[[bool, list[dict[str, str]]], dict] | None = None,
 ) -> int:
     """Digest every qualifying session.
 
     Exit codes follow the routine's ``prepare`` contract: 0 when at least one session
     was written (skipped legacy or corrupt files only warn and appear in ``skipped``),
     3 when the day has no input (zero sessions written). Errors raise and exit 1.
+    ``coverage``, given whether any session was written and the skipped sessions,
+    returns the store gaps for the window (:func:`cairn.recall_gaps.coverage`); it adds
+    a ``coverage`` key to the JSON and one stderr note when coverage is degraded. It
+    never changes the exit code.
     """
     start, end = window
     out = Path(args.out).expanduser().absolute() if args.out else default_out(start)
@@ -441,8 +451,12 @@ def run_digest(
     _stems(digests)
     write(out, digests)
     rows = [d.row for d in digests]
+    cov = coverage(bool(digests), skipped) if coverage is not None else None
     if args.json:
-        print(json.dumps({"sessions": rows, "skipped": skipped}, indent=2))
+        payload: dict = {"sessions": rows, "skipped": skipped}
+        if cov is not None:
+            payload["coverage"] = cov
+        print(json.dumps(payload, indent=2))
     else:
         for row in rows:
             dropped = row["truncated"]["frames_dropped"]
@@ -453,6 +467,8 @@ def run_digest(
                 f"frames_today={row['frames_today']}  chars={row['chars']}{owner}{note}"
             )
         print(f"{len(rows)} sessions written to {out}")
+    if cov is not None and (degraded := coverage_note(cov)):
+        print(degraded, file=sys.stderr)
     return 0 if digests else 3
 
 

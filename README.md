@@ -512,7 +512,18 @@ cairn recall expand codex:FULL_ID --max-msgs 30 --max-chars 20000
 cairn recall digest yesterday --all-projects --json
 cairn recall digest yesterday --all-projects --provenance tool --json
 cairn recall frame claude:FULL_ID 12 --frames DIR/claude-SHORTID.frames.jsonl
+cairn recall gaps --json
 ```
+
+`cairn recall gaps` reports what recall cannot see right now: export lag per source,
+files changed after the last `qmd update`, collections QMD has not registered, disabled
+sources and a missing rg. Each gap has a severity and, where one exists, the command
+that fixes it (`fix` is `null` for a disabled source or a missing rg), and the
+last line is `status: clean` or `status: degraded`. `cairn recall list --json --coverage`
+prints `{"sessions": [...], "coverage": {...}}`, and `cairn recall digest --json` gains a
+`coverage` key: the store gaps that can hide a session in the window, with a verdict of
+`found`, `clean-miss` or `degraded-miss`. An empty result with a degraded verdict is not
+proof that nothing happened.
 
 `digest` condenses one UTC day of sessions for a model to read, with provenance. Each
 session gives two files in `--out` (default `$XDG_CACHE_HOME/cairn/digests/DATE/`):

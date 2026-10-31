@@ -10,6 +10,7 @@ import sys
 from datetime import UTC, datetime
 
 from . import digest, provenance
+from . import recall_gaps as gaps
 from .config import ConfigError, get_config
 from .registry import SOURCES
 from .store import SessionStore, bounded_content
@@ -71,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also list subagent transcripts (hidden by default; --min-msgs skips them)",
     )
+    listing.add_argument(
+        "--coverage",
+        action="store_true",
+        help='with --json, print {"sessions": [...], "coverage": {...}} instead of a bare array',
+    )
     expand = sub.add_parser("expand", help="read an exported session, including annotations")
     expand.add_argument("session_id", help="source:full-id or unique prefix")
     expand.add_argument("--max-msgs", type=int, default=DEFAULT_MAX_MSGS)
@@ -105,6 +111,20 @@ def main(argv: list[str] | None = None) -> int:
     frame.add_argument("session_id", help="source:full-id or unique prefix")
     frame.add_argument("ordinal", type=int, help="0-based frame index in the whole session")
     frame.add_argument("--frames", help="the .frames.jsonl sidecar the citation came from")
+    gaps_cmd = sub.add_parser(
+        "gaps",
+        help="what recall cannot see right now: export lag, index lag, disabled sources, rg",
+        description=(
+            "Report coverage gaps computed from config, native store stats, the exported "
+            "store and one 'qmd collection list' call. Exit 0 whether clean or degraded; "
+            "the status is the last line. Takes no lock, so a sync running at the same "
+            "time can show a transient index-lag."
+        ),
+    )
+    gaps_cmd.add_argument("--json", action="store_true")
+    gaps_cmd.add_argument(
+        "--source", action="append", choices=[s.source for s in SOURCES], metavar="SOURCE"
+    )
     session_sources = [s.source for s in SOURCES if s.session_type]
     for command in (listing, expand, digest_cmd, frame):
         projects = command.add_mutually_exclusive_group()
@@ -117,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     args = parser.parse_args(argv)
     try:
+        if args.command == "gaps":
+            return _gaps(args)
         store = SessionStore(get_config())
         sources = args.source
         if args.command in ("list", "digest"):
@@ -140,7 +162,20 @@ def main(argv: list[str] | None = None) -> int:
         if project:
             records = [r for r in records if r.matches_project(project)]
         if args.command == "digest":
-            return digest.run_digest(args, records, (start, end))
+            requested = list(sources or digest.DIGEST_SOURCES)
+            return digest.run_digest(
+                args,
+                records,
+                (start, end),
+                coverage=lambda found, skipped: gaps.coverage(
+                    store.config,
+                    requested,
+                    (start, end),
+                    found,
+                    skipped=skipped,
+                    named=args.source,
+                ),
+            )
         if args.command == "frame":
             return digest.run_frame(args, store.resolve(args.session_id, records))
         if args.command == "expand":
@@ -189,8 +224,15 @@ def main(argv: list[str] | None = None) -> int:
             }
             for r in selected
         ]
+        cov = None
+        if args.coverage or not args.json:
+            requested = args.source or session_sources
+            cov = gaps.coverage(
+                store.config, requested, (start, end), bool(output), named=args.source
+            )
         if args.json:
-            print(json.dumps(output, indent=2))
+            payload = {"sessions": output, "coverage": cov} if args.coverage else output
+            print(json.dumps(payload, indent=2))
         else:
             print(
                 f"Sessions with recorded activity: {start.date()} to {end.date()} (exclusive), UTC"
@@ -210,10 +252,23 @@ def main(argv: list[str] | None = None) -> int:
                 f"Note: {limited} records have reduced time/count precision; only recorded dates/endpoints match. Refresh upgrades available native data.",
                 file=sys.stderr,
             )
+        if cov is not None and (note := gaps.coverage_note(cov)):
+            print(note, file=sys.stderr)
         return 0
     except (ValueError, ConfigError, OSError, subprocess.TimeoutExpired) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def _gaps(args: argparse.Namespace) -> int:
+    now = datetime.now(UTC)
+    facts = gaps.gather(get_config(), args.source, now=now)
+    found = gaps.classify(facts, now, requested=args.source)
+    if args.json:
+        print(json.dumps(gaps.to_json(facts, found, now), indent=2))
+    else:
+        print(gaps.render_text(facts, found))
+    return 0
 
 
 if __name__ == "__main__":

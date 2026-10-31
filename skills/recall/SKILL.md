@@ -33,6 +33,7 @@ Parse the user's input after `/recall`:
 ```bash
 cairn recall list "DATE_EXPR"          # e.g. yesterday, today, "last week", 2026-06-20
 cairn recall list "DATE_EXPR" --json   # machine-readable (session_id, time, msgs, title, project, type, parent, provenance, owner)
+cairn recall list "DATE_EXPR" --json --coverage   # {"sessions": [...], "coverage": {...}}
 cairn recall list "DATE_EXPR" --include-subagents   # also list subagent transcripts
 ```
 
@@ -52,6 +53,12 @@ because a subagent has one user message, its prompt. Each JSON row has `type` (t
 document type) and `parent` (the parent session id, or `null` for a session). Text rows
 for a child end with `(subagent of <parent[:8]>)`. `expand` takes a child id directly,
 for example `cairn recall expand claude:agent-a193a0cb5d55bc5b6`.
+
+With `--coverage`, the JSON is `{"sessions": rows, "coverage": {...}}`. Each row has
+`session_id`, `time`, `msgs`, `title`, `project`, `type`, `parent`, `provenance` and `owner`. `coverage.verdict`
+is `found`, `clean-miss` or `degraded-miss`, and `coverage.gaps` lists the store gaps
+that can hide a session in the window. Without `--coverage`, `--json` prints the bare
+array.
 
 Present the session table. To expand one the user picks:
 
@@ -77,15 +84,18 @@ the condensed body, and `SOURCE-SHORTID.frames.jsonl`, one row per frame. A
 lengths, never ids. To dig into a cited line, run `recall frame` with that ordinal: it
 prints the frame as exported and warns on stderr if the export changed since the digest.
 Exit 3 means an empty day: no session was written. A legacy or corrupt export is skipped with a warning and listed under `skipped` in the JSON; the rest still exit 0.
+The digest JSON also has a `coverage` key, in the same shape as `list --coverage`.
 
-→ Go to Step 4 (One Thing).
+→ Go to Step 4 (Gaps).
 
 ## Step 3: Topic recall (QMD search + rg)
 
-1. **Enumerate the collections to search** - do not hardcode or guess names:
+1. **Enumerate the collections to search** - do not hardcode or guess names. Run the
+   gaps report once, in parallel with it (Step 4 reads it):
 
    ```bash
    qmd collection list
+   cairn recall gaps --json
    ```
 
    Use the returned collection names (e.g. `notes`, `claude-code-sessions`,
@@ -143,9 +153,27 @@ Exit 3 means an empty day: no session was written. A legacy or corrupt export is
    Organize by type: sessions (what was worked on, decisions, status), notes (research,
    plans), meetings (discussions, attendees), docs (architecture, APIs).
 
-→ Go to Step 4 (One Thing).
+→ Go to Step 4 (Gaps).
 
-## Step 4: One Thing
+## Step 4: Gaps
+
+Print one computed **Gaps** line before One Thing. Temporal recall reads
+`coverage.gaps` from the JSON of Step 2. Topic recall reads `gaps` from
+`cairn recall gaps --json` (Step 3). Each gap has `kind`, `severity` (`warn` or
+`info`), `collection`, `message` and `fix`.
+
+- If the status is `degraded`, print `**Gaps:** <warn messages joined by "; ">`, then
+  the info messages if there is room.
+- If the status is `clean` and `gaps` still holds `info` gaps, print
+  `**Gaps:** none blocking (<info messages joined by "; ">)`.
+- If `gaps` is empty, name only what was checked. Temporal coverage (`scope: store`)
+  checks the exported store, not QMD or rg: print `**Gaps:** none found in the
+  exported store`. The topic report checks the store, QMD and rg: print
+  `**Gaps:** none found (exports, index, rg checked)`.
+
+Build the line from the JSON only. Never add a gap the JSON does not contain.
+
+## Step 5: One Thing
 
 After presenting results, synthesize the single highest-leverage next action.
 
@@ -165,9 +193,29 @@ on from here?"
 
 ## Fallback: no results
 
-```
-No results for "QUERY". Try: different terms, a broader date range, or --min-msgs 1.
-```
+A miss is clean or degraded. Read `coverage.verdict` (temporal) or `status` from
+`cairn recall gaps --json` (topic).
+
+- Clean miss:
+
+  ```
+  No sessions or notes match "QUERY" in WINDOW; no coverage gap was found.
+  ```
+
+  Then suggest different terms, a broader date range, or `--min-msgs 1`.
+- Degraded miss:
+
+  ```
+  No results for "QUERY", but coverage is degraded: <gaps>. This is not proof it did not happen. Run <fix> and recall again.
+  ```
+
+## Resolve before asking
+
+Before you ask the user about past work or a past decision, run the temporal recall for
+the likely window and the topic recall for its key terms. Then ask with a hypothesis:
+"I found X on DATE (REF); is that the decision you mean?" Ask an open question only if
+both recalls return a clean miss, and say so. Report a degraded miss with its gaps, never
+as "I have no record".
 
 ## Notes
 
@@ -177,3 +225,4 @@ No results for "QUERY". Try: different terms, a broader date range, or --min-msg
 - The rg pass wins on exact terms (identifiers, error strings, names) and on files that
   were exported after the last `qmd update`.
 - Always enumerate collections with `qmd collection list` rather than assuming a fixed set.
+- `cairn recall gaps` never exports or indexes; a gap with a non-null `fix` names the command that fixes it.

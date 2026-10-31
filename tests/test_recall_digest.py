@@ -283,6 +283,13 @@ class TestProvenance(DigestFixture):
         self.assertEqual([r["ref"] for r in data["sessions"]], ["claude:fixture-0001"])
         self.assertEqual(data["skipped"], [{"ref": "claude:broken-0002", "reason": "corrupt"}])
         self.assertTrue((out / "claude-fixture0001.md").is_file())
+        # A skipped session is a known omission: found, but never clean coverage.
+        self.assertEqual(data["coverage"]["verdict"], "found")
+        self.assertEqual(data["coverage"]["status"], "degraded")
+        gap = data["coverage"]["gaps"][0]
+        self.assertEqual((gap["kind"], gap["severity"]), ("unreadable-exports", "warn"))
+        self.assertEqual(gap["facts"], {"count": 1, "skipped": ["claude:broken-0002"]})
+        self.assertIsNone(gap["fix"])
 
     def test_only_skipped_sessions_is_an_empty_day(self):
         self.doc.unlink()
@@ -295,6 +302,9 @@ class TestProvenance(DigestFixture):
         self.assertEqual(code, 3)
         self.assertEqual(data["sessions"], [])
         self.assertEqual(data["skipped"], [{"ref": "claude:legacy", "reason": "legacy"}])
+        self.assertEqual(data["coverage"]["verdict"], "degraded-miss")
+        kinds = [(g["kind"], g["fix"]) for g in data["coverage"]["gaps"]]
+        self.assertIn(("unreadable-exports", "cairn claude export --all"), kinds)
 
 
 if __name__ == "__main__":

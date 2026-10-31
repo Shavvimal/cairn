@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.14.0]
+
+### Added
+- `cairn recall gaps [--json] [--source S]`: a deterministic coverage report. It shows export lag per source, files changed after the last `qmd update`, collections QMD has not registered, unreadable exports, disabled sources, a missing store, an unknown index and a missing rg. Each gap has a severity and the command that fixes it, and the report ends with `status: clean` or `status: degraded`.
+- `cairn recall list --json --coverage` wraps the rows as `{"sessions": [...], "coverage": {...}}` with a `found`, `clean-miss` or `degraded-miss` verdict. `cairn recall digest --json` gains the same `coverage` key. In text mode, both print one stderr note when coverage is degraded.
+- cairn records an index stamp (`$XDG_STATE_HOME/cairn/qmd-index.json`) after each successful `qmd update` in sync, the session-end hook and `cairn invoke`.
+- `/recall` prints a computed **Gaps** line before One Thing, tells a clean miss from a degraded miss, and resolves past work with both recalls before it asks the user. `/search` reports a degraded miss with its gaps.
+
+### Changed
+- `qmd.list_collections` now uses the new `qmd.parse_collection_list` parser. Its names, timeout and errors do not change.
+
 ## [2.13.0]
 
 ### Added

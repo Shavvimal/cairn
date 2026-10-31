@@ -41,6 +41,29 @@ def catalog_path(output_dir: Path) -> Path:
     return cache / "cairn" / "catalogs" / f"{key}.json"
 
 
+def scan(output_dir: Path) -> dict[str, os.stat_result]:
+    """Stat every regular ``*.md`` under ``output_dir``, keyed by POSIX relative path.
+
+    One ``stat`` per file and no reads, so a caller that needs only counts and
+    modification times (``cairn recall gaps``) never parses frontmatter. Directory
+    symlinks are not followed; a symlinked file is identified by its target's stat.
+    """
+    found: dict[str, os.stat_result] = {}
+    for directory, _dirs, files in os.walk(output_dir, followlinks=False):
+        for name in files:
+            if not name.endswith(".md"):
+                continue
+            full = Path(directory) / name
+            try:
+                st = os.stat(full)  # follows a file symlink: identity is the target's
+            except OSError:
+                continue  # vanished between listing and stat
+            if not stat_mod.S_ISREG(st.st_mode):
+                continue
+            found[full.relative_to(output_dir).as_posix()] = st
+    return found
+
+
 @dataclass(slots=True)
 class Entry:
     mtime_ns: int
@@ -80,21 +103,7 @@ class Catalog:
 
     def _walk(self) -> dict[str, os.stat_result]:
         """Stat every ``*.md`` under the collection before anything is read."""
-        found: dict[str, os.stat_result] = {}
-        root = self.output_dir
-        for directory, _dirs, files in os.walk(root, followlinks=False):
-            for name in files:
-                if not name.endswith(".md"):
-                    continue
-                full = Path(directory) / name
-                try:
-                    st = os.stat(full)  # follows a file symlink: identity is the target's
-                except OSError:
-                    continue  # vanished between listing and stat
-                if not stat_mod.S_ISREG(st.st_mode):
-                    continue
-                found[full.relative_to(root).as_posix()] = st
-        return found
+        return scan(self.output_dir)
 
     def _load(self) -> tuple[int, dict[str, Entry]]:
         def reject() -> tuple[int, dict[str, Entry]]:
@@ -255,4 +264,12 @@ def load_catalog(output_dir: Path) -> Catalog:
     return catalog
 
 
-__all__ = ["CATALOG_VERSION", "RACY_GUARD_NS", "Catalog", "Entry", "catalog_path", "load_catalog"]
+__all__ = [
+    "CATALOG_VERSION",
+    "RACY_GUARD_NS",
+    "Catalog",
+    "Entry",
+    "catalog_path",
+    "load_catalog",
+    "scan",
+]
