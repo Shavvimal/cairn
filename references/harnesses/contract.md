@@ -11,8 +11,10 @@ Verify exit status and functional results. Ask only for choices the user has not
 explicit task authorization carries through the workflow. Never invent an answer.
 
 Prefer explicit source-qualified session identities from `cairn recall list --json`.
-For note/close/log use the selected source command and pass its full native ID using
-`--session-id`. If a current-session hint cannot be verified, ask for the target.
+For note, close, log, decide, supersede and forget use the selected source command and
+pass its full native ID using `--session-id`. If a current-session hint cannot be
+verified, ask for the target. A project decisions document from
+`cairn claude memory import` takes `--session-id memory:<project>`.
 Never use a filename suffix as a full ID. Resume uses the selected record's source:
 `cairn resume SOURCE:ID` prints the launch command; show it to the user for their terminal.
 Use `--launch` only when explicitly running in a suitable interactive terminal.

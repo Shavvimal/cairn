@@ -1,7 +1,7 @@
 ---
 name: invoke-codex
 description: Run OpenAI Codex headlessly through `cairn invoke codex` for an adversarial second opinion, code review, plan review or test simulation, with progress readable mid-run, the thread resumable later, and the whole exchange recorded in cairn. Use when the user says "invoke codex", "run codex", "ask codex", "codex review", "codex audit", "second opinion from codex", "codex resume", names a Codex model and effort such as "astra high", or asks for a cross-model quality gate before committing a significant change.
-argument-hint: [prompt or gate name] [model] [effort]
+argument-hint: "[prompt or gate name] [model] [effort]"
 allowed-tools: Bash(cairn:*), Bash(qmd:*), Read, AskUserQuestion, Monitor
 ---
 

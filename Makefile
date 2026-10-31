@@ -7,7 +7,7 @@ install:
 
 # scripts/check-test-discriminates.py is named alone: scripts/sync_plugin_manifest.py
 # predates the linter config and is left as it is.
-LINTED = src tests scripts/check-test-discriminates.py
+LINTED = src tests scripts/check-test-discriminates.py .agents/skills/skill-review/scripts/measure.py
 
 lint:
 	uv run ruff check $(LINTED)

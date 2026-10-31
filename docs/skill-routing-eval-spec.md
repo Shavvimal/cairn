@@ -141,7 +141,7 @@ negative row "search the web for the python 3.13 release notes".
 - `undeclared overlap pairs` followed by a table
   `skill A | skill B | rows | example intent | triggers`.
 - `skill <name>: description has no quoted trigger after "Use when the user says"`.
-- `skill <name>: N fixture rows, need 8 to 15`.
+- `skill <name>: N fixture rows, need 8 to 30`.
 
 ---
 
@@ -255,7 +255,7 @@ and the constant.
 
 ### 4.7 Count check
 
-Each skill has 8 to 15 rows whose `expected` is that skill. `null` rows do not count.
+Each skill has 8 to 30 rows whose `expected` is that skill. `null` rows do not count. The cap was 15 until the skills refresh (`skills-refresh-spec.md`) raised it for the umbrella cairn skill.
 
 ### 4.8 Trigger coverage
 
@@ -301,7 +301,7 @@ One JSON object per line, UTF-8, no comments, no blank lines inside the file:
 | F3 | A routable skill loses its "Use when the user says" clause | `description has no quoted trigger` |
 | F4 | A row is a trigger copy | `copied from trigger` |
 | F5 | Malformed JSON line | `bad row: <json error>` with `file:line` |
-| F6 | A new skill directory without a fixture | `0 fixture rows, need 8 to 15` |
+| F6 | A new skill directory without a fixture | `0 fixture rows, need 8 to 30` |
 | F7 | A lower layer adds triggers | rerun; fix rows or declare the overlap |
 | F8 | Frontmatter not closed by `---` | `skill <name>: frontmatter not closed` |
 | F9 | A trigger gains a phrase but no row reaches the skill through it alone | `no row matches "<trigger>" alone` |

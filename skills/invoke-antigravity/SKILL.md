@@ -1,7 +1,7 @@
 ---
 name: invoke-antigravity
 description: Run Google Antigravity (the `agy` CLI) headlessly through `cairn invoke antigravity` for an adversarial second opinion, code review, plan review or an independent Gemini pass, with progress readable mid-run, the conversation resumable later, and the exchange recorded in cairn. Use when the user says "invoke antigravity", "ask antigravity", "ask agy", "antigravity review", "gemini review", "second opinion from antigravity", "antigravity resume", or asks for a cross-model quality gate from Google's agent.
-argument-hint: [prompt or gate name] [model] [effort]
+argument-hint: "[prompt or gate name] [model] [effort]"
 allowed-tools: Bash(cairn:*), Bash(qmd:*), Bash(agy:*), Read, AskUserQuestion, Monitor
 ---
 

@@ -10,3 +10,7 @@
 {"intent": "cite the exact frame where we decided on BM25", "expected": "recall"}
 {"intent": "what did we get done on the sync robustness work last week", "expected": "recall"}
 {"intent": "pull up the history of my coding sessions about launchd", "expected": "recall"}
+{"intent": "so what did we finally decide on the cache key", "expected": "recall"}
+{"intent": "list the decisions we recorded this week", "expected": "recall", "ambiguous_with": ["cairn"]}
+{"intent": "check that the citations in today's journal verify", "expected": "recall"}
+{"intent": "a session from this morning seems to be missing", "expected": "recall"}

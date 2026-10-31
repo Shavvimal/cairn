@@ -57,8 +57,9 @@ A foreground `Bash` call dies long before a ten-minute model download finishes, 
 Without `Monitor`, re-read the log tail with `Read` every few minutes and check the
 background task's exit status; never treat elapsed time as completion.
 
-Invoke `/cairn:setup` explicitly; other workflows are `/cairn:cairn`, `/cairn:recall`, and
-`/cairn:search`. `disable-model-invocation` keeps setup explicit. Read the selected source's
+Invoke `/cairn:setup` explicitly; other workflows are `/cairn:cairn`, `/cairn:recall`,
+`/cairn:search`, `/cairn:invoke-codex`, `/cairn:invoke-claude` and
+`/cairn:invoke-antigravity`. `disable-model-invocation` keeps setup explicit. Read the selected source's
 reference for native data, independently of Claude as the executing harness.
 
 Use the current session ID supplied by Claude or verified `CLAUDE_CODE_SESSION_ID` (the
@@ -105,6 +106,7 @@ current session spawned with its execution state, activity and outcome. Run
 `cairn agents wait --session claude:<id>` in the background to get one completion notice when
 the last one exits. After a context reset, run `cairn agents list` before resuming work.
 
-Skills: `/cairn:invoke-codex` and `/cairn:invoke-claude`. Both may be invoked by the model
+Skills: `/cairn:invoke-codex`, `/cairn:invoke-claude` and `/cairn:invoke-antigravity`.
+All three may be invoked by the model
 when the user asks for a peer run or a quality gate; the engine's read-only default profile,
 timeouts and depth guard bound what a run can do.

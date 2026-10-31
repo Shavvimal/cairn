@@ -5,7 +5,13 @@ with your own `validate` command, and keep a stamp per UTC day. A routine is con
 under `routines`; `cairn routine` installs, runs and reports it. Scheduling is launchd only
 (macOS) in this version.
 
-## Behavior
+## Contents
+
+1. Define the routine · 2. Write the prompt and the commands · 3. Dry-run · 4. Install ·
+5. Kickstart · 6. Read status (exit 0/1/2) · Pause and resume · Notify on each day ·
+7. Re-run a day · 8. Uninstall. For a daily read of every routine, see `daily-check.md`.
+
+## Behaviour
 
 - launchd starts `cairn routine run NAME` daily at `at` (local time)
 - The run handles every UTC day in the last `catch_up_days` without a done stamp, oldest first
@@ -172,7 +178,7 @@ cairn routine list                  # one line per routine, ending in state=<sta
 | `disabled` | the breaker stopped the routine | 2 |
 
 The attention codes are `failed-day`, `attempts-exhausted`, `corrupt-stamp`,
-`last-run-exit-<n>`, `interrupted-run`, `launchd-missing` (macOS only) and `stale-source`.
+`last-run-exit-<n>`, `last-run-exit-unknown` (`last-run.json` does not parse, so `last_run` is null, or has no integer `exit`), `interrupted-run`, `launchd-missing` (macOS only) and `stale-source`.
 The state comes from files only, so `status` answers while launchd is wedged. An unknown
 routine is also exit 2, but prints no JSON on stdout:
 

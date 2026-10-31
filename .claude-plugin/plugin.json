@@ -1,6 +1,6 @@
 {
   "name": "cairn",
-  "version": "2.20.0",
+  "version": "2.20.1",
   "description": "Local, searchable memory for AI coding agents - Claude Code, Codex, Cursor & Granola, indexed on-device with QMD.",
   "author": {
     "name": "Shav Vimalendiran"

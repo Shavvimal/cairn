@@ -2,7 +2,7 @@
 name: search
 description: Search previously exported Cairn sessions, notes, meetings and indexed docs using QMD BM25 or exact ripgrep. Use when the user says "cairn search", "search my sessions", "search past sessions", "search my meetings", "grep my sessions", or "exact search", or otherwise asks to locate material in personal session history. Do not activate for ordinary web searches, repository code searches, or unrelated uses of find/look up. Requires qmd; rg is optional.
 argument-hint: QUERY [-n NUM] [-c COLLECTION] [--full] [--exact]
-allowed-tools: Bash(qmd:*), Bash(rg:*), Bash(head:*), Bash(cairn recall gaps:*)
+allowed-tools: Bash(qmd:*), Bash(rg:*), Bash(head:*), Bash(cairn recall gaps:*), Bash(cairn errors:*)
 ---
 
 Read [the harness contract](../../references/harnesses/contract.md) and its relevant
@@ -13,7 +13,7 @@ Claude or Codex reference from this installed package before host-specific opera
 
 Lightweight mid-conversation search. One query, top results with snippets, done.
 
-Unlike `/recall` (which expands queries, fetches full documents, and synthesizes a "One
+Unlike `/recall` (which expands queries, fetches full documents, and synthesises a "One
 Thing"), `/search` is a fast inline lookup - results with snippets, no synthesis.
 
 Two engines:
@@ -34,6 +34,8 @@ Two engines:
 /search ECONNRESET --exact          # exact match with rg
 /search "def \w+_frontmatter" --exact   # regex with rg
 ```
+
+In Codex, type `$search` in place of `/search`; `/recall` below is `$recall` there.
 
 ## Workflow
 
@@ -131,6 +133,10 @@ Two engines:
    A search with some hits but fewer than `-n` is a normal result: report the hits and
    do not run the gaps report.
 
+   If `cairn recall gaps --json` itself exits non-zero, read the `code:` line on stderr
+   and run `cairn errors CODE`; report its next step and stop. A failing `qmd` command
+   has no cairn code: report qmd's own message and suggest `cairn doctor`.
+
 6. **If `--full`** (or the user asks to expand a hit):
 
    ```bash
@@ -140,5 +146,5 @@ Two engines:
    For an rg hit, use its `qmd://COLLECTION/<path relative to the collection Path>` form,
    or read the file directly.
 
-Do NOT: expand the query into variants, fetch full documents unless asked, synthesize a
+Do NOT: expand the query into variants, fetch full documents unless asked, synthesise a
 "One Thing", or run parallel searches across variants - that's `/recall`'s job.
