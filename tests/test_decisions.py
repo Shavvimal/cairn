@@ -913,6 +913,26 @@ class TestProjectDocuments(DecisionsFixture):
         code, _, err = self.run_verb("decide", "x", "--session-id", "memory:missing")
         self.assertEqual((code, err), (1, "Error: Session file not found for memory:m\n"))
 
+    def test_withdrawn_in_project_doc_names_the_document(self):
+        code, _, _ = self.run_verb(
+            "forget", "1", "--reason", "stale", "--session-id", "memory:example-app"
+        )
+        self.assertEqual(code, 0)
+        code, _, err = self.run_verb(
+            "decide", "Ship each change as its own PR", "--session-id", SID
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("(reason: stale, memory:example-app row #1)", err)
+
+    def test_recall_project_label_and_cwdless_document(self):
+        text = self.project_doc.read_text().replace(f"cwd: {self.cwd}\n", "")
+        self.project_doc.write_text(text.replace("project: example-app", "project: group"))
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = recall.main(["decisions", "--project", "example-app", "--json"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(len(json.loads(out.getvalue())["decisions"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

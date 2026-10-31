@@ -570,7 +570,7 @@ class ClaudeSource(ConversationSource):
 
         label = session_id.removeprefix(f"{decisions.MEMORY_SOURCE}:")
         if label != session_id:
-            if not decisions.MEMORY_LABEL_RE.match(label):
+            if not decisions.MEMORY_LABEL_RE.fullmatch(label):
                 return None
             path = decisions.memory_document(get_config(), label)
             return path if path.is_file() else None

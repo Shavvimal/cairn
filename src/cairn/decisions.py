@@ -1100,7 +1100,7 @@ def memory_records(config: CairnConfig) -> list[SessionRecord]:
         if fm.get("type") != MEMORY_DOC_TYPE or not isinstance(native_id, str):
             continue
         label = native_id.removeprefix(f"{MEMORY_SOURCE}:")
-        if label == native_id or not MEMORY_LABEL_RE.match(label):
+        if label == native_id or not MEMORY_LABEL_RE.fullmatch(label):
             continue
         records.append(
             SessionRecord(
@@ -1155,6 +1155,34 @@ def add_recall_parser(sub: argparse._SubParsersAction, session_sources: list[str
     cmd.add_argument("--json", action="store_true")
 
 
+def _memory_here(cwd: str) -> tuple[Path, str | None]:
+    """The git main checkout of ``cwd`` and the memory label `memory import` derives
+    for it (``None`` when no label can be derived)."""
+    from .claude_memory import MemoryImportError, _label, claude_project_dir_name, project_root
+
+    root = project_root(Path(cwd)).resolve()
+    try:
+        return root, _label(claude_project_dir_name(root))
+    except MemoryImportError:
+        return root, None
+
+
+def _memory_match(
+    record: SessionRecord, project: str, here: tuple[Path, str | None] | None
+) -> bool:
+    """A project decisions document matches ``--project`` by its label, and the
+    current directory by the main checkout it recorded or, without ``cwd`` (an
+    ``--all-projects`` or ``--memory-dir`` import), by the label of that checkout."""
+    if record.session_id == project:
+        return True
+    if here is None:
+        return False
+    root, label = here
+    if record.cwd:
+        return Path(record.cwd).expanduser().resolve() == root
+    return label is not None and record.session_id == label
+
+
 def run_recall(args: argparse.Namespace, store: SessionStore) -> int:
     """``cairn recall decisions``. ValueError (exit 1 in the caller) on a bad date."""
     from .timeutil import parse_date_range
@@ -1166,23 +1194,13 @@ def run_recall(args: argparse.Namespace, store: SessionStore) -> int:
         records.extend(memory_records(store.config))
     project = args.project or (None if args.all_projects else os.getcwd())
     if project:
-        root = None
-        if not args.project and any(r.source == MEMORY_SOURCE for r in records):
-            # A project document records the main checkout root that `memory import`
-            # resolved, so match it from a subdirectory or a linked worktree too.
-            from .claude_memory import project_root
-
-            root = project_root(Path(project)).resolve()
+        memory = any(r.source == MEMORY_SOURCE for r in records)
+        here = _memory_here(project) if memory and not args.project else None
         records = [
             r
             for r in records
             if r.matches_project(project)
-            or (
-                root is not None
-                and r.source == MEMORY_SOURCE
-                and r.cwd is not None
-                and Path(r.cwd).expanduser().resolve() == root
-            )
+            or (r.source == MEMORY_SOURCE and _memory_match(r, project, here))
         ]
     state = withdrawals.load(withdrawals.ledger_path(store.config))  # fail fast on a bad ledger
     found, problems = collect(records)

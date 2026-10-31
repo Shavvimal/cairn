@@ -106,6 +106,8 @@ def _scalar(value: str, line: int) -> str:
                 raise _Bad(line, "unescaped '\"' in a double-quoted value")
             if char == "\\":
                 escape = inner[index + 1 : index + 2]
+                if not escape:  # the closing quote was escaped
+                    raise _Bad(line, "unterminated double-quoted value")
                 if escape not in _ESCAPES:
                     raise _Bad(line, f"unsupported escape '\\{escape}'")
                 out.append(_ESCAPES[escape])
@@ -320,7 +322,8 @@ def directories(args: argparse.Namespace, config: CairnConfig) -> list[MemoryDir
         path = Path(args.memory_dir).expanduser()
         if not _is_dir(path):
             raise MemoryImportError(f"no Claude memory directory at {path}", "MEMORY_DIR_MISSING")
-        encoded = path.resolve().parent.name if path.name == "memory" else path.name
+        resolved = path.resolve()  # `.` and `../memory` name the directory too
+        encoded = resolved.parent.name if resolved.name == "memory" else resolved.name
         return [memory_dir_of(encoded, path)]
     if args.all_projects:
         if not projects.is_dir():
@@ -445,13 +448,18 @@ class Unchecked:
         return self.labels is None or label in self.labels
 
 
-def _labels_in(path: Path, labels: set[str]) -> frozenset[str] | None:
+def _labels_in(path: Path, labels: set[str], heading: str | None) -> frozenset[str] | None:
+    """The labels whose ``memory:<label>/`` text is in the part of ``path`` before
+    its frame anchor (the whole file when it is not UTF-8); ``None`` when unreadable."""
     try:
-        data = path.read_bytes()
+        try:
+            text = decisions._read_prefix(path, heading)
+        except UnicodeDecodeError:
+            text = path.read_bytes().decode("utf-8", "replace")
     except OSError:
         return None
-    prefix = decisions.MEMORY_SOURCE.encode()
-    return frozenset(label for label in labels if prefix + b":" + label.encode() + b"/" in data)
+    prefix = decisions.MEMORY_SOURCE
+    return frozenset(label for label in labels if f"{prefix}:{label}/" in text)
 
 
 def _existing_markers(
@@ -475,6 +483,12 @@ def _existing_markers(
     scan = dict(paths)
     for record in SessionStore(config).records(["claude"], persist=persist):
         scan.setdefault(record.path, (record.reference, "## Conversation"))
+    # A document the catalog skipped (broken frontmatter, a missing id) still holds
+    # its table, so every markdown file of the collection is read.
+    output = config.output_dir("claude-code-sessions")
+    if output.is_dir():
+        for path in sorted(output.rglob("*.md")):
+            scan.setdefault(path, (path.name, "## Conversation"))
     found: dict[str, tuple[str, DecisionRow]] = {}
     unchecked: list[Unchecked] = []
     for path, (ref, heading) in scan.items():
@@ -483,7 +497,7 @@ def _existing_markers(
         try:
             rows, problems = decisions.read_table(path, heading)
         except UnicodeDecodeError:
-            hits = _labels_in(path, labels)
+            hits = _labels_in(path, labels, heading)
             if hits is None or hits:
                 unchecked.append(Unchecked(path, "not UTF-8", hits))
             continue
@@ -491,7 +505,7 @@ def _existing_markers(
             unchecked.append(Unchecked(path, exc.strerror or str(exc), None))
             continue
         if problems:
-            hits = _labels_in(path, labels)
+            hits = _labels_in(path, labels, heading)
             if hits is None or hits:
                 first = problems[0]
                 unchecked.append(
@@ -508,13 +522,17 @@ def _place(item: Item, source: ConversationSource, config: CairnConfig) -> None:
     memory = item.memory
     assert memory is not None
     path = None
-    if memory.origin:
+    # Only a full session id places a row in a session: a prefix, a ``source:`` form
+    # or a ``memory:`` id would route the row through another lookup.
+    if memory.origin and ":" not in memory.origin:
         try:
-            path = source.find_file(memory.origin)
+            record = source.find_record(memory.origin)
         except FileExistsError as exc:
             item.action, item.reason = "failed", str(exc)
             print(f"Error: {exc}", file=sys.stderr)
             return
+        if record is not None and record.session_id == memory.origin:
+            path = record.path
     if path is not None and memory.origin:
         item.placement, item.target = "session", path
         item.target_ref = f"{source.source_name}:{memory.origin}"
@@ -532,16 +550,22 @@ def _place(item: Item, source: ConversationSource, config: CairnConfig) -> None:
 
 
 def _frontmatter_value(value: str) -> str:
-    if _PLAIN_SCALAR_RE.match(value) and ": " not in value and not value.endswith(":"):
+    if (
+        _PLAIN_SCALAR_RE.fullmatch(value)
+        and value == value.strip()
+        and ": " not in value
+        and not value.endswith(":")
+    ):
         return value
     return f'"{_escape_scalar(value)}"'
 
 
 def _home_relative(path: Path) -> str:
+    resolved = path.resolve()
     try:
-        return "~/" + path.resolve().relative_to(Path.home().resolve()).as_posix()
+        return "~/" + resolved.relative_to(Path.home().resolve()).as_posix()
     except ValueError:
-        return str(path)
+        return str(resolved)
 
 
 def project_document_text(directory: MemoryDir) -> str:
@@ -582,6 +606,17 @@ def _create_project_document(path: Path, directory: MemoryDir) -> bool:
             return False
         atomic_write(path, project_document_text(directory))
         return True
+
+
+def _remove_if_template(path: Path, directory: MemoryDir) -> None:
+    """Delete a project document this run created when no row went into it (every
+    memory was withdrawn or failed under the lock), so none is left empty."""
+    with locked(document_lock(path)):
+        try:
+            if path.read_text(encoding="utf-8") == project_document_text(directory):
+                path.unlink()
+        except (OSError, UnicodeDecodeError):
+            pass  # a document that changed or cannot be read stays
 
 
 def _write_group(
@@ -715,10 +750,25 @@ def _check_identity(found: list[MemoryDir], items: list[Item], config: CairnConf
             continue
         directory = group[0]
         doc = decisions.memory_document(config, label)
+        if not doc.exists():
+            continue
         try:
-            recorded = read_frontmatter_head(doc).get("memory_dir") if doc.is_file() else None
-        except (OSError, ValueError):
-            recorded = None  # the write reports an unreadable document
+            fm = read_frontmatter_head(doc)
+        except (OSError, ValueError) as exc:  # ValueError: parse and decode errors
+            fm, problem = {}, str(exc) or type(exc).__name__
+        else:
+            problem = ""
+        if (
+            problem
+            or fm.get("type") != decisions.MEMORY_DOC_TYPE
+            or fm.get("native_id") != f"{decisions.MEMORY_SOURCE}:{label}"
+        ):
+            why = problem or f"type {fm.get('type')!r}, native_id {fm.get('native_id')!r}"
+            refused[directory.path] = (
+                f"{doc} is not a project decisions document ({why}); move it away and re-run"
+            )
+            continue
+        recorded = fm.get("memory_dir")
         here = _home_relative(directory.path)
         if isinstance(recorded, str) and recorded != here:
             refused[directory.path] = (
@@ -732,6 +782,16 @@ def _check_identity(found: list[MemoryDir], items: list[Item], config: CairnConf
                 _fail(item, reason)
 
 
+def _uncoded_failure(message: str, as_json: bool) -> int:
+    """A refusal before any memory is read that has no registry code: ``Error:`` on
+    stderr and, with ``--json``, the failure object with ``code: null`` on stdout."""
+    print(f"Error: {message}", file=sys.stderr)
+    if as_json:
+        failure = {"ok": False, "code": None, "error": message, "exit": 1, "retryable": False}
+        print(json.dumps(failure, ensure_ascii=False))
+    return 1
+
+
 def _ledger_state(ledger: Path, *, lock: bool) -> dict[str, withdrawals.Withdrawal]:
     if lock:
         return withdrawals.load(ledger)
@@ -741,8 +801,8 @@ def _ledger_state(ledger: Path, *, lock: bool) -> dict[str, withdrawals.Withdraw
 def _short(ref: str) -> str:
     """``claude:<uuid>[#n]`` as ``claude:<first 8>[#n]``; ``memory:<label>[#n]`` as is."""
     document, hash_, number = ref.partition("#")
-    source, _, native = document.partition(":")
-    if source != decisions.MEMORY_SOURCE:
+    source, colon, native = document.partition(":")
+    if colon and source != decisions.MEMORY_SOURCE:
         document = f"{source}:{native[:8]}"
     return document + hash_ + number
 
@@ -772,8 +832,7 @@ def cmd_memory_import(source: ConversationSource, args: argparse.Namespace) -> i
         found = directories(args, config)
     except MemoryImportError as exc:
         if exc.code is None:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 1
+            return _uncoded_failure(str(exc), as_json)
         return errors.fail(exc.code, str(exc), exit=1, prefix="Error: ", as_json=as_json)
     try:
         with contextlib.nullcontext() if dry_run else locked(import_lock(config)):
@@ -797,8 +856,7 @@ def _import(
     try:
         state = _ledger_state(ledger, lock=not dry_run)
     except withdrawals.LedgerError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
+        return _uncoded_failure(str(exc), as_json)
 
     items: list[Item] = []
     for directory in found:
@@ -859,13 +917,16 @@ def _import(
             assert item.target is not None
             groups.setdefault(item.target, []).append(item)
         for target, group in groups.items():
+            created = False
             if group[0].placement == "project":
                 try:
-                    _create_project_document(target, group[0].directory)
+                    created = _create_project_document(target, group[0].directory)
                 except OSError as exc:
                     _write_failed(target, exc, group)
                     continue
             _write_group(target, group, source, ledger)
+            if created and not any(item.action == "added" for item in group):
+                _remove_if_template(target, group[0].directory)
 
     for item in items:
         memory = item.memory

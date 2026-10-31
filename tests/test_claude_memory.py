@@ -615,7 +615,9 @@ class TestImportSafety(MemoryFixture):
     def test_target_that_is_not_utf8_fails_with_a_summary(self):
         self.project_doc.parent.mkdir(parents=True)
         self.project_doc.write_bytes(b"---\ntype: claude-memory-decisions\n\xff\n---\n")
-        code, data, _ = self.run_json()
+        # The identity check refuses this file first; this pins the write-time backstop.
+        with mock.patch.object(claude_memory, "_check_identity"):
+            code, data, _ = self.run_json()
         self.assertEqual(code, 1)
         failed = [r for r in data["rows"] if r["action"] == "failed"]
         self.assertEqual(len(failed), 2)
@@ -659,6 +661,150 @@ class TestImportSafety(MemoryFixture):
             code = recall.main(["decisions", "--source", "memory", "--json"])
         self.assertEqual(code, 0, err.getvalue())
         self.assertEqual(len(json.loads(out.getvalue())["decisions"]), 2)
+
+
+class TestSecondReview(MemoryFixture):
+    """Cases from the second review: damaged sessions, recall without cwd, origins,
+    paths, foreign documents, early JSON failures and the write-failure path."""
+
+    def test_marker_in_a_session_with_broken_frontmatter_is_found(self):
+        self.assertEqual(self.run_import()[0], 0)
+        text = self.session.read_text()
+        self.session.write_text(text.replace("---\n", "---\nbroken: [\n", 1), encoding="utf-8")
+        code, data, _ = self.run_json()
+        train = next(r for r in data["rows"] if r["memory"] == "example-app/release-train")
+        self.assertEqual((code, train["action"]), (0, "existing"))
+        sources = [r.source for r in self.rows(self.project_doc, None)]
+        self.assertNotIn("memory:example-app/release-train", sources)
+
+    @unittest.skipUnless(shutil.which("git"), "git is not installed")
+    def test_default_recall_finds_an_all_projects_document(self):
+        main = self.root / "repo" / "example-app"
+        main.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+        encoded = claude_project_dir_name(claude_memory.project_root(main))
+        shutil.copytree(FIXTURES, self.projects / encoded / "memory")
+        code, text, _ = self.run_import("--all-projects", "--json", memory_dir=False)
+        self.assertEqual(code, 0, text)
+        self.chdir(main)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = recall.main(["decisions", "--source", "memory", "--json"])
+        self.assertEqual(code, 0, err.getvalue())
+        refs = {r["ref"].split("#")[0] for r in json.loads(out.getvalue())["decisions"]}
+        label = claude_memory._label(encoded)
+        self.assertEqual(refs, {f"memory:{label}"})
+
+    def test_origin_that_is_not_a_full_session_id_goes_to_the_project_doc(self):
+        for origin in (SID[:8], f"claude:{SID}", "memory:example-app"):
+            with self.subTest(origin=origin):
+                self.write_memory("release-train", memory_text("Ship small", origin=origin))
+                code, data, _ = self.run_json("--dry-run")
+                train = next(r for r in data["rows"] if r["memory"] == "example-app/release-train")
+                self.assertEqual((code, train["placement"]), (0, "project"))
+
+    def test_memory_dir_dot_and_relative_paths(self):
+        self.chdir(self.memory)
+        code, data, err = self.run_import(
+            "--json", "--dry-run", "--memory-dir", ".", memory_dir=False
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(data)["directories"][0]["label"], "example-app")
+        outside = Path(self.tmp.name).parent / f"{Path(self.tmp.name).name}-mem" / "copy-app"
+        self.addCleanup(shutil.rmtree, outside.parent, True)
+        shutil.copytree(FIXTURES, outside)
+        self.chdir(outside.parent)
+        self.assertEqual(self.run_import("--memory-dir", "copy-app", memory_dir=False)[0], 0)
+        doc = self.root / "data" / "decisions" / "copy-app.md"
+        self.assertIn(f"memory_dir: {outside.resolve()}\n", doc.read_text())
+        code, _, err = self.run_import("--memory-dir", str(outside), memory_dir=False)
+        self.assertEqual(code, 0, err)
+
+    def test_foreign_file_at_the_project_document_path_is_refused(self):
+        self.project_doc.parent.mkdir(parents=True)
+        for text in ("---\ntype: note\n---\n\n## My Notes\n\n", "---\nbroken: [\n---\n"):
+            with self.subTest(text=text):
+                self.project_doc.write_text(text, encoding="utf-8")
+                code, data, _ = self.run_json()
+                flat = next(r for r in data["rows"] if r["memory"] == "example-app/flat-form")
+                self.assertEqual((code, flat["action"]), (1, "failed"))
+                self.assertIn("is not a project decisions document", flat["reason"])
+                self.assertEqual(self.project_doc.read_text(), text)
+
+    def test_json_on_an_early_failure(self):
+        ledger = withdrawals.ledger_path(config.get_config())
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text("not json\n")
+        code, out, err = self.run_import("--json")
+        self.assertEqual(code, 1)
+        data = json.loads(out)
+        self.assertEqual((data["ok"], data["code"], data["exit"]), (False, None, 1))
+        self.assertIn(data["error"], err)
+
+    def test_write_failure_reports_the_code(self):
+        real = claude_memory.atomic_write
+
+        def refuse(path, text):
+            if path == self.project_doc:
+                raise PermissionError(13, "Permission denied")
+            return real(path, text)
+
+        with mock.patch.object(claude_memory, "atomic_write", refuse):
+            code, data, err = self.run_json()
+        self.assertEqual((code, data["failed"], data["added"]), (1, 2, 1))
+        self.assertIn(f"Error: could not write {self.project_doc}: Permission denied\n", err)
+        self.assertIn("code: MEMORY_IMPORT_WRITE_FAILED", err)
+
+    def test_ambiguous_origin_fails_without_fallback(self):
+        self.write_doc("2026-10-30-3f2a9c1e-copy.md", doc(rows=None))
+        code, data, _ = self.run_json()
+        train = next(r for r in data["rows"] if r["memory"] == "example-app/release-train")
+        self.assertEqual((code, train["action"], train["placement"]), (1, "failed", None))
+        self.assertTrue(train["reason"])
+
+    def test_empty_project_document_is_not_left_behind(self):
+        for stem in ("flat-form", "quoted-escapes"):
+            claim = read_memory(self.memory / f"{stem}.md")
+            assert isinstance(claim, Memory) and claim.description
+            withdrawals.withdraw(
+                withdrawals.ledger_path(config.get_config()),
+                withdrawals.fingerprint(decisions.normalise_claim([claim.description])),
+                source="claude",
+                session_id=SID,
+                row=9,
+                reason="hallucination",
+            )
+        with mock.patch.object(
+            claude_memory, "_ledger_state", return_value={}
+        ):  # planned before the withdrawals were seen
+            code, data, _ = self.run_json()
+        self.assertEqual((code, data["added"], data["skipped_withdrawn"]), (0, 1, 2))
+        self.assertFalse(self.project_doc.exists())
+
+    def test_quiet_keeps_summary_and_warnings(self):
+        code, out, err = self.run_import("-q")
+        self.assertEqual(code, 0)
+        self.assertNotIn("Added ", out)
+        self.assertTrue(out.startswith("Imported 3 memories"), out)
+        self.assertIn("is not exported", err)
+
+    def test_reader_not_utf8_and_cut_character(self):
+        bad = self.memory / "bad.md"
+        bad.write_bytes(b"---\ndescription: \xff\ntype: user\n---\n")
+        self.assertEqual(read_memory(bad), MemoryProblem("bad", "not UTF-8"))
+        head = memory_text("Long note", type_="user").encode()
+        pad = claude_memory.MAX_READ_BYTES - len(head) - 1
+        cut = self.memory / "cut.md"
+        cut.write_bytes(head + b"x" * pad + "\u00e9".encode())
+        memory = read_memory(cut)
+        assert isinstance(memory, Memory), memory
+        self.assertEqual(memory.description, "Long note")
+
+    def test_frontmatter_value_quoting(self):
+        self.assertEqual(claude_memory._frontmatter_value("a b "), '"a b "')
+        self.assertEqual(claude_memory._frontmatter_value("app"), "app")
+        with self.assertRaisesRegex(ValueError, "unterminated double-quoted value"):
+            claude_memory._scalar('"abc\\"', 2)
 
 
 if __name__ == "__main__":
