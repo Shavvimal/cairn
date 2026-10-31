@@ -105,7 +105,7 @@ class TestRoutineParsing(unittest.TestCase):
         self.assertConfigError(
             "routines.daily has unknown keys: schedule. Allowed keys: at, budget_usd_per_day, "
             "catch_up_days, cd, day, model, outputs, peer, prepare, profile, prompt_file, "
-            "sources, timeout_s, validate.",
+            "sources, stale_sources, terminal_hook, timeout_s, validate.",
             {"daily": _routine(schedule="daily")},
         )
 
@@ -240,6 +240,47 @@ class TestRoutineParsing(unittest.TestCase):
                     )
         spec = _build({"daily": _routine(prepare=["cairn", "recall", "digest"])})
         self.assertEqual(spec.routines["daily"].prepare, ("cairn", "recall", "digest"))
+
+    def test_terminal_hook_argv_rules(self):
+        where = "routines.daily.terminal_hook"
+        cases: tuple[tuple[object, str], ...] = (
+            (
+                "/usr/bin/notify",
+                f"{where} must be a non-empty array of strings (an argv list, never a shell "
+                "string), got str",
+            ),
+            (
+                [],
+                f"{where} must be a non-empty array of strings (an argv list, never a shell "
+                "string), got an empty array",
+            ),
+            (
+                ["/usr/bin/notify", "{{DAY}}"],
+                f"{where} takes no template variables (the hook reads CAIRN_ROUTINE_* from its "
+                "environment), found {{DAY}}",
+            ),
+            (["notify"], f"{where}[0] must be an absolute path after expanding ~, got 'notify'"),
+        )
+        for value, message in cases:
+            with self.subTest(value=value):
+                self.assertConfigError(message, {"daily": _routine(terminal_hook=value)})
+        spec = _build({"daily": _routine(terminal_hook=None)}).routines["daily"]
+        self.assertIsNone(spec.terminal_hook)
+        self.assertIsNone(_build({"daily": _routine()}).routines["daily"].terminal_hook)
+        spec = _build({"daily": _routine(terminal_hook=["~/bin/notify", "--quiet"])})
+        self.assertEqual(
+            spec.routines["daily"].terminal_hook, (str(Path.home() / "bin/notify"), "--quiet")
+        )
+
+    def test_stale_sources_enum(self):
+        self.assertConfigError(
+            "routines.daily.stale_sources must be one of warn, refuse, ignore, got 'loud'",
+            {"daily": _routine(stale_sources="loud")},
+        )
+        self.assertEqual(_build({"daily": _routine()}).routines["daily"].stale_sources, "warn")
+        for mode in ("warn", "refuse", "ignore"):
+            spec = _build({"daily": _routine(stale_sources=mode)}).routines["daily"]
+            self.assertEqual(spec.stale_sources, mode)
 
     def test_routine_profile_must_resolve_for_peer(self):
         self.assertConfigError(

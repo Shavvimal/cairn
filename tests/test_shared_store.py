@@ -28,6 +28,9 @@ HOST_IDENTITY_HINTS = (
     "CODEX_THREAD_ID",
     "CODEX_SESSION_ID",
     "CAIRN_HARNESS",
+    # A test suite started inside a `cairn invoke` peer must not inherit its depth.
+    "CAIRN_INVOKE_DEPTH",
+    "CAIRN_INVOKE_CALLER",
 )
 
 

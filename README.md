@@ -272,8 +272,10 @@ Path fields expand a leading `~` and `{{DATA_ROOT}}`, nothing else, and must end
 cairn routine run example-daily --dry-run   # print each due day's argv and rendered prompt; run nothing
 cairn routine install example-daily         # add the launchd job dev.cairn.routine.example-daily
 cairn routine kickstart example-daily       # ask launchd to start it now (--force-restart kills a running instance first)
-cairn routine status example-daily          # config, paths, per-day stamps, last run, cost, log tail (--json, --lines N)
-cairn routine list [--json]                 # every routine with install state and last exit
+cairn routine status example-daily          # state, config, paths, per-day stamps, last run, cost, log tail (--json, --lines N)
+cairn routine status example-daily --json > /tmp/status.json || echo "needs a look"   # exit 0 fresh, 1 needs attention, 2 paused or disabled
+cairn routine list [--json]                 # every routine with install state, last exit and state
+cairn routine pause example-daily --reason "away this week"   # every run skips until 'cairn routine resume example-daily'
 cairn routine run example-daily --day 2026-10-27 --force   # re-run one day as a new attempt
 cairn routine uninstall example-daily       # remove the job; stamps, attempts and the log stay
 ```
@@ -315,6 +317,22 @@ Each round runs with `--owner routine:<name>`, so the peer session carries that 
 A digest does not skip these sessions: it copies `owner` into each one's front matter, and
 the consumer decides what to do with them. One run at a time per routine: a second
 start logs `skipped-lock` and exits 0. `routine run` refuses to start inside a peer run.
+After 3 consecutive failed runs with a counted failure the routine disables itself, so a
+broken validator costs at most 3 peer rounds in a row (a run with a done or empty day resets
+the count); `cairn routine resume NAME` clears it.
+`cairn routine run NAME --json` prints the run report, which is also `last-run.json`. A
+run warns about a digest source that is enabled, not in `sources` and not exported in
+the last 24 h (`stale_sources`: `warn`, `refuse` or `ignore`). To be told about each day,
+set `terminal_hook`, an argv list whose first element is an absolute path:
+
+```bash
+cairn config set routines.example-daily.terminal_hook '["/usr/bin/osascript", "-e", "display notification \"cairn routine finished a day\""]'
+```
+
+It runs once per day stamp, with a 10 s timeout, the day's report row on stdin and
+`CAIRN_ROUTINE_DAY`, `CAIRN_ROUTINE_OUTCOME`, `CAIRN_ROUTINE_REASON` and the other
+`CAIRN_ROUTINE_*` names in its environment. A hook failure is logged and changes nothing
+else. Details: [docs/routine-hardening-spec.md](docs/routine-hardening-spec.md).
 State lives in `$XDG_STATE_HOME/cairn/routines/<name>/` (default `~/.local/state`), each
 attempt keeps its prompt, args, invoke result, `prepare.out` (the stdout of `prepare`),
 `validate.out` and `validate.err` under `{{ATTEMPT_DIR}}`. The stderr of `prepare` goes to

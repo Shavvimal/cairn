@@ -266,6 +266,8 @@ class RoutineSpec:
     outputs: dict[str, Path]
     prepare: tuple[str, ...] | None
     validate: tuple[str, ...]
+    terminal_hook: tuple[str, ...] | None = None
+    stale_sources: str = "warn"
     raw: dict = field(default_factory=dict, compare=False, repr=False)
 
 
@@ -606,11 +608,14 @@ _ROUTINE_FIELDS = (
     "profile",
     "prompt_file",
     "sources",
+    "stale_sources",
+    "terminal_hook",
     "timeout_s",
     "validate",
 )
 ROUTINE_REQUIRED = ("peer", "prompt_file", "cd", "at", "validate")
 ROUTINE_DAYS = ("yesterday-utc",)
+ROUTINE_STALE_SOURCES = ("warn", "refuse", "ignore")
 ROUTINE_BUILTIN_VARIABLES = ("DAY", "DATA_ROOT", "ATTEMPT_DIR", "DIGEST_DIR")
 DEFAULT_ROUTINE_OUTPUTS = {"journal_dir": "{{DATA_ROOT}}/journal"}
 _AT_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
@@ -661,6 +666,29 @@ def _routine_argv(where: str, value: object) -> tuple[str, ...]:
             f"string), got {_describe(value)}"
         )
     return tuple(value)
+
+
+def _terminal_hook(where: str, value: object) -> tuple[str, ...] | None:
+    """``null``, or an argv list without template variables whose argv[0] is absolute.
+
+    launchd runs the hook with the recorded ``PATH``, and a failed hook is only logged,
+    so a bare command name would fail silently: argv[0] must be an absolute path.
+    """
+    if value is None:
+        return None
+    argv = _routine_argv(where, value)
+    for arg in argv:
+        for token in TEMPLATE_TOKEN_RE.findall(arg):
+            raise ConfigError(
+                f"{where} takes no template variables (the hook reads CAIRN_ROUTINE_* from "
+                f"its environment), found {{{{{token}}}}}"
+            )
+    expanded = tuple(expand_home(arg) for arg in argv)
+    if not Path(expanded[0]).is_absolute():
+        raise ConfigError(
+            f"{where}[0] must be an absolute path after expanding ~, got {expanded[0]!r}"
+        )
+    return expanded
 
 
 def _routine_sources(
@@ -782,6 +810,12 @@ def _parse_routine(
         f"{where}.outputs", values.get("outputs", dict(DEFAULT_ROUTINE_OUTPUTS)), data_root
     )
     prepare = values.get("prepare")
+    stale_sources = values.get("stale_sources", ROUTINE_STALE_SOURCES[0])
+    if stale_sources not in ROUTINE_STALE_SOURCES:
+        raise ConfigError(
+            f"{where}.stale_sources must be one of {', '.join(ROUTINE_STALE_SOURCES)}, "
+            f"got {stale_sources!r}"
+        )
     return RoutineSpec(
         name=name,
         peer=peer,
@@ -798,6 +832,8 @@ def _parse_routine(
         outputs=outputs,
         prepare=None if prepare is None else _routine_argv(f"{where}.prepare", prepare),
         validate=_routine_argv(f"{where}.validate", values["validate"]),
+        terminal_hook=_terminal_hook(f"{where}.terminal_hook", values.get("terminal_hook")),
+        stale_sources=stale_sources,
         raw=values,
     )
 

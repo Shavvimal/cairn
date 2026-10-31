@@ -15,12 +15,13 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 from cairn import config, routine, routine_plan, routine_run
+from cairn.procs import ProcessCleanupError
 from cairn.storage import lock_path
 from tests.test_shared_store import StoreFixture
 
@@ -116,6 +117,9 @@ class RoutineFixture(StoreFixture):
             "sources": ["claude", "codex"],
             "prepare": ["prep", "--day", "{{DAY}}"],
             "validate": ["check", "{{DAY}}", "{{ATTEMPT_DIR}}"],
+            # The fixture enables antigravity outside sources, so the default "warn" would
+            # flag it on every run; TestStaleSources drops this key to test the default.
+            "stale_sources": "ignore",
         }
         spec.update(overrides)
         data["routines"] = {"daily": {k: v for k, v in spec.items() if v is not ...}}
@@ -628,7 +632,7 @@ class Launchctl:
         self.calls: list[tuple[str, ...]] = []
         self.loaded = loaded
 
-    def __call__(self, *args):
+    def __call__(self, *args, timeout=None):
         self.calls.append(args)
         code = 0 if (args[0] != "print" or self.loaded) else 113
         return subprocess.CompletedProcess(["launchctl", *args], code, "", "")
@@ -704,7 +708,8 @@ class TestLaunchd(RoutineFixture):
     def test_status_json_sections(self):
         self.cli("run", "daily", children=Children(validate=[0, 1]))
         code, out, _err = self.cli_launchd("status", "daily", "--json", fake=Launchctl())
-        self.assertEqual(code, 0)
+        # A failed day needs attention: exit 1 (it was 0 before the hardening spec).
+        self.assertEqual(code, 1)
         report = json.loads(out)
         for key in (
             "config",
@@ -714,8 +719,21 @@ class TestLaunchd(RoutineFixture):
             "days",
             "last_cost_usd",
             "log_tail",
+            "schema_version",
+            "state",
+            "exit",
+            "attention",
+            "paused",
+            "disabled",
+            "last_run_age_s",
+            "stale_after_s",
         ):
             self.assertIn(key, report)
+        self.assertEqual(
+            (report["schema_version"], report["state"], report["exit"]), (1, "fresh", 1)
+        )
+        self.assertEqual(report["attention"], ["failed-day", "last-run-exit-1", "launchd-missing"])
+        self.assertEqual(report["stale_after_s"], 172800)
         states = {row["day"]: row["state"] for row in report["days"]}
         self.assertEqual(
             states, {"2026-11-11": "pending", "2026-11-10": "failed", "2026-11-09": "done"}
@@ -725,7 +743,7 @@ class TestLaunchd(RoutineFixture):
         self.assertTrue(report["paths"]["latest_prepare_out"].endswith("attempt-1/prepare.out"))
         code, out, _err = self.cli_launchd("list", fake=Launchctl())
         self.assertIn("daily  peer=claude profile=scheduled at=05:20 installed=no", out)
-        self.assertIn("pending=2 failed=1", out)
+        self.assertIn("pending=2 failed=1 state=fresh", out)
 
 
 class TestDoctor(RoutineFixture):
@@ -818,3 +836,571 @@ class TestDoctor(RoutineFixture):
         self.config.write_text(json.dumps(data))
         config.get_config.cache_clear()
         self.assertEqual(self.checks(Launchctl()), [])
+
+
+# ---------------------------------------------------------------------------
+# Hardening (docs/routine-hardening-spec.md)
+# ---------------------------------------------------------------------------
+
+HOOK_SCRIPT = """\
+import json, os, sys
+record = {
+    "env": {k: v for k, v in os.environ.items() if k.startswith("CAIRN_ROUTINE")},
+    "stdin": sys.stdin.read(),
+}
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\\n")
+sys.stderr.write("hook said no\\n")
+sys.exit(int(sys.argv[2]))
+"""
+
+
+class TtyStringIO(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+class HardeningFixture(RoutineFixture):
+    def setUp(self):
+        super().setUp()
+        macos = patch("cairn.routine.is_macos", return_value=False)
+        macos.start()
+        self.addCleanup(macos.stop)
+
+    def last_run(self) -> dict:
+        last = routine_plan.read_json(self.state / "last-run.json")
+        assert last is not None
+        return last
+
+    def hook_config(self, exit_code: int = 0, **overrides) -> Path:
+        script = self.root / "hook.py"
+        script.write_text(HOOK_SCRIPT)
+        calls = self.root / "hook-calls.jsonl"
+        self.write_config(
+            terminal_hook=[sys.executable, str(script), str(calls), str(exit_code)], **overrides
+        )
+        return calls
+
+    @staticmethod
+    def hook_calls(calls: Path) -> list[dict]:
+        if not calls.exists():
+            return []
+        return [json.loads(line) for line in calls.read_text().splitlines()]
+
+    def json_run(self, *argv: str, children: Children | None = None) -> tuple[int, dict, str]:
+        code, out, err = self.cli("run", "daily", "--json", *argv, children=children)
+        return code, json.loads(out), err
+
+
+class TestPauseResume(HardeningFixture):
+    def test_pause_writes_marker_and_run_skips_without_stamp(self):
+        code, out, _err = self.cli("pause", "daily", "--reason", "  moving house ")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            out, "Paused daily: moving house (runs skip until 'cairn routine resume daily')\n"
+        )
+        marker = routine_plan.read_json(self.state / "paused.json")
+        assert marker is not None
+        self.assertEqual(marker["reason"], "moving house")
+        children = Children()
+        for extra in ((), ("--day", "2026-11-11", "--force")):
+            with self.subTest(extra=extra):
+                code, out, err = self.cli("run", "daily", *extra, children=children)
+                self.assertEqual(code, 0)
+                self.assertEqual(out, "")
+                self.assertEqual(
+                    err.splitlines()[-1],
+                    f"routine daily: paused since {marker['paused_at']} (moving house); "
+                    "run 'cairn routine resume daily' to resume",
+                )
+        self.assertEqual(children.calls, [])
+        self.assertEqual(sorted(p.name for p in self.state.iterdir()), ["paused.json"])
+        self.assertEqual(len(self.events("skipped-paused")), 2)
+        self.assertIn('reason="moving house"', self.events("skipped-paused")[0])
+        code, out, _err = self.cli("pause", "daily", "--reason", "still moving")
+        self.assertEqual(out, "daily was already paused; reason updated: still moving\n")
+        again = routine_plan.read_json(self.state / "paused.json")
+        assert again is not None
+        self.assertEqual(
+            (again["reason"], again["paused_at"]), ("still moving", marker["paused_at"])
+        )
+        code, out, _err = self.cli("run", "daily", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("routine daily: paused since "))
+        self.assertIn("day 2026-11-09 attempt 1 (would create", out)
+
+    def test_pause_requires_reason_and_rejects_newline(self):
+        message = "cairn routine: --reason must be non-empty, one line, at most 200 characters\n"
+        for reason in ("", "   ", "one\ntwo", "x" * 201):
+            with self.subTest(reason=reason):
+                code, _out, err = self.cli("pause", "daily", "--reason", reason)
+                self.assertEqual((code, err), (2, message))
+        self.assertFalse((self.state / "paused.json").exists())
+        self.assertEqual(self.cli("pause", "daily", "--reason", "x" * 200)[0], 0)
+        code, _out, err = self.cli("pause", "nightly", "--reason", "x")
+        self.assertEqual(code, 2)
+        self.assertIn("routine 'nightly' is not in routines", err)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            routine.main(["pause", "daily"])
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_resume_removes_markers_and_breaker(self):
+        self.state.mkdir(parents=True)
+        for name in ("paused.json", "disabled.json", "breaker.json"):
+            (self.state / name).write_text("{}")
+        code, out, _err = self.cli("resume", "daily")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "Resumed daily (removed: paused.json, disabled.json, breaker.json)\n")
+        self.assertEqual(list(self.state.iterdir()), [])
+        code, out, _err = self.cli("resume", "daily")
+        self.assertEqual((code, out), (0, "daily is not paused or disabled; nothing to resume\n"))
+        # A routine already removed from config can still be resumed.
+        gone = routine_run.state_dir(self.cfg, "gone")
+        gone.mkdir(parents=True)
+        (gone / "paused.json").write_text("{}")
+        code, out, _err = self.cli("resume", "gone")
+        self.assertEqual((code, out), (0, "Resumed gone (removed: paused.json)\n"))
+
+    def test_install_keeps_pause_marker_and_notes_it(self):
+        self.cli("pause", "daily", "--reason", "moving house")
+        note = (
+            "note: routine daily is paused (moving house); the job is installed but each run "
+            "skips until 'cairn routine resume daily'\n"
+        )
+        with (
+            patch("cairn.routine.launchctl", Launchctl()),
+            patch("cairn.routine.is_macos", return_value=True),
+        ):
+            code, _out, err = self.cli("install", "daily")
+            self.assertEqual(code, 0)
+            self.assertTrue(err.endswith(note), err)  # after the PATH warning for 'check'
+            code, _out, err = self.cli("kickstart", "daily")
+            self.assertEqual((code, err), (0, note))
+        self.assertTrue((self.state / "paused.json").is_file())
+
+    def test_list_appends_state(self):
+        code, out, _err = self.cli("list")
+        self.assertEqual(code, 0)
+        self.assertTrue(out.rstrip().endswith("pending=3 failed=0 state=never_run"), out)
+        self.cli("run", "daily")
+        self.cli("pause", "daily", "--reason", "away")
+        code, out, _err = self.cli("list", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)[0]["state"], "paused")
+
+    def test_doctor_reports_paused_and_disabled(self):
+        self.cli("pause", "daily", "--reason", "moving house")
+        lines = {label: (level, detail) for level, label, detail in routine.doctor_checks(self.cfg)}
+        level, detail = lines["routine [daily] paused"]
+        self.assertEqual(level, "warn")
+        self.assertRegex(
+            detail,
+            r"^paused since \S+ \(moving house\); run 'cairn routine resume daily' to resume$",
+        )
+        (self.state / "disabled.json").write_text("{not json")
+        lines = {label: (level, detail) for level, label, detail in routine.doctor_checks(self.cfg)}
+        self.assertNotIn("routine [daily] paused", lines)
+        self.assertEqual(
+            lines["routine [daily] disabled"],
+            (
+                "warn",
+                "disabled since unknown ((unreadable marker)); fix the cause, then run "
+                "'cairn routine resume daily'",
+            ),
+        )
+
+
+class TestBreaker(HardeningFixture):
+    def test_breaker_disables_after_three_counted_failed_runs(self):
+        for number in (1, 2, 3):
+            code, report, err = self.json_run(children=Children(validate=1))
+            self.assertEqual((code, report["status"]), (1, "failed"))
+            self.assertEqual(report["breaker"]["consecutive_failed_runs"], number)
+        self.assertIs(report["breaker"]["disabled"], True)
+        reason = "3 consecutive failed runs: validate-exit-1, validate-exit-1, validate-exit-1"
+        marker = routine_plan.read_json(self.state / "disabled.json")
+        assert marker is not None
+        self.assertEqual(marker["reason"], reason)
+        self.assertEqual(len(marker["runs"]), 3)
+        self.assertIn("routine daily: disabled since ", err)
+        self.assertEqual(len(self.events("disabled")), 1)
+        children = Children()
+        code, report, err = self.json_run("--day", "2026-11-10", "--force", children=children)
+        self.assertEqual((code, report["status"], report["reason"]), (0, "skipped", "disabled"))
+        self.assertEqual(children.calls, [])
+        self.assertIn(f"({reason}); fix the cause, then run 'cairn routine resume daily'", err)
+        self.assertEqual(len(self.events("skipped-disabled")), 1)
+        code, _out, _err = self.cli("status", "daily")
+        self.assertEqual(code, 2)
+        self.assertEqual(self.cli("resume", "daily")[0], 0)
+        code, report, _err = self.json_run(children=Children())
+        self.assertEqual((code, report["status"]), (0, "ok"))
+        self.assertEqual(report["breaker"], {"consecutive_failed_runs": 0, "disabled": False})
+
+    def test_breaker_ignores_uncounted_failures_and_resets_on_done(self):
+        for _ in range(3):
+            code, report, _err = self.json_run(children=Children(refresh=1))
+            self.assertEqual((code, report["status"]), (1, "failed"))
+        self.assertFalse((self.state / "breaker.json").exists())
+        self.assertFalse((self.state / "disabled.json").exists())
+        for _ in range(2):
+            self.json_run(children=Children(validate=1))
+        breaker = routine_plan.read_json(self.state / "breaker.json")
+        assert breaker is not None
+        self.assertEqual(breaker["consecutive_failed_runs"], 2)
+        self.assertEqual(breaker["runs"][-1]["reason"], "validate-exit-1")
+        code, report, _err = self.json_run(children=Children(validate=[0, 1]))
+        self.assertEqual((code, report["status"]), (1, "partial"))
+        self.assertFalse((self.state / "breaker.json").exists())
+        self.assertEqual(report["breaker"]["consecutive_failed_runs"], 0)
+
+    def test_marker_that_lands_before_the_lock_still_skips(self):
+        # A run that held the lock tripped the breaker (or a pause landed) between this
+        # run's first marker check and its lock: the check under the lock catches it.
+        self.json_run(children=Children())
+        before = self.last_run()
+        real_locked = routine_run.locked
+        state = self.state
+
+        @contextmanager
+        def tripping_lock(*args, **kwargs):
+            with real_locked(*args, **kwargs):
+                (state / "disabled.json").write_text(json.dumps({"reason": "tripped"}))
+                yield
+
+        children = Children()
+        with patch("cairn.routine_run.locked", tripping_lock):
+            code, report, err = self.json_run("--day", "2026-11-10", "--force", children=children)
+        self.assertEqual((code, report["status"], report["reason"]), (0, "skipped", "disabled"))
+        self.assertEqual(children.calls, [])
+        self.assertIn("(tripped); fix the cause, then run 'cairn routine resume daily'", err)
+        self.assertFalse((self.state / "running.json").exists())
+        self.assertEqual(self.last_run(), before)
+
+
+class TestTerminalHook(HardeningFixture):
+    def test_hook_runs_once_per_stamp_with_env_and_stdin(self):
+        calls = self.hook_config()
+        code, report, _err = self.json_run(children=Children(validate=[0, 1]))
+        self.assertEqual(code, 1)
+        records = self.hook_calls(calls)
+        self.assertEqual(len(records), 2)  # done 11-09, failed 11-10; 11-11 deferred
+        done, failed = records
+        where = str(self.attempt("2026-11-09", 1))
+        self.assertEqual(
+            done["env"],
+            {
+                "CAIRN_ROUTINE": "daily",
+                "CAIRN_ROUTINE_DAY": "2026-11-09",
+                "CAIRN_ROUTINE_ATTEMPT_DIR": where,
+                "CAIRN_ROUTINE_OUTCOME": "done",
+                "CAIRN_ROUTINE_REASON": "",
+                "CAIRN_ROUTINE_ATTEMPT": "1",
+                "CAIRN_ROUTINE_RUN_ID": report["run_id"],
+            },
+        )
+        self.assertEqual(
+            (failed["env"]["CAIRN_ROUTINE_OUTCOME"], failed["env"]["CAIRN_ROUTINE_REASON"]),
+            ("failed", "validate-exit-1"),
+        )
+        row = json.loads(done["stdin"])
+        self.assertTrue(done["stdin"].endswith("}\n"))
+        self.assertEqual((row["routine"], row["run_id"]), ("daily", report["run_id"]))
+        self.assertEqual(
+            (row["day"], row["outcome"], row["attempt_dir"]), ("2026-11-09", "done", where)
+        )
+        self.assertEqual(len(self.events("hook")), 2)
+        self.assertIn("exit=0", self.events("hook")[0])
+        outcomes = [
+            (r["day"], r["outcome"], r["hook"] and r["hook"]["exit"]) for r in report["rows"]
+        ]
+        self.assertEqual(
+            outcomes,
+            [
+                ("2026-11-09", "done", 0),
+                ("2026-11-10", "failed", 0),
+                ("2026-11-11", "deferred", None),
+            ],
+        )
+
+    def test_hook_failure_and_timeout_never_change_stamp_or_exit(self):
+        calls = self.hook_config(exit_code=5)
+        code, report, _err = self.json_run("--day", "2026-11-11")
+        self.assertEqual((code, report["status"]), (0, "ok"))
+        self.assertEqual(len(self.hook_calls(calls)), 1)
+        self.assertIsNotNone(self.stamp("done", "2026-11-11"))
+        self.assertIn("exit=5", self.events("hook")[0])
+        self.assertIn("      [stderr] hook said no", self.log.read_text())
+        self.assertEqual(report["rows"][0]["hook"]["exit"], 5)
+
+        timeout = subprocess.TimeoutExpired(["hook"], 10, stderr=b"slow hook\n")
+        with patch("cairn.routine_run.run_hook", side_effect=timeout):
+            code, report, _err = self.json_run("--day", "2026-11-10")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["rows"][0]["hook"]["exit"], "timeout")
+        self.assertIn("exit=timeout", self.events("hook")[-1])
+        self.assertIsNotNone(self.stamp("done", "2026-11-10"))
+
+        self.write_config(terminal_hook=[str(self.root / "no-such-hook")])
+        code, report, _err = self.json_run("--day", "2026-11-09")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["rows"][0]["hook"]["exit"], "missing")
+        self.assertIsNotNone(self.stamp("done", "2026-11-09"))
+        for line in self.log.read_text().splitlines():
+            self.assertRegex(line, LOG_LINE)
+
+    def test_hook_refused_or_broken_never_changes_stamp_or_exit(self):
+        script = self.root / "not-executable"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o644)
+        self.write_config(terminal_hook=[str(script)])
+        code, report, _err = self.json_run("--day", "2026-11-11")
+        self.assertEqual((code, report["rows"][0]["hook"]["exit"]), (0, 126))
+        self.assertIsNotNone(self.stamp("done", "2026-11-11"))
+        broken = ProcessCleanupError("cleanup incomplete: pid 1 was not reaped 2s after SIGKILL")
+        with patch("cairn.routine_run.run_hook", side_effect=broken):
+            code, report, _err = self.json_run("--day", "2026-11-10")
+        self.assertEqual((code, report["rows"][0]["hook"]["exit"]), (0, "error"))
+        self.assertIn("exit=error", self.events("hook")[-1])
+        self.assertIn("ProcessCleanupError: cleanup incomplete", self.log.read_text())
+        self.assertIsNotNone(self.stamp("done", "2026-11-10"))
+
+    def test_hook_runs_per_day_on_incomplete_input(self):
+        calls = self.hook_config()
+        code, _report, _err = self.json_run(children=Children(refresh=1))
+        self.assertEqual(code, 1)
+        records = self.hook_calls(calls)
+        self.assertEqual(
+            [r["env"]["CAIRN_ROUTINE_DAY"] for r in records],
+            ["2026-11-09", "2026-11-10", "2026-11-11"],
+        )
+        for record in records:
+            env = record["env"]
+            self.assertEqual(env["CAIRN_ROUTINE_REASON"], "incomplete-input")
+            self.assertEqual(
+                (env["CAIRN_ROUTINE_ATTEMPT"], env["CAIRN_ROUTINE_ATTEMPT_DIR"]), ("", "")
+            )
+            self.assertIsNone(json.loads(record["stdin"])["attempt"])
+
+
+class TestStaleSources(HardeningFixture):
+    def setUp(self):
+        super().setUp()
+        self.write_config(stale_sources=...)  # the default: warn
+
+    def receipt(self, source: str, hours_ago: float) -> str:
+        from datetime import UTC, datetime, timedelta
+
+        from cairn import export_receipt
+
+        when = (datetime.now(UTC) - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
+        output_dir = self.cfg.output_dir(f"{source}-sessions")
+        path = export_receipt.receipt_path(source, output_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {"source": source, "output_dir": str(output_dir.resolve()), "last_ok_at": when}
+            )
+        )
+        return when
+
+    def test_stale_source_warns_and_reports(self):
+        code, report, err = self.json_run("--day", "2026-11-11")
+        self.assertEqual((code, report["status"]), (0, "ok"))
+        self.assertEqual(
+            err,
+            "warning: routine daily: source antigravity has no export record; add it to "
+            "routines.daily.sources or run 'cairn sync'\n",
+        )
+        self.assertEqual(
+            report["stale_sources"],
+            [{"source": "antigravity", "last_export_at": None, "age_h": None, "basis": "none"}],
+        )
+        self.assertIn("source=antigravity age_h=null basis=none", self.events("stale-source")[0])
+        code, out, _err = self.cli("status", "daily", "--json")
+        self.assertIn("stale-source", json.loads(out)["attention"])
+
+        when = self.receipt("antigravity", 71.2)
+        code, report, err = self.json_run("--day", "2026-11-10")
+        self.assertEqual(
+            err,
+            f"warning: routine daily: source antigravity was last exported {when} (71.2 h ago); "
+            "add it to routines.daily.sources or run 'cairn sync'\n",
+        )
+        self.assertEqual(report["stale_sources"][0]["basis"], "receipt")
+        self.receipt("antigravity", 1)
+        code, report, err = self.json_run("--day", "2026-11-09")
+        self.assertEqual((err, report["stale_sources"]), ("", []))
+
+    def test_stale_source_refuse_fails_days_uncounted_without_invoke(self):
+        self.write_config(stale_sources="refuse")
+        children = Children()
+        code, report, _err = self.json_run(children=children)
+        self.assertEqual((code, report["status"]), (1, "failed"))
+        self.assertEqual([k for k, *_rest in children.calls], ["refresh", "refresh"])
+        for day in ("2026-11-09", "2026-11-10", "2026-11-11"):
+            failed = self.stamp("failed", day)
+            assert failed is not None
+            self.assertEqual((failed["reason"], failed["attempts"]), ("stale-source", 0))
+        self.assertFalse((self.state / "breaker.json").exists())
+        code, report, _err = self.json_run("--stale-sources", "warn", children=Children())
+        self.assertEqual((code, report["status"]), (0, "ok"))
+        self.write_config(stale_sources="warn")
+        code, report, err = self.json_run(
+            "--day", "2026-11-11", "--force", "--stale-sources", "ignore"
+        )
+        self.assertEqual((code, err, report["stale_sources"]), (0, "", []))
+
+    def test_stale_source_ignores_routine_sources_and_disabled_collections(self):
+        self.write_config(sources=["claude", "codex", "antigravity"], stale_sources=...)
+        code, report, err = self.json_run("--day", "2026-11-11")
+        self.assertEqual((code, err, report["stale_sources"]), (0, "", []))
+        data = json.loads(self.config.read_text())
+        data["collections"]["antigravity-sessions"]["sync"] = {"enabled": False}
+        self.config.write_text(json.dumps(data))
+        self.write_config(stale_sources=...)
+        code, report, err = self.json_run("--day", "2026-11-10")
+        self.assertEqual((code, err, report["stale_sources"]), (0, "", []))
+
+    def test_receipt_without_a_successful_export_falls_back_to_catalog_mtime(self):
+        from cairn import export_receipt
+        from cairn.catalog import catalog_path
+
+        output_dir = self.cfg.output_dir("antigravity-sessions")
+        export_receipt.write("antigravity", output_dir, "export", 1)  # last_ok_at: null
+        catalog = catalog_path(output_dir)
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        catalog.write_text("{}")
+        code, report, err = self.json_run("--day", "2026-11-11")
+        self.assertEqual((code, err, report["stale_sources"]), (0, "", []))
+        old = catalog.stat().st_mtime - 3 * 86_400
+        os.utime(catalog, (old, old))
+        code, report, err = self.json_run("--day", "2026-11-10")
+        self.assertEqual(report["stale_sources"][0]["basis"], "catalog-mtime")
+
+    def test_clean_run_reports_stale_sources_too(self):
+        self.receipt("antigravity", 1)
+        code, report, _err = self.json_run(children=Children())
+        self.assertEqual((code, report["status"], report["stale_sources"]), (0, "ok", []))
+        self.receipt("antigravity", 30)
+        code, report, err = self.json_run()
+        self.assertEqual((code, report["status"]), (0, "clean"))
+        self.assertEqual(report["stale_sources"][0]["source"], "antigravity")
+        self.assertIn("source antigravity was last exported ", err)
+        code, out, _err = self.cli("status", "daily", "--json")
+        self.assertIn("stale-source", json.loads(out)["attention"])
+        self.receipt("antigravity", 1)  # the user ran 'cairn sync'
+        code, report, err = self.json_run()
+        self.assertEqual((report["status"], report["stale_sources"], err), ("clean", [], ""))
+        code, out, _err = self.cli("status", "daily", "--json")
+        self.assertEqual((code, json.loads(out)["attention"]), (0, []))
+
+    def test_stale_source_falls_back_to_catalog_mtime(self):
+        from cairn.catalog import catalog_path
+
+        catalog = catalog_path(self.cfg.output_dir("antigravity-sessions"))
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        catalog.write_text("{}")
+        code, report, err = self.json_run("--day", "2026-11-11")
+        self.assertEqual((err, report["stale_sources"]), ("", []))
+        old = catalog.stat().st_mtime - 3 * 86_400
+        os.utime(catalog, (old, old))
+        code, report, err = self.json_run("--day", "2026-11-10")
+        self.assertEqual(code, 0)
+        entry = report["stale_sources"][0]
+        self.assertEqual((entry["basis"], entry["age_h"]), ("catalog-mtime", 72.0))
+        self.assertIn("source antigravity was last exported ", err)
+
+
+class TestRunReport(HardeningFixture):
+    def test_run_json_report_status_values(self):
+        code, report, _err = self.json_run(children=Children(validate=[0, 1]))
+        self.assertEqual((code, report["status"], report["schema_version"]), (1, "partial", 1))
+        code, report, _err = self.json_run(children=Children(validate=1))
+        self.assertEqual((code, report["status"]), (1, "failed"))
+        code, report, _err = self.json_run(children=Children())
+        self.assertEqual((code, report["status"]), (0, "ok"))
+        code, report, _err = self.json_run()
+        self.assertEqual((code, report["status"], report["rows"]), (0, "clean", []))
+        self.cli("pause", "daily", "--reason", "away")
+        code, report, _err = self.json_run()
+        self.assertEqual((code, report["status"], report["reason"]), (0, "skipped", "paused"))
+        self.assertEqual(self.last_run()["status"], "clean")  # a skip keeps the last real run
+        code, _out, err = self.cli("run", "daily", "--json", "--dry-run")
+        self.assertEqual(
+            (code, err), (2, "cairn routine: --json does not combine with --dry-run\n")
+        )
+
+    def test_run_json_stdout_is_one_object_on_tty(self):
+        out = TtyStringIO()
+        with (
+            patch("cairn.routine_run.run_command", Children(validate=[0, 1])),
+            redirect_stdout(out),
+            redirect_stderr(io.StringIO()),
+        ):
+            code = routine.main(["run", "daily", "--json"])
+        self.assertEqual(code, 1)
+        report = json.loads(out.getvalue())
+        self.assertEqual(report, self.last_run())
+        out = TtyStringIO()
+        with (
+            patch("cairn.routine_run.run_command", Children()),
+            redirect_stdout(out),
+        ):
+            routine.main(["run", "daily", "--day", "2026-11-10", "--force"])
+        self.assertIn(" event=start ", out.getvalue())  # without --json a TTY still echoes
+
+    def test_lock_held_json_report_keeps_last_run(self):
+        self.json_run(children=Children())
+        before = self.last_run()
+
+        def held(*_args, **_kwargs):
+            raise BlockingIOError
+
+        out = TtyStringIO()
+        children = Children()
+        with (
+            patch("cairn.routine_run.locked", held),
+            patch("cairn.routine_run.run_command", children),
+            redirect_stdout(out),
+            redirect_stderr(io.StringIO()),
+        ):
+            code = routine.main(["run", "daily", "--json", "--day", "2026-11-10", "--force"])
+        report = json.loads(out.getvalue())  # one object, no TTY skip line
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            (report["status"], report["reason"], report["exit"], report["rows"]),
+            ("skipped", "lock-held", 0, []),
+        )
+        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(children.calls, [])
+        self.assertEqual(self.last_run(), before)
+
+    def test_running_marker_names_this_process_while_body_runs(self):
+        seen: list[dict] = []
+
+        def body(run, today, day, force):
+            seen.append(json.loads((run.sdir / "running.json").read_text()))
+            return run.finish(0)
+
+        with patch.object(routine_run.Run, "body", autospec=True, side_effect=body):
+            code, _out, _err = self.cli("run", "daily")
+        self.assertEqual(code, 0)
+        self.assertEqual(seen[0]["pid"], os.getpid())
+        self.assertEqual(seen[0]["run_id"], self.last_run()["run_id"])
+        self.assertFalse((self.state / "running.json").exists())
+
+    def test_last_run_json_keeps_legacy_keys(self):
+        self.cli("run", "daily", children=Children(validate=[0, 1]))
+        last = self.last_run()
+        legacy = ("run_id", "started_at", "finished_at", "exit", "days", "done", "empty")
+        for key in (*legacy, "failed", "deferred", "cost_usd", "error", "failures"):
+            self.assertIn(key, last)
+        self.assertEqual(last["days"], ["2026-11-09", "2026-11-10", "2026-11-11"])
+        self.assertEqual(
+            (last["done"], last["failed"], last["deferred"], last["exit"]), (1, 1, 1, 1)
+        )
+        self.assertEqual(
+            (last["schema_version"], last["routine"], last["status"]), (1, "daily", "partial")
+        )
+        self.assertFalse((self.state / "running.json").exists())

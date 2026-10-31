@@ -347,6 +347,13 @@ class TestConfigSetRoutines(_ConfigFixture):
         self.assertEqual(resolved["outputs"], {"journal_dir": "/tmp/ctx/journal"})
         self.assertEqual(resolved["log"], "/tmp/ctx/logs/routine-daily.log")
         self.assertEqual(resolved["label"], "dev.cairn.routine.daily")
+        self.assertEqual((resolved["terminal_hook"], resolved["stale_sources"]), (None, "warn"))
+        hook = ["~/bin/notify", "--quiet"]
+        rc, _, err = _quiet(admin._config_set, "routines.daily.terminal_hook", json.dumps(hook))
+        self.assertEqual(rc, 0, err)
+        resolved = self._show_json()["routines"]["daily"]["resolved"]
+        home = str(Path.home())
+        self.assertEqual(resolved["terminal_hook"], [f"{home}/bin/notify", "--quiet"])
         self.assertTrue(resolved["plist"].endswith("dev.cairn.routine.daily.plist"))
         self.assertTrue(resolved["state_dir"].endswith("cairn/routines/daily"))
         # The template's example routine is listed too.
@@ -408,6 +415,20 @@ class TestConfigSetRoutines(_ConfigFixture):
         self.assertEqual(
             config.get_config().routines["daily"].validate, ("pnpm", "validate", "{{DAY}}")
         )
+
+    def test_terminal_hook_and_stale_sources_set(self):
+        _quiet(admin._config_set, "routines.daily", json.dumps(ROUTINE))
+        rc, _, err = _quiet(admin._config_set, "routines.daily.terminal_hook", '["/bin/echo"]')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(config.get_config().routines["daily"].terminal_hook, ("/bin/echo",))
+        self.assertEqual(_quiet(admin._config_set, "routines.daily.terminal_hook", "null")[0], 0)
+        self.assertIsNone(config.get_config().routines["daily"].terminal_hook)
+        rc, _, err = _quiet(admin._config_set, "routines.daily.terminal_hook", '["notify"]')
+        self.assertEqual(rc, 1)
+        self.assertIn("terminal_hook[0] must be an absolute path after expanding ~", err)
+        rc, _, err = _quiet(admin._config_set, "routines.daily.stale_sources", "refuse")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(config.get_config().routines["daily"].stale_sources, "refuse")
 
     def test_outputs_key_set_and_null_removes(self):
         _quiet(admin._config_set, "routines.daily", json.dumps(ROUTINE))

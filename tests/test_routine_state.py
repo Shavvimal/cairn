@@ -1,0 +1,257 @@
+"""``cairn.routine_state``: the file-only status classifier and the status exit codes."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
+
+from cairn import routine, routine_state
+from cairn.health import process_identity
+from tests.test_routine import Children, Launchctl, RoutineFixture
+
+NOW = datetime(2026, 11, 12, 6, 0, tzinfo=UTC)
+
+
+class TestClassify(RoutineFixture):
+    def classify(self, now: datetime = NOW, macos: bool = False) -> routine_state.Classification:
+        return routine_state.classify(self.cfg, self.cfg.routines["daily"], now, macos=macos)
+
+    def last_run(self, hours_ago: float, exit_code: int = 0) -> None:
+        self.state.mkdir(parents=True, exist_ok=True)
+        finished = (NOW - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
+        (self.state / "last-run.json").write_text(
+            json.dumps({"finished_at": finished, "exit": exit_code})
+        )
+
+    def test_state_precedence_disabled_paused_running_never_stale_fresh(self):
+        self.assertEqual(self.classify().state, "never_run")
+        self.last_run(72)
+        self.assertEqual(self.classify().state, "stale")
+        self.last_run(1)
+        self.assertEqual(self.classify().state, "fresh")
+        identity = process_identity(os.getpid())
+        assert identity is not None
+        (self.state / "running.json").write_text(
+            json.dumps({"pid": identity[0], "start_token": identity[1]})
+        )
+        (self.state / "last-run.json").unlink()
+        self.assertEqual(self.classify().state, "running")
+        (self.state / "paused.json").write_text(json.dumps({"reason": "away"}))
+        self.assertEqual(self.classify().state, "paused")
+        (self.state / "disabled.json").write_text("{broken")
+        verdict = self.classify()
+        self.assertEqual(verdict.state, "disabled")
+        self.assertEqual(verdict.disabled, {"reason": "(unreadable marker)"})
+        self.assertEqual(verdict.paused, {"reason": "away"})
+
+    def test_stale_after_two_cadences(self):
+        self.last_run(47)
+        verdict = self.classify()
+        self.assertEqual((verdict.state, verdict.exit), ("fresh", 0))
+        self.assertEqual(verdict.last_run_age_s, 47 * 3600)
+        self.last_run(49)
+        verdict = self.classify()
+        self.assertEqual((verdict.state, verdict.exit), ("stale", 1))
+        self.last_run(-5)  # clock skew: a future finish reads as age 0
+        self.assertEqual((self.classify().state, self.classify().last_run_age_s), ("fresh", 0.0))
+
+    def test_attention_codes_from_stamps(self):
+        self.last_run(1, exit_code=1)
+        (self.state / "failed-2026-11-09.json").write_text(json.dumps({"attempts": 1}))
+        (self.state / "failed-2026-11-10.json").write_text(json.dumps({"attempts": 3}))
+        (self.state / "failed-2026-11-11.json").write_text("{")
+        verdict = self.classify()
+        self.assertEqual(
+            verdict.attention,
+            ["failed-day", "attempts-exhausted", "corrupt-stamp", "last-run-exit-1"],
+        )
+        self.assertEqual((verdict.state, verdict.exit), ("fresh", 1))
+        (self.state / "last-run.json").write_text("not json")
+        verdict = self.classify()
+        self.assertEqual(verdict.state, "never_run")
+        self.assertIn("last-run-exit-unknown", verdict.attention)
+
+    def test_launchd_missing_only_on_macos(self):
+        self.last_run(1)
+        self.assertEqual(self.classify(macos=True).attention, ["launchd-missing"])
+        self.assertEqual(self.classify(macos=False).attention, [])
+        with (
+            patch("cairn.routine.is_macos", return_value=True),
+            patch("cairn.routine.launchctl", Launchctl()),
+        ):
+            code, out, _err = self.cli("status", "daily", "--json")
+        self.assertEqual((code, json.loads(out)["attention"]), (1, ["launchd-missing"]))
+        plist = (
+            self.cfg.data_root.parent / "home/Library/LaunchAgents/dev.cairn.routine.daily.plist"
+        )
+        plist.parent.mkdir(parents=True)
+        plist.write_text("x")
+        self.assertEqual(self.classify(macos=True).attention, [])
+
+    def test_unknown_identity_is_neither_running_nor_interrupted(self):
+        self.last_run(1)
+        marker = self.state / "running.json"
+        marker.write_text(json.dumps({"pid": os.getpid(), "start_token": None}))
+        verdict = self.classify()
+        self.assertEqual((verdict.state, verdict.attention, verdict.exit), ("fresh", [], 0))
+        marker.write_text(json.dumps({"pid": os.getpid(), "start_token": "x"}))
+        with patch("cairn.routine_state.process_identity", return_value=None):  # ps failed
+            verdict = self.classify()
+        self.assertEqual((verdict.state, verdict.attention), ("fresh", []))
+        identity = process_identity(os.getpid())
+        assert identity is not None
+        marker.write_text(json.dumps({"pid": os.getpid(), "start_token": identity[1]}))
+        self.assertEqual(self.classify().state, "running")
+
+    def test_now_sets_the_stamp_window(self):
+        self.last_run(1)
+        (self.state / "failed-2026-11-21.json").write_text(json.dumps({"attempts": 1}))
+        self.assertEqual(self.classify().attention, [])
+        later = self.classify(now=NOW + timedelta(days=10))
+        self.assertIn("failed-day", later.attention)
+
+    def test_last_run_exit_that_is_not_an_integer_is_unknown(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        finished = NOW.isoformat(timespec="seconds")
+        for body in ({}, {"exit": None}, {"exit": False}, {"exit": "1"}):
+            with self.subTest(body=body):
+                (self.state / "last-run.json").write_text(
+                    json.dumps({"finished_at": finished, **body})
+                )
+                self.assertEqual(self.classify().attention, ["last-run-exit-unknown"])
+
+    def test_age_falls_back_to_mtime_when_finished_at_is_unreadable(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        path = self.state / "last-run.json"
+        path.write_text(json.dumps({"exit": 0, "finished_at": "not a time"}))
+        old = NOW.timestamp() - 3 * 86_400
+        os.utime(path, (old, old))
+        verdict = self.classify()
+        self.assertEqual((verdict.state, verdict.last_run_age_s), ("stale", 259_200.0))
+
+    def test_strike_ignores_a_malformed_runs_value(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        breaker = self.state / "breaker.json"
+        for runs in (1, ["bad"], {"a": 1}):
+            with self.subTest(runs=runs):
+                breaker.write_text(json.dumps({"consecutive_failed_runs": 2, "runs": runs}))
+                marker = routine_state.strike(self.state, "r3", "t3", "validate-exit-1")
+                assert marker is not None
+                self.assertEqual([r["run_id"] for r in marker["runs"]], ["r3"])
+
+    def test_interrupted_run_when_identity_dead(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        self.last_run(1)
+        (self.state / "running.json").write_text(
+            json.dumps({"pid": child.pid, "start_token": "gone"})
+        )
+        verdict = self.classify()
+        self.assertEqual((verdict.state, verdict.attention), ("fresh", ["interrupted-run"]))
+        self.assertEqual(verdict.exit, 1)
+
+
+class TestStatusExit(RoutineFixture):
+    def status(self, fake: Launchctl | None = None) -> tuple[int, dict]:
+        with (
+            patch("cairn.routine.is_macos", return_value=False),
+            patch("cairn.routine.launchctl", fake or Launchctl()),
+        ):
+            code, out, _err = self.cli("status", "daily", "--json")
+        return code, json.loads(out)
+
+    def test_status_exit_codes_0_1_2(self):
+        self.assertEqual(self.status()[1]["state"], "never_run")
+        self.assertEqual(self.status()[0], 1)
+        self.cli("run", "daily", "--day", "2026-11-10", children=Children(validate=1))
+        code, report = self.status()
+        self.assertEqual((code, report["attention"]), (1, ["failed-day", "last-run-exit-1"]))
+        self.cli("run", "daily", children=Children())
+        code, report = self.status()
+        self.assertEqual((code, report["state"], report["attention"]), (0, "fresh", []))
+        self.cli("pause", "daily", "--reason", "away")
+        code, report = self.status()
+        self.assertEqual((code, report["state"], report["paused"]["reason"]), (2, "paused", "away"))
+        with patch("cairn.routine.is_macos", return_value=False):
+            code, out, _err = self.cli("status", "daily")
+        self.assertEqual(code, 2)
+        self.assertIn("state: paused (exit 2)", out)
+        code, out, _err = self.cli("status", "nightly", "--json")
+        self.assertEqual((code, out), (2, ""))  # a usage error prints no JSON
+
+    def test_status_never_calls_launchctl_for_exit(self):
+        def wedged(*_args):
+            raise AssertionError("launchctl must not decide the exit code")
+
+        self.cli("run", "daily", children=Children())
+        with patch("cairn.routine.launchctl", wedged):
+            verdict = routine_state.classify(self.cfg, self.cfg.routines["daily"], macos=True)
+        self.assertEqual((verdict.state, verdict.attention), ("fresh", ["launchd-missing"]))
+        plist = (
+            self.cfg.data_root.parent / "home/Library/LaunchAgents/dev.cairn.routine.daily.plist"
+        )
+        plist.parent.mkdir(parents=True)
+        plist.write_text("x")
+        with (
+            patch("cairn.routine.is_macos", return_value=True),
+            patch("cairn.routine.launchctl", Launchctl(loaded=False)),
+        ):
+            code, out, _err = self.cli("status", "daily", "--json")
+        report = json.loads(out)
+        self.assertEqual((code, report["installed"], report["state"]), (0, "unloaded", "fresh"))
+
+    def test_status_answers_when_launchctl_print_hangs(self):
+        self.cli("run", "daily", children=Children())
+        plist = (
+            self.cfg.data_root.parent / "home/Library/LaunchAgents/dev.cairn.routine.daily.plist"
+        )
+        plist.parent.mkdir(parents=True)
+        plist.write_text("x")
+        timeouts: list[object] = []
+
+        def hung(argv, **kwargs):
+            timeouts.append(kwargs.get("timeout"))
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout") or 0)
+
+        with (
+            patch("cairn.routine.is_macos", return_value=True),
+            patch("cairn.routine.subprocess.run", hung),
+        ):
+            code, out, _err = self.cli("status", "daily", "--json")
+            lines = {label: (lvl, detail) for lvl, label, detail in routine.doctor_checks(self.cfg)}
+        report = json.loads(out)
+        self.assertEqual((code, report["installed"], report["state"]), (0, "unknown", "fresh"))
+        self.assertEqual(timeouts[0], routine.LAUNCHCTL_PROBE_S)
+        self.assertEqual(
+            lines["routine [daily] launchd"],
+            ("warn", "'launchctl print' did not answer in 5 s; launchd may be wedged"),
+        )
+
+
+class TestInterruptedRun(RoutineFixture):
+    def test_run_that_raises_leaves_interrupted_evidence(self):
+        self.cli("run", "daily", children=Children())
+        for error in (KeyboardInterrupt, OSError):
+            with self.subTest(error=error.__name__):
+                with (
+                    patch("cairn.routine_run.Run.body", side_effect=error),
+                    self.assertRaises(error),
+                ):
+                    self.cli("run", "daily", "--day", "2026-11-10", "--force")
+                marker = json.loads((self.state / "running.json").read_text())
+                self.assertEqual((marker["pid"], marker["interrupted"]), (None, error.__name__))
+                with (
+                    patch("cairn.routine.is_macos", return_value=False),
+                    patch("cairn.routine.launchctl", Launchctl()),
+                ):
+                    code, out, _err = self.cli("status", "daily", "--json")
+                report = json.loads(out)
+                self.assertEqual(
+                    (code, report["state"], report["attention"]), (1, "fresh", ["interrupted-run"])
+                )
+        self.cli("run", "daily", "--day", "2026-11-10", "--force", children=Children())
+        self.assertFalse((self.state / "running.json").exists())

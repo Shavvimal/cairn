@@ -19,6 +19,7 @@ import contextlib
 import json
 import sys
 
+from . import export_receipt
 from .sources.base import ConversationSource
 from .timeutil import parse_since
 
@@ -157,6 +158,8 @@ def run(source: ConversationSource, argv: list[str] | None = None) -> None:
         with locked(lock_path(source.output_dir, "operation")):
             try:
                 result = _run_export(source, args)
+                if args.command == "export" and not getattr(args, "file", None):
+                    export_receipt.record(source, args.command, result)  # collection-wide only
             finally:
                 # Persist the catalog before the lock is released so the next
                 # reader sees this run's write-through entries.

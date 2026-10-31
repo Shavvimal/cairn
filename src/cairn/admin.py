@@ -180,6 +180,9 @@ def _routine_view(cfg: CairnConfig, spec: RoutineSpec) -> dict:
         "prompt_file": str(spec.prompt_file),
         "cd": str(spec.cd),
         "outputs": {key: str(path) for key, path in spec.outputs.items()},
+        # As the run uses them: ~ expanded in the hook argv, the default policy filled in.
+        "terminal_hook": list(spec.terminal_hook) if spec.terminal_hook else None,
+        "stale_sources": spec.stale_sources,
     }
     resolved.update({key: str(value) for key, value in routine_paths(cfg, spec.name).items()})
     return {**spec.raw, "resolved": resolved}
@@ -310,8 +313,9 @@ _ROUTINE_SCALARS = (
     "catch_up_days",
     "timeout_s",
     "budget_usd_per_day",
+    "stale_sources",
 )
-_ROUTINE_ARGV_FIELDS = ("prepare", "validate")
+_ROUTINE_ARGV_FIELDS = ("prepare", "validate", "terminal_hook")
 _ROUTINE_SET_FIELDS = (*_ROUTINE_SCALARS, "sources", *_ROUTINE_ARGV_FIELDS)
 _PROFILE_SET_FIELDS = ("base", "extra_args")
 _ROUTINE_KEY_HINT = (
@@ -374,7 +378,7 @@ def _coerce_routine(key: str, field: str, value: str) -> object:
         if value.lstrip().startswith("["):
             return _json_strings(key, value)
         return [item.strip() for item in value.split(",") if item.strip()]
-    if field == "prepare" and _is_null(value):
+    if field in ("prepare", "terminal_hook") and _is_null(value):
         return None
     if field in _ROUTINE_ARGV_FIELDS:
         return _json_strings(key, value)
