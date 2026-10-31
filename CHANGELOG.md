@@ -18,6 +18,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `.agents/skills/skill-review` (repo-local, not shipped): a skill review with a rubric
   cited to the Claude Code, Codex, Antigravity and Agent Skills documentation, a
   `measure.py` script and `tests/test_skill_review.py`.
+### Fixed
+- invoke-codex, invoke-claude and invoke-antigravity skills: `argument-hint` is quoted.
+  The unquoted `[a] [b] [c]` form is not valid YAML, so a host with a strict YAML parser
+  could load these skills without their metadata.
+- cairn skill: the supersede and forget steps take the source, id and row number from
+  the row's `session` and `number` fields and pass `--session-id`, so they change the
+  document that holds the decision. The supersede step names its output line
+  (`Struck #N; added #M`) and exit 3.
+- Memory import verification reads both stores (`--source claude --source memory`) and
+  keeps the rows imported into a session.
+- recall skill: a coverage answer explains each gap from its `message`. An
+  `index-unknown` gap stays unknown, not "not indexed". A clean report and a gap with a
+  null `fix` are handled.
+- Daily check: it no longer says it changes no file. It names the lock files the
+  commands open and the Codex client the hook check starts, reports a blocked step as
+  "not checked", and lists `last-run-exit-unknown`. The memory import privacy note says
+  that QMD and rg still find a withdrawn claim's text.
+- skill-review (repo-local): step 1 diffs against the PR's base (the base the requester
+  names, else `gh pr view`, else `main`) after a `git rev-parse` check, not against
+  `origin/main`. When the host denies `python3` (cairn's Antigravity preset does), the
+  review reads attached `measure.py` output or the files and writes "measure.py not
+  run". `measure.py` checks every frontmatter key and folded line against a YAML subset
+  and flags inline command substitution. Rubric: A1 no longer calls `read_head` a YAML
+  parser, A6 covers onboarding and install skills only, B5 covers shipped skills only,
+  and F7 diffs against the same base as step 1.
 
 ## [2.20.0]
 
