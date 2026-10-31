@@ -113,6 +113,45 @@ one of `--pick`, `--active`, or a file.
 A subagent transcript cannot be resumed. `cairn claude resume <child file>` and
 `cairn resume claude:agent-<agentId>` exit 1 and name the parent to resume instead.
 
+## Memory import (Claude-only)
+
+```bash
+cairn claude memory import --dry-run               # print the plan; write nothing
+cairn claude memory import                         # the git project of the working directory
+cairn claude memory import --all-projects --json   # every project directory, JSON summary
+cairn claude memory import --memory-dir ~/notes/memory --include-reference
+```
+
+The command reads every `*.md` file except `MEMORY.md` in the project's auto-memory
+directory, `<projects>/<name>/memory/`. `<projects>` is `$CLAUDE_CONFIG_DIR/projects`
+when that variable is set, else the configured `claude-code-sessions` store. `<name>` is
+the main checkout's path with every character outside `A-Z`, `a-z` and `0-9` replaced by
+`-`, so a linked worktree reads the same directory as its main checkout. When
+`autoMemoryDirectory` moves the directory, pass it with `--memory-dir`.
+
+Each note becomes one row: its `description` is the claim, `feedback` and `project` map
+to kind `decision`, `user` to `fact`, `reference` is skipped unless
+`--include-reference` (then `fact`). Confidence is `medium`; `since` is the UTC date of
+`modified`, else of the file mtime. The source cell `memory:<label>/<stem>` is the key,
+so a re-run adds only notes without a row. Only the importer writes this marker:
+`decide --source` still takes frame citations only.
+
+Placement: the session named by `originSessionId` when cairn exported it, else
+`<data_root>/decisions/<label>.md` (`type: claude-memory-decisions`). `cairn recall
+decisions --source memory` lists the rows of these documents, and their rows show
+`[memory]` in text output. Add `"decisions": { "sync": { "enabled": true } }` under
+`collections` so QMD indexes them.
+
+Exit 0 when every note was added or skipped by rule; 1 when the directory is missing
+(`MEMORY_DIR_MISSING`), a note could not be read, or a write failed
+(`MEMORY_IMPORT_WRITE_FAILED`). The other notes are still imported.
+
+Privacy: a note holds whatever Claude saved, which can include private names. The
+import writes only into the data root, beside the exported sessions, and never into
+the memory directory. If the data root is inside a git work tree, keep it git-ignored
+and untracked (the import does not check). Do not copy a project decisions document
+into a tracked file.
+
 ## Internal sync hook
 
 `cairn sync --hook` (the `SessionEnd` hook) exports the just-closed session and refreshes

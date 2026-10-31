@@ -129,6 +129,8 @@ class Withdrawal:
 
     @property
     def ref(self) -> str:
+        if self.session_id.startswith("memory:"):  # a project decisions document
+            return self.session_id
         return f"{self.source}:{self.session_id[:8]}"
 
 

@@ -13,6 +13,7 @@ dates are out of order.
 
 | Date | Document | Kind | Decision |
 | --- | --- | --- | --- |
+| 2026-10-30 | [Memory import](memory-import-spec.md) | spec | Implemented in 2.20.0: `cairn claude memory import` adds Claude Code auto-memory notes as `## Decisions` rows, in the exported session that wrote them or in a project decisions document, keyed by a `memory:<label>/<stem>` source cell. Rejected: reading `autoMemoryDirectory`, importing note bodies, editing a row when its note changes. |
 | 2026-10-30 | [Test discipline](test-discipline-spec.md) | spec | A new test needs discrimination evidence from `make discriminates`, which reverts the fix in a temporary copy and requires fail, then pass; harness acceptance docs open with a dated automated-versus-manual evidence table; this index. Rejected: reverting in the real tree, and a CI check of the PR line. |
 | 2026-10-30 | [Recall qrels](recall-qrels-spec.md) | spec | Implemented in 2.19.3: an invented corpus and relevance file gate recall@5 and top-1 floors on the temporal listing, the project filter and the skills' rg pass; a `_utcnow` clock seam; rg queries passed with `-e`. Out: query capture and replay. Recorded: the mtime order lets a newer quote outrank the titled session. |
 | 2026-10-30 | [Docs CLI truth](docs-cli-truth-spec.md) | spec | Implemented in 2.19.2: every documented `cairn` invocation parses against the real parsers, with `historical` and `skip` markers; action alternations became one command per line, and the stale flags found were fixed. |

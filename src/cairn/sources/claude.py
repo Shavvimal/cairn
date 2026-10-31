@@ -562,6 +562,20 @@ class ClaudeSource(ConversationSource):
     id_field = "session_id"
     preserved_note = "syncs"
 
+    def find_file(self, session_id: str) -> Path | None:
+        """A session document, or for ``memory:<label>`` the project decisions document
+        that ``cairn claude memory import`` writes (so ``decide``, ``supersede`` and
+        ``forget`` reach its rows)."""
+        from .. import decisions
+
+        label = session_id.removeprefix(f"{decisions.MEMORY_SOURCE}:")
+        if label != session_id:
+            if not decisions.MEMORY_LABEL_RE.fullmatch(label):
+                return None
+            path = decisions.memory_document(get_config(), label)
+            return path if path.is_file() else None
+        return super().find_file(session_id)
+
     # ---- rendering ----
     def render_document(
         self, data: SessionData, existing_fm: dict | None, my_notes: str | None
@@ -953,7 +967,7 @@ class ClaudeSource(ConversationSource):
                 failed = True
         return int(failed)
 
-    # ---- claude-only extras: sync (hook) + resume ----
+    # ---- claude-only extras: sync (hook), resume and memory import ----
     def add_extra_parsers(
         self, subparsers: argparse._SubParsersAction, common: argparse.ArgumentParser
     ) -> None:
@@ -971,6 +985,10 @@ class ClaudeSource(ConversationSource):
         p_resume.add_argument("--all", action="store_true", help="Show all (not just active)")
         p_resume.add_argument("file", nargs="?", help="Markdown file to resume from")
         p_resume.set_defaults(func=self.cmd_resume)
+
+        from ..claude_memory import add_parser as add_memory_parser
+
+        add_memory_parser(subparsers, common, self)
 
     def cmd_sync(self, args: argparse.Namespace) -> int:
         session_id = args.session_id

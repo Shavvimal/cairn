@@ -119,6 +119,28 @@ matter to the match.
   QMD index until someone edits the file. `--reason private` prints a note that says so.
 - Run `forget` again on the same row: it reports `already withdrawn` and changes nothing.
 
+## Import Claude memories
+
+Claude Code keeps auto-memory notes per project (`~/.claude/projects/<project>/memory/`).
+`cairn claude memory import` adds each note's one-line description as a `## Decisions`
+row. The row goes into the session that wrote the note when cairn exported that session,
+else into the project decisions document `<data_root>/decisions/<project>.md`. The
+source cell is `memory:<project>/<file>`. Look at the plan first, then import:
+
+```bash
+cairn claude memory import --dry-run
+cairn claude memory import
+```
+
+- Do not run it with `--all-projects` unless the user asks. The default is the git
+  project of the working directory.
+- `feedback` and `project` notes become `decision` rows, `user` notes become `fact` rows.
+  `reference` notes are skipped unless `--include-reference`.
+- A re-run adds only new notes. A changed note prints a warning and leaves its row; use
+  `supersede` if the new text is right. A withdrawn claim is never added again.
+- Rows in a project document take `--session-id memory:<project>` for `decide`,
+  `supersede` and `forget`.
+
 ## Finding the current session
 
 Use the harness reference for current-session metadata, or select a source-qualified

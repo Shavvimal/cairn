@@ -49,6 +49,8 @@ exit; the command decides it.
 | `INVOKE_NESTED` | 2 | no | invoke started inside a peer run without --allow-nested. |
 | `INVOKE_TIMEOUT` | 124 | yes | The round hit its wall-clock timeout. |
 | `INVOKE_USAGE` | 2 | no | The request was refused before spawning: a bad flag, profile, prompt, cwd, owner or resume target, or a failed self-check or permissions check. |
+| `MEMORY_DIR_MISSING` | 1 | no | cairn claude memory import found no Claude Code memory directory for the project. |
+| `MEMORY_IMPORT_WRITE_FAILED` | 1 | yes | cairn claude memory import could not write a decisions document. |
 | `QMD_INDEX_INCOMPLETE` | 0 as a warning; 1 with --strict-index (an empty index stays a warning) | yes | The QMD index is empty, has no vectors, has pending documents, or its status could not be read. |
 | `QMD_MISSING` | 1 | no | The configured qmd_binary is not on PATH and is not a file. |
 | `QMD_RUNTIME_FAILED` | 1 | no | 'qmd status' failed, so QMD cannot open its index. |
@@ -317,6 +319,28 @@ exit; the command decides it.
 - Retryable: no
 - Shown in: stderr code line; --json failure object
 - Raised at: `src/cairn/invoke.py:main`, `src/cairn/invoke.py:run`
+
+## MEMORY_DIR_MISSING
+
+- Meaning: cairn claude memory import found no Claude Code memory directory for the project.
+- Why: The import reads only a directory that Claude Code wrote; it does not guess another.
+- Next step: Pass --memory-dir DIR when autoMemoryDirectory moves the directory, or run from the project.
+- Verify: none
+- Exit: 1
+- Retryable: no
+- Shown in: stderr code line; --json failure object
+- Raised at: `src/cairn/claude_memory.py:current_directory`, `src/cairn/claude_memory.py:directories`
+
+## MEMORY_IMPORT_WRITE_FAILED
+
+- Meaning: cairn claude memory import could not write a decisions document.
+- Why: The rows of that document were not added; the other documents were written.
+- Next step: Fix the cause the message names, such as permissions or a full disk, then run the import again.
+- Verify: `cairn recall decisions --all-projects --source memory --json`
+- Exit: 1
+- Retryable: yes
+- Shown in: stderr code line
+- Raised at: `src/cairn/claude_memory.py:_write_failed`
 
 ## QMD_INDEX_INCOMPLETE
 

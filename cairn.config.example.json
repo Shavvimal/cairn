@@ -36,6 +36,7 @@
   "//collections": "Each key is BOTH the QMD collection name AND the output subdirectory under data_root. antigravity-sessions.store is the agy app-data directory (the CLI's ~/.gemini/antigravity-cli; the IDE and the Antigravity 2.0 app use ~/.gemini/antigravity-ide and ~/.gemini/antigravity with the same layout).",
   "//sync": "Per-collection sync policy (config-as-data). 'enabled' is the integration on/off switch the engine reads - disabled sources are skipped by 'cairn sync'. 'since' is the export window (today|yesterday|Nd|Nw|YYYY-MM-DD). 'on_hook': false opts out of the originating host's SessionEnd sync (otherwise enabled). Legacy 'sync --hook' still defaults to Claude. Omitting the whole block means enabled with a 1d window.",
   "//journal": "Optional. Markdown a routine writes under <data_root>/journal (see 'routines'). A store-less collection: nothing is exported into it. 'cairn sync' only registers and indexes it once it holds markdown.",
+  "//decisions": "Optional. Project decisions documents that 'cairn claude memory import' writes under <data_root>/decisions, one per project, for Claude Code auto-memory notes whose session was not exported. Store-less, like journal: without this key 'recall decisions' still lists the rows, but QMD does not index them.",
   "collections": {
     "claude-code-sessions": {
       "store": "~/.claude/projects",
@@ -71,7 +72,8 @@
       },
       "sync": { "enabled": true }
     },
-    "journal": { "sync": { "enabled": true } }
+    "journal": { "sync": { "enabled": true } },
+    "decisions": { "sync": { "enabled": true } }
   },
   "//path_resolution": "Optional. Used to map agent project dirs to project/repo names. home_slug_prefixes is derived from your home dir if omitted.",
   "path_resolution": {
