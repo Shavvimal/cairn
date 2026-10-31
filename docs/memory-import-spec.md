@@ -169,14 +169,28 @@ Exact messages (stderr unless marked):
 
 - `Error: no Claude memory directory at <dir> for <project root>; pass --memory-dir DIR`
   (code `MEMORY_DIR_MISSING`, exit 1)
+- `Error: no Claude memory directory at <dir>` (`--memory-dir`) and
+  `Error: no Claude projects directory at <projects>; pass --memory-dir DIR`
+  (`--all-projects`), both code `MEMORY_DIR_MISSING`, exit 1
 - `Error: more than one project directory starts with <first 200 characters>; pass --memory-dir DIR`
-  (exit 1)
+  and `Error: cannot derive a project label from the directory name '<name>'` (no code, exit 1)
+- With `--json`, a refusal before any memory is read also prints the failure object on
+  stdout: the registry object for a coded refusal, else
+  `{"ok": false, "code": null, "error": "<message>", "exit": 1, "retryable": false}`
+  (the uncoded refusals above and an invalid ledger)
 - `Warning: <file>: <reason>; skipped`. Reasons: `no frontmatter`,
-  `frontmatter line <n>: <problem>`, `no description`, `unknown type '<t>'`,
-  `claim is longer than 500 characters (got <n>)`, `claim must not contain '~~' (it marks a struck row)`
+  `frontmatter line <n>: <problem>`, `not UTF-8`, `no description`, `no type`,
+  `unknown type '<t>'`, `file name '<stem>' cannot form a marker`,
+  `claim is longer than 500 characters (got <n>)`, `claim must not contain '~~' (it marks a struck row)`,
+  `claim is empty after normalisation`
 - `Warning: memory <label>/<stem> changed since it was imported as <ref>; supersede that row to update it`
 - `Warning: session <id8> of memory <label>/<stem> is not exported; added to decisions/<label>.md`
-  (only when `originSessionId` is present)
+  (only when `originSessionId` is present; a dry run says `would add to` instead of `added to`)
+- `Error: cannot check <path> for imported memories: <problem>`,
+  `Error: label <label> is shared by <n> memory directories; import one of them with --memory-dir DIR`,
+  `Error: <doc> was imported from <dir>, not <dir>; label <label> belongs to that directory` and
+  `Error: <doc> is not a project decisions document (<why>); move it away and re-run`
+  (each fails the memories it names, exit 1)
 - `Warning: collections.decisions is not configured; QMD will not index <path>`
 - `Error: could not write <path>: <reason>` (code `MEMORY_IMPORT_WRITE_FAILED`, exit 1)
 - stdout, per added row: `Added <ref>  <kind>  <since>  memory:<label>/<stem>  <claim>`
@@ -389,8 +403,9 @@ Rows imported from Claude Code auto memory by cairn claude memory import.
 `action` is one of `added`, `existing`, `withdrawn`, `reference`, `invalid` or `failed`.
 `placement` is `session` or `project`, and `null` for a memory that never reached
 placement (`invalid`, `reference`, or `failed` before placement). `ref` is `null` when
-nothing was written. `reason` is the problem of an `invalid` or `failed` memory, else
-`null`.
+nothing was written. `kind` and `since` are `null` for a memory that was not mapped
+(`invalid`, or `failed` before mapping). `reason` is the problem of an `invalid` or
+`failed` memory, else `null`.
 
 ## 6. Failure modes
 
@@ -526,6 +541,19 @@ fails its group with a `reason` and the next group still runs. A dry run leaves 
 catalog cache unwritten. `recall decisions` without `--project` also matches a
 project document whose `cwd` is the git main checkout of the current directory, so a
 subdirectory or a linked worktree sees it.
+
+**Second review fixes (2026-10-31).** The marker scan also reads every markdown file
+of the Claude collection, so a session the catalog skips (broken frontmatter) still
+counts. Only an `originSessionId` that equals an exported session's full id places a
+row in that session; a prefix or a `source:` form goes to the project document.
+`--memory-dir` resolves its path (`.` works) and `memory_dir` records the resolved
+path outside the home directory. A file at `<data_root>/decisions/<label>.md` that is
+not a project document of that label is refused, never written. A project document
+this run created is removed again when no row went into it. `recall decisions
+--project <label>` matches a project document by its label, and without `--project`
+a document with no `cwd` (from `--all-projects` or `--memory-dir`) matches by the label
+of the current checkout. A withdrawal recorded from a project document names it as
+`memory:<label>` in the refusal message.
 
 **Open questions.** All three recommended defaults hold: `autoMemoryDirectory` is not
 read (`--memory-dir` covers it and the missing-directory error names the flag), the
