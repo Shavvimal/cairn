@@ -19,3 +19,10 @@ Use `--launch` only when explicitly running in a suitable interactive terminal.
 
 Installed version checks use `cairn doctor --harness HOST --plugin-manifest PATH`.
 The manifest path is relative to this package, not the working repository.
+
+A source adapter that parses a host's native files declares a `SpecTarget` in
+`src/cairn/sources/spec_targets.py`: the check date, the host and its version that day,
+the record types that should render a message (`conversational`) and the ones it skips
+on purpose (`ignored`). It calls `guard_parse` after each parse and ships invented
+fixtures with expected messages under `tests/fixtures/<source>/`. Re-check the shapes on
+a live store before changing the date.

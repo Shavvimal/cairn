@@ -43,6 +43,7 @@ from urllib.parse import unquote
 from .. import cli
 from ..config import get_config
 from ..frontmatter import (
+    FrontmatterParseError,
     _escape_scalar,
     head_close,
     head_open,
@@ -51,13 +52,15 @@ from ..frontmatter import (
     title_line,
 )
 from ..harnesses.antigravity import conversation_transcript, transcript_conversation_id
-from ..jsonl import iter_jsonl
+from ..jsonl import JsonlStats, iter_jsonl
 from ..paths import session_dir_of, subagent_path
 from ..projects import project_from_folder_path, repo_label
 from ..schema import SessionData, SubagentRef
 from ..store import file_revision, is_current
 from ..timeutil import today_str
 from .base import ConversationSource
+from .guards import DRIFT_KINDS, ERROR
+from .spec_targets import SPEC_TARGETS
 
 COLLECTION = "antigravity-sessions"
 _config = get_config()
@@ -237,8 +240,11 @@ def _call_status(status: object) -> str:
     return {"ERROR": "error", "RUNNING": "running"}.get(str(status or ""), "done")
 
 
-def parse_transcript(path: Path, conversation_id: str) -> dict:
-    """Parse one transcript JSONL into the normalised session dict (no metadata yet)."""
+def parse_transcript(path: Path, conversation_id: str, stats: JsonlStats | None = None) -> dict:
+    """Parse one transcript JSONL into the normalised session dict (no metadata yet).
+
+    ``stats`` (optional) receives the line counts for the parser-drift guard.
+    """
     data: dict[str, Any] = {
         "session_id": conversation_id,
         "cwd": None,
@@ -254,7 +260,7 @@ def parse_transcript(path: Path, conversation_id: str) -> dict:
     }
     messages: list[dict] = data["messages"]
     pending: list[tuple[int, int]] = []  # (message index, tool index) awaiting a result
-    for _, record in iter_jsonl(path):
+    for _, record in iter_jsonl(path, stats=stats):
         if not isinstance(record, dict):
             continue
         data["steps"] += 1
@@ -496,6 +502,7 @@ def _subagent_index(refs: list[SubagentRef]) -> list[str]:
 class AntigravitySource(ConversationSource):
     name = "antigravity-sessions"
     version = "2.0.0"
+    spec_target = SPEC_TARGETS["antigravity"]
     output_dir = OUTPUT_DIR
     session_type = "antigravity-session"
     subagent_type = "antigravity-subagent"
@@ -569,27 +576,45 @@ class AntigravitySource(ConversationSource):
                 found[folder.name] = transcript
         return found
 
-    @staticmethod
     def _parse(
-        transcripts: dict[str, Path], summaries: dict[str, Summary]
+        self,
+        transcripts: dict[str, Path],
+        summaries: dict[str, Summary],
+        since: float | None = None,
     ) -> tuple[dict[str, dict], list[str]]:
         """Parse each transcript once, stamping its native revision. A transcript
-        that cannot be read is reported and listed in ``failed``."""
+        that cannot be read, or that the parser-drift guard refuses, is reported
+        and listed in ``failed``. With ``since`` (the ``--since`` cutoff), a refused
+        conversation whose activity time is before it is held quietly: its finding
+        is stored, not printed, and it does not fail the run."""
         parsed: dict[str, dict] = {}
         failed: list[str] = []
         for conversation_id, transcript in transcripts.items():
             summary = summaries.get(conversation_id)
+            stats = JsonlStats()
             try:
                 revision = _revision(transcript, summary)
-                data = finish(parse_transcript(transcript, conversation_id), summary)
+                data = finish(parse_transcript(transcript, conversation_id, stats), summary)
             except (OSError, ValueError, UnicodeDecodeError) as exc:
                 print(f"Error parsing {transcript}: {exc}", file=sys.stderr)
                 failed.append(conversation_id)
                 continue
-            data["source_revision"] = revision
-            data["_mtime"] = (
+            top_level = not data.get("parent_session_id")
+            activity = (
                 summary.last_modified if summary and summary.last_modified else None
             ) or transcript.stat().st_mtime
+            loud = since is None or activity >= since
+            finding = self.classify_parse(
+                conversation_id, transcript, stats, data, top_level=top_level, loud=loud
+            )
+            if finding is None:
+                self.findings.clear(f"{self.source_name}:{conversation_id}", DRIFT_KINDS)
+            elif finding.severity == ERROR:
+                if loud:
+                    failed.append(conversation_id)
+                continue
+            data["source_revision"] = revision
+            data["_mtime"] = activity
             parsed[conversation_id] = data
         return parsed, failed
 
@@ -607,7 +632,10 @@ class AntigravitySource(ConversationSource):
     def _safe_target(self, session_id: str, planned: Path, claimed: dict[Path, str]) -> Path:
         holder = claimed.get(planned)
         if holder is None and planned.exists():
-            holder = read_frontmatter_head(planned).get(self.id_field)
+            try:
+                holder = read_frontmatter_head(planned).get(self.id_field)
+            except FrontmatterParseError:
+                holder = session_id  # export_one refuses it and records the finding
         if holder is not None and holder != session_id:
             digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
             planned = planned.with_stem(planned.stem + "-" + digest)
@@ -726,8 +754,13 @@ class AntigravitySource(ConversationSource):
         transcripts[session_id] = transcript
         parsed, failed = self._parse(transcripts, summaries)
         if session_id not in parsed:
-            raise ValueError(f"No readable Antigravity transcript for {session_id}")
+            raise self.drift_error({session_id}) or ValueError(
+                f"No readable Antigravity transcript for {session_id}"
+            )
         self.export_conversations(quiet=True, parsed=parsed)
+        drift = self.drift_error()
+        if drift is not None:
+            raise drift
         if failed:
             raise ValueError(
                 f"Antigravity export for {session_id} incomplete; unreadable: {', '.join(failed)}"
@@ -758,7 +791,7 @@ class AntigravitySource(ConversationSource):
             if args.all
             else "Exporting conversations in the selected window..."
         )
-        parsed, failed = self._parse(self.conversations(), read_summaries())
+        parsed, failed = self._parse(self.conversations(), read_summaries(), date_filter)
         exported = self.export_conversations(date_filter, quiet=args.quiet, parsed=parsed)
         print(f"\nExported {exported} conversations to {OUTPUT_DIR}")
         if failed:

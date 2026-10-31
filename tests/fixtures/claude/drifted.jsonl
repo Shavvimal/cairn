@@ -1,0 +1,3 @@
+{"type":"permission-mode","permissionMode":"default","sessionId":"5e551000-0000-4000-8000-00000000c1a0"}
+{"sessionId":"5e551000-0000-4000-8000-00000000c1a0","cwd":"/tmp/demo","gitBranch":"main","version":"0.0.0-fixture","type":"turn-v2","timestamp":"2026-10-30T09:00:00Z","speaker":"human","body":"Investigate the widget timeout"}
+{"sessionId":"5e551000-0000-4000-8000-00000000c1a0","cwd":"/tmp/demo","gitBranch":"main","version":"0.0.0-fixture","type":"turn-v2","timestamp":"2026-10-30T09:00:05Z","speaker":"model","body":"The timeout is an off-by-one."}

@@ -1,0 +1,5 @@
+{"timestamp":"2026-10-30T10:02:00Z","type":"session_meta","payload":{"id":"019e1000-0000-7000-8000-00000000c0df","timestamp":"2026-10-30T10:02:00Z","cwd":"/tmp/demo","cli_version":"0.0.0-fixture","agent_nickname":"Demo","agent_role":"explorer","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019e1000-0000-7000-8000-00000000c0de","depth":1,"agent_nickname":"Demo","agent_role":"explorer"}}}}}
+{"timestamp":"2026-10-30T10:02:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t9"}}
+{"timestamp":"2026-10-30T10:02:02Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call_9","arguments":"{\"command\":[\"ls\",\"/tmp/demo\"]}"}}
+{"timestamp":"2026-10-30T10:02:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_9","output":{"output":"retry.py"}}}
+{"timestamp":"2026-10-30T10:02:05Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"The demo folder holds retry.py only."}]}}

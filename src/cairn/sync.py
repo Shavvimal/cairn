@@ -371,7 +371,66 @@ def _stages(config: CairnConfig, mode: str, record, exported: set[str]) -> None:
     for name, command in steps:
         record(name, run_step(name, command))
         exported.add(name)
+    if mode != "hook":
+        _exporter_stages(config, record)
     _index_stages(config, embed=mode != "hook", record=record)
+
+
+def _exporter_stages(config: CairnConfig, record) -> None:
+    """After the exports: close the trailing-window gaps, then report open drift."""
+    from .gaps import gap_sources
+
+    for source in gap_sources(config):
+        gap_check(config, source, record)
+    log_drift(config)
+
+
+def gap_check(config: CairnConfig, source: str, record) -> None:
+    """Find sessions of the last 30 days with no document, re-export once, check again.
+
+    A gap the heal cannot close fails ``gap-check:<collection>``, so the run ends
+    ``=== FAILED ===`` with the step named. The heal export's own exit code is only
+    logged: the second scan is the verdict.
+    """
+    from .gaps import GAP_HEAL_TIMEOUT_S, GAP_WINDOW_DAYS, refs, scan
+
+    collection = SOURCE_COLLECTIONS[source]
+    step = f"gap-check:{collection}"
+    try:
+        found = scan(config, source)
+        log(
+            f"  [gap-check] {collection}: {len(found.on_disk)} on disk in {GAP_WINDOW_DAYS}d, "
+            f"{len(found.missing)} missing, {found.held_on_disk} held by parser drift"
+        )
+        if not found.missing:
+            return
+        run_step(
+            f"gap-heal:{collection}",
+            _export(source, "--since", f"{GAP_WINDOW_DAYS}d", "-q"),
+            timeout=GAP_HEAL_TIMEOUT_S,
+        )
+        after = scan(config, source)
+    except Exception as exc:  # a scan failure must not abort the sync
+        log(f"  [gap-check] {collection}: ERROR: {exc}")
+        record(step, False)
+        return
+    line = f"  [gap-check] {collection}: after heal {len(after.missing)} missing"
+    if after.missing:
+        line += ": " + refs(source, after.missing)
+        record(step, False)
+    log(line)
+
+
+def log_drift(config: CairnConfig) -> None:
+    """One ``[exporter-drift]`` line while any warn or error finding stays open."""
+    from .sources.guards import FindingsStore
+
+    found = FindingsStore(config.data_root).open_findings()
+    if not found:
+        return
+    shown = ", ".join(f"{f.ref} {f.kind}" for f in found[:5])
+    more = f", +{len(found) - 5} more" if len(found) > 5 else ""
+    log(f"  [exporter-drift] {len(found)} open findings: {shown}{more}")
 
 
 def _follow_up(config: CairnConfig, mode: str, record, exported: set[str]) -> None:

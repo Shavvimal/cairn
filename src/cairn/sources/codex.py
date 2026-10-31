@@ -25,6 +25,7 @@ from typing import Any, cast
 from .. import cli
 from ..config import get_config
 from ..frontmatter import (
+    FrontmatterParseError,
     _escape_scalar,
     head_close,
     head_open,
@@ -32,15 +33,17 @@ from ..frontmatter import (
     resolve_title,
     title_line,
 )
-from ..jsonl import iter_jsonl
+from ..jsonl import JsonlStats, iter_jsonl
 from ..paths import session_dir_of, subagent_path
 from ..projects import project_from_folder_path, repo_label
 from ..schema import SessionData, SubagentRef
 from ..store import file_revision, is_current
 from ..timeutil import today_str
 from .base import ConversationSource
-from .codex_lineage import Lineage, rollout_lineage, spawn_fields
+from .codex_lineage import Lineage, rollout_id, rollout_lineage, spawn_fields
 from .codex_replay import LIVE_CHILD_WINDOW_S, REPLAY_HEURISTIC_VERSION, ReplayCut
+from .guards import DRIFT_KINDS, ERROR, INFO, Finding
+from .spec_targets import SPEC_TARGETS
 
 COLLECTION = "codex-sessions"
 _config = get_config()
@@ -173,7 +176,9 @@ def _subagent_title(data: dict) -> str | None:
     return who or where or None
 
 
-def _scan_rollout(file_path: Path, honour_replay: bool) -> tuple[dict | None, bool]:
+def _scan_rollout(
+    file_path: Path, honour_replay: bool, stats: JsonlStats | None = None
+) -> tuple[dict | None, bool]:
     """One pass over a rollout. Returns ``(data, still_replaying_at_eof)``.
 
     The first ``session_meta`` names the thread. A second one (a forked child) starts
@@ -224,7 +229,7 @@ def _scan_rollout(file_path: Path, honour_replay: bool) -> tuple[dict | None, bo
             {"role": "user", "timestamp": timestamp, "text": text, "tool_calls": []}
         )
 
-    for _, record in iter_jsonl(file_path):
+    for _, record in iter_jsonl(file_path, stats=stats):
         rtype = record.get("type")
         payload = record.get("payload")
         if not isinstance(payload, dict):
@@ -420,15 +425,16 @@ def _finish_rollout(data: dict) -> dict:
     return data
 
 
-def parse_rollout(file_path: Path) -> dict | None:
+def parse_rollout(file_path: Path, stats: JsonlStats | None = None) -> dict | None:
     """Parse a Codex rollout JSONL into structured session data (None if unusable).
 
     A forked child whose replayed parent history has no recognisable end is a live
     child when the file changed within :data:`LIVE_CHILD_WINDOW_S` (``None``: skipped
     this run, no error). An older one exports the whole file with
     ``replay_unresolved: True`` and a warning. Replay problems never raise.
+    ``stats`` (optional) receives the line counts of the first pass.
     """
-    data, replaying = _scan_rollout(file_path, honour_replay=True)
+    data, replaying = _scan_rollout(file_path, honour_replay=True, stats=stats)
     if data is None:
         return None
     if replaying:
@@ -448,6 +454,15 @@ def parse_rollout(file_path: Path) -> dict | None:
             return None
         data["replay_unresolved"] = True
     return _finish_rollout(data)
+
+
+def record_kind(record: dict) -> str | None:
+    """``type/payload.type`` (plus ``/role`` for a message), for the drift guard."""
+    payload = record.get("payload")
+    if not isinstance(payload, dict) or not payload.get("type"):
+        return None
+    kind = f"{record.get('type')}/{payload.get('type')}"
+    return f"{kind}/{payload.get('role')}" if payload.get("type") == "message" else kind
 
 
 def _get_all_rollout_files() -> list[Path]:
@@ -566,6 +581,7 @@ def _subagent_index(refs: list[SubagentRef]) -> list[str]:
 class CodexSource(ConversationSource):
     name = "codex-sessions"
     version = "2.0.0"
+    spec_target = SPEC_TARGETS["codex"]
     output_dir = OUTPUT_DIR
     session_type = "codex-session"
     subagent_type = "codex-subagent"
@@ -620,26 +636,76 @@ class CodexSource(ConversationSource):
         )
 
     # ---- export driver ----
-    @staticmethod
-    def _parse_rollouts(rollouts: list[Path]) -> tuple[list[tuple[Path, dict]], list[Path]]:
+    def _parse_rollouts(
+        self, rollouts: list[Path], since: float | None = None
+    ) -> tuple[list[tuple[Path, dict]], list[Path]]:
         """Parse each rollout exactly once, stamping its native revision.
 
-        Returns ``(parsed, failed)``: a file that cannot be decoded is reported on
-        stderr and listed in ``failed`` so the others still export.
+        Returns ``(parsed, failed)``: a file that cannot be decoded, or that the
+        parser-drift guard refuses, is reported on stderr and listed in ``failed``
+        so the others still export. A rollout without a ``session_meta`` id that is
+        older than :data:`LIVE_CHILD_WINDOW_S` is checked under its filename id.
+
+        The guard verdict is per logical session, not per file: when any fragment of
+        a session is refused, its healthy fragments are held too (listed in
+        ``failed``), so an older fragment never replaces the document a newer one
+        wrote, and a session's finding clears only when no fragment raised one. An
+        info finding is stored only for a session with no clean fragment, so a
+        control-only resume beside a real fragment costs no write per run.
+
+        ``since`` (the export's ``--since`` cutoff) makes the guard quiet for a file
+        last changed before it: its finding is stored but not printed and does not
+        fail the run, and a refused session is held without counting as failed.
         """
         parsed = []
         failed = []
+        refused: dict[str, bool] = {}  # session -> refused by a file inside the window
+        flagged: set[str] = set()  # sessions with an error or warn finding
+        clean: set[str] = set()
+        infos: dict[str, Finding] = {}
         for rollout in rollouts:
+            stats = JsonlStats(kind_of=record_kind)
             try:
                 revision = file_revision(rollout)
-                data = parse_rollout(rollout)
+                data = parse_rollout(rollout, stats)
+                mtime = rollout.stat().st_mtime
             except (OSError, ValueError) as exc:
                 print(f"Error parsing {rollout}: {exc}", file=sys.stderr)
                 failed.append(rollout)
                 continue
+            loud = since is None or mtime >= since
+            if data:
+                sid = data["session_id"]
+                top_level = not data.get("parent_session_id")
+                finding = self.classify_parse(
+                    sid, rollout, stats, data, top_level=top_level, loud=loud, record_info=False
+                )
+            elif time.time() - mtime >= LIVE_CHILD_WINDOW_S:
+                sid = rollout_id(rollout)
+                finding = self.classify_parse(sid, rollout, stats, None, loud=loud)
+            else:
+                continue
+            if finding is None:
+                clean.add(sid)
+            elif finding.severity == INFO:
+                infos.setdefault(sid, finding)
+            else:
+                flagged.add(sid)
+            if finding is not None and finding.severity == ERROR:
+                refused[sid] = refused.get(sid, False) or loud
+                if loud:
+                    failed.append(rollout)
+                continue
             if data:
                 data["source_revision"] = revision
                 parsed.append((rollout, data))
+        failed += [rollout for rollout, data in parsed if refused.get(data["session_id"])]
+        parsed = [(rollout, data) for rollout, data in parsed if data["session_id"] not in refused]
+        for sid in sorted(clean - flagged):
+            self.findings.clear(f"{self.source_name}:{sid}", DRIFT_KINDS)
+        for sid, finding in sorted(infos.items()):
+            if sid not in clean and sid not in flagged:
+                self.findings.record(finding)
         return parsed, failed
 
     @staticmethod
@@ -672,7 +738,10 @@ class CodexSource(ConversationSource):
         parent index links where the child is really written."""
         holder = claimed.get(planned)
         if holder is None and planned.exists():
-            holder = read_frontmatter_head(planned).get(self.id_field)
+            try:
+                holder = read_frontmatter_head(planned).get(self.id_field)
+            except FrontmatterParseError:
+                holder = session_id  # export_one refuses it and records the finding
         if holder is not None and holder != session_id:
             digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
             planned = planned.with_stem(planned.stem + "-" + digest)
@@ -782,6 +851,9 @@ class CodexSource(ConversationSource):
         if not own and not failed:
             raise ValueError(f"No readable Codex transcript for {session_id}")
         self.export_rollouts(quiet=True, parsed=parsed)
+        drift = self.drift_error()
+        if drift is not None:
+            raise drift
         if failed:
             # Readable documents are written; fail so the durable hook job retries.
             names = ", ".join(str(p) for p in failed)
@@ -810,7 +882,7 @@ class CodexSource(ConversationSource):
             else "Exporting sessions in the selected window..."
         )
 
-        parsed, failed = self._parse_rollouts(_get_all_rollout_files())
+        parsed, failed = self._parse_rollouts(_get_all_rollout_files(), date_filter)
         exported = self.export_rollouts(date_filter, quiet=args.quiet, parsed=parsed)
         print(f"\nExported {exported} sessions to {OUTPUT_DIR}")
         if failed:

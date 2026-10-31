@@ -497,11 +497,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
             print(json.dumps(report, indent=2))
         else:
+            from .sources.guards import ParserDrift
+
             module = importlib.import_module(f"cairn.sources.{args.source}")
             source = getattr(module, f"{args.source.title()}Source")()
             with locked(lock_path(source.output_dir, "operation")):
                 try:
                     print(source.export_target(args.session_id, args.transcript))
+                except ParserDrift as exc:
+                    # guard_parse printed the drift finding for its own id already.
+                    if not any(f.message == str(exc) for f in source.report.errors):
+                        print(f"Error: {exc}", file=sys.stderr)
+                    return 1
                 finally:
                     source.flush_catalog()
         return 0

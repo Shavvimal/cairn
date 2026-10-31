@@ -59,6 +59,15 @@ Then the shared metadata (`cairn_schema`, `source`, `native_id`, `source_revisio
 (`tool`, or `agent` for a peer run or a subagent) and the preserved tail
 (`status`, `tags`, `rating`, `comments`, `projects`, `links`).
 
+## Parser checks
+
+- **Spec target.** `SPEC_TARGETS["antigravity"]` in `src/cairn/sources/spec_targets.py`: the date the
+  record shapes were checked against a live store and the host version that day. Every
+  document carries it as `exporter_spec_target`, beside `exporter_version`.
+- **Fixtures.** `tests/fixtures/antigravity/` holds invented transcripts with expected
+  messages; `tests/test_parser_fixtures.py` scores message recall exactly.
+- **Drift.** agy files any step type it does not know as a tool result, so the guard counts only rendered user and assistant turns: a transcript of unknown step types is `zero-messages`, not a list of tool turns. Child conversations never warn `no-user-turns`.
+
 ## Hook
 
 agy has no SessionEnd; its `Stop` event fires at the end of every turn. `cairn hook install

@@ -29,6 +29,7 @@ from ..frontmatter import (
     resolve_title,
     title_line,
 )
+from ..jsonl import JsonlStats
 from ..projects import (
     project_from_file_uris,
     project_from_folder_path,
@@ -39,6 +40,7 @@ from ..schema import SessionData
 from ..store import is_current
 from ..timeutil import today_str
 from .base import ConversationSource
+from .spec_targets import SPEC_TARGETS
 
 COLLECTION = "cursor-sessions"
 _config = get_config()
@@ -351,6 +353,19 @@ def fetch_bubbles(
     return messages
 
 
+def composer_stats(composer_json: dict, data: dict) -> JsonlStats:
+    """Counts for the drift guard: one ``bubble`` record per header or legacy turn.
+
+    A composer with a single bubble is counted as ``single-bubble`` (an ignored
+    type): an aborted or failed request leaves one bubble with no text, so zero
+    messages there is not drift. Two or more bubbles with zero messages is.
+    """
+    units = len(data.get("bubble_order") or data.get("legacy_turns") or [])
+    stats = JsonlStats(lines=units, records=units, bytes=len(json.dumps(composer_json)))
+    stats.types["bubble" if units > 1 else "single-bubble"] = units
+    return stats
+
+
 # =============================================================================
 # Source adapter
 # =============================================================================
@@ -359,6 +374,7 @@ def fetch_bubbles(
 class CursorSource(ConversationSource):
     name = "cursor-sessions"
     version = "2.0.0"
+    spec_target = SPEC_TARGETS["cursor"]
     output_dir = OUTPUT_DIR
     session_type = "cursor-session"
     collection = "cursor-sessions"
@@ -459,6 +475,11 @@ class CursorSource(ConversationSource):
             data["messages_ordered"] = fetch_bubbles(
                 conn, composer_id, data["bubble_order"], data.get("legacy_turns")
             )
+            # top_level=False: many composers carry no user text by design (agent
+            # runs, image-only prompts), so no-user-turns would only be noise.
+            stats = composer_stats(composer_json, data)
+            if not self.guard_parse(composer_id, GLOBAL_DB, stats, data, top_level=False):
+                continue  # a composer with headers but no readable bubble: drift
 
             output_file = self.export_one(composer_id, cast(SessionData, data), existing_file)
             if output_file is None:

@@ -15,11 +15,38 @@ and workflow agents one level deeper in ``subagents/workflows/wf_<id>/``.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections import Counter
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
-def iter_jsonl(file_path: Path, skip_prefixes: tuple[str, ...] = ()) -> Iterator[tuple[int, dict]]:
+@dataclass
+class JsonlStats:
+    """What one read of a JSONL file saw, filled in place by :func:`iter_jsonl`.
+
+    ``lines`` counts non-blank physical lines, including lines dropped by
+    ``skip_prefixes`` (those count as lines only). ``records`` counts decoded JSON
+    objects, ``malformed`` the lines that did not decode or decoded to another JSON
+    value (still yielded, as before), and ``types`` the ``str(record.get("type"))``
+    of each record. ``bytes`` is the file size
+    when the read started. A source whose top-level type is too coarse (Codex wraps
+    control events and messages in the same ``event_msg``) gives ``kind_of``, and
+    ``kinds`` then counts its finer ``type/subtype`` names as well.
+    """
+
+    lines: int = 0
+    records: int = 0
+    malformed: int = 0
+    bytes: int = 0
+    types: Counter[str] = field(default_factory=Counter)
+    kinds: Counter[str] = field(default_factory=Counter)
+    kind_of: Callable[[dict], str | None] | None = None
+
+
+def iter_jsonl(
+    file_path: Path, skip_prefixes: tuple[str, ...] = (), stats: JsonlStats | None = None
+) -> Iterator[tuple[int, dict]]:
     """Yield ``(line_index, record)`` for each valid JSON line in a JSONL file.
 
     ``line_index`` is the 0-based physical line number - it advances even past the
@@ -32,22 +59,40 @@ def iter_jsonl(file_path: Path, skip_prefixes: tuple[str, ...] = ()) -> Iterator
     ``skip_prefixes`` drops a line before JSON decoding when its first 40 characters
     contain any of the given markers (for example ``'"type":"api-request'``), so a
     caller can skip bulky record kinds it never reads without paying to decode them.
+
+    ``stats`` (optional) is filled in place as the lines are read, so a caller can
+    tell an empty file from one whose lines no longer parse (the drift guard).
     """
     if not file_path.exists():
         return
     with open(file_path, encoding="utf-8") as f:
+        if stats is not None:
+            stats.bytes = file_path.stat().st_size
         for index, line in enumerate(f):
             if skip_prefixes:
                 head = line[:40]
                 if any(marker in head for marker in skip_prefixes):
+                    if stats is not None:
+                        stats.lines += 1
                     continue
             line = line.strip()
             if not line:
                 continue
+            if stats is not None:
+                stats.lines += 1
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
+                if stats is not None:
+                    stats.malformed += 1
                 continue
+            if stats is not None and not isinstance(record, dict):
+                stats.malformed += 1  # valid JSON, but no source writes a non-object record
+            elif stats is not None:
+                stats.records += 1
+                stats.types[str(record.get("type"))] += 1
+                if stats.kind_of is not None and (kind := stats.kind_of(record)):
+                    stats.kinds[kind] += 1
             yield index, record
 
 
@@ -179,6 +224,7 @@ def tool_result_text(content: object) -> str:
 
 
 __all__ = [
+    "JsonlStats",
     "find_session_jsonl",
     "find_subagent_jsonl",
     "iter_jsonl",

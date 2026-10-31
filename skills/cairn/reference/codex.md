@@ -116,6 +116,15 @@ as its own document:
   job retries. The first-line lineage index is cached under
   `$XDG_CACHE_HOME/cairn/lineage/`.
 
+## Parser checks
+
+- **Spec target.** `SPEC_TARGETS["codex"]` in `src/cairn/sources/spec_targets.py`: the date the
+  record shapes were checked against a live store and the host version that day. Every
+  document carries it as `exporter_spec_target`, beside `exporter_version`.
+- **Fixtures.** `tests/fixtures/codex/` holds invented transcripts with expected
+  messages; `tests/test_parser_fixtures.py` scores message recall exactly.
+- **Drift.** `event_msg` and `response_item` also carry control payloads, so the guard counts the finer kinds it renders (`event_msg/user_message`, `response_item/message/assistant`, `function_call`, `custom_tool_call`). A rollout with none of them and only known types is `empty`. A rollout older than 10 minutes with no `session_meta` id is `no-session-id`, filed under the thread id in its filename. A live replaying child is skipped, not flagged. Subagent rollouts have no user turn by design and never warn `no-user-turns`.
+
 ## Resume and automatic sync
 
 `cairn resume codex:ID` (or `cairn codex resume ID`) prints `codex resume ID`. Run it in

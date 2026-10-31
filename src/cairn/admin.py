@@ -1086,6 +1086,63 @@ def _check_antigravity_permissions(config: CairnConfig) -> None:
     print(f"       deny:  {', '.join(report['deny']) or '(none)'}")
 
 
+def _check_exporters(config: CairnConfig) -> None:
+    """Warn-only exporter lines: each enabled adapter's spec target."""
+    from .registry import BY_NAME
+    from .sources.spec_targets import SPEC_TARGETS
+
+    for source, target in SPEC_TARGETS.items():
+        coll = config.collections.get(BY_NAME[source].collection)
+        if coll is None or not coll.sync.enabled:
+            continue
+        _ok(f"exporter [{source}]", f"adapter {target.adapter_version}, {target.describe()}")
+    _check_drift(config)
+    _check_gaps(config)
+
+
+def _check_gaps(config: CairnConfig) -> None:
+    """Warn-only, read-only gap check: no heal (that is 'cairn sync')."""
+    from .gaps import GAP_WINDOW_DAYS, gap_sources, refs, scan
+    from .registry import SOURCE_COLLECTIONS
+
+    for source in gap_sources(config):
+        label = f"gap check [{SOURCE_COLLECTIONS[source]}]"
+        try:
+            found = scan(config, source)
+        except (OSError, ValueError) as exc:
+            _warn(label, f"could not scan: {exc}")
+            continue
+        total = len(found.on_disk)
+        days = f"in the last {GAP_WINDOW_DAYS} days"
+        if found.missing:
+            _warn(
+                label,
+                f"{len(found.missing)} of {total} sessions {days} have no document: "
+                f"{refs(source, found.missing)}; run 'cairn sync'",
+            )
+            continue
+        if found.held_on_disk:
+            held = f"no unexplained gaps; {found.held_on_disk} held by parser drift"
+            _ok(label, f"{total} sessions on disk {days}, {held}")
+            continue
+        _ok(label, f"{total} sessions on disk {days}, all exported")
+
+
+def _check_drift(config: CairnConfig) -> None:
+    """Warn-only: the open parser-drift findings, at most five, oldest first."""
+    from .sources.guards import FindingsStore
+
+    store = FindingsStore(config.data_root)
+    found = store.open_findings()
+    for finding in found[:5]:
+        _warn(
+            "parser drift",
+            f"{finding.ref} {finding.kind}: {finding.detail}; first seen {finding.first_seen}",
+        )
+    if len(found) > 5:
+        _warn("parser drift", f"+{len(found) - 5} more; see {store.path}")
+
+
 def doctor_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cairn doctor", description="Check the cairn install")
     parser.add_argument(
@@ -1192,6 +1249,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
     if config is not None:
         _check_invoke(config)
         _check_routines(config)
+        _check_exporters(config)
 
     # embeddings: index-wide counts from the single 'qmd status' probe above.
     # Zero vectors leaves keyword (BM25) search working; only semantic search waits.

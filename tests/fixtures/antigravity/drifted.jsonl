@@ -1,0 +1,2 @@
+{"step_index":0,"source":"USER_EXPLICIT","type":"USER_TURN","status":"DONE","created_at":"2026-10-30T11:00:00Z","content":"Investigate the widget timeout"}
+{"step_index":1,"source":"MODEL","type":"MODEL_TURN","status":"DONE","created_at":"2026-10-30T11:00:02Z","content":"The timeout is an off-by-one."}

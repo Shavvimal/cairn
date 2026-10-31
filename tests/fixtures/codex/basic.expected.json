@@ -1,0 +1,40 @@
+{
+  "fixture_id": "codex/basic",
+  "source": "codex",
+  "spec_target": "2026-10-30",
+  "expected_roles": [
+    "user",
+    "assistant",
+    "assistant",
+    "assistant",
+    "user",
+    "assistant"
+  ],
+  "expected_messages": [
+    {
+      "role": "user",
+      "text_contains": "Investigate the widget timeout"
+    },
+    {
+      "role": "assistant",
+      "text_contains": "Look at the loop"
+    },
+    {
+      "role": "assistant",
+      "text_contains": "shell"
+    },
+    {
+      "role": "assistant",
+      "text_contains": "off-by-one"
+    },
+    {
+      "role": "user",
+      "text_contains": "Apply the fix"
+    },
+    {
+      "role": "assistant",
+      "text_contains": "Applied the fix"
+    }
+  ],
+  "expected_finding": null
+}

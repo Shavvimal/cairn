@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.0]
+
+### Added
+- Parser-drift guard. An export refuses to write a session whose source file holds
+  records but renders no user or assistant message (`zero-messages`), whose lines do not
+  parse (`unreadable-lines`) or, for a Codex rollout, has no session id
+  (`no-session-id`). It prints `Error: parser drift: SOURCE:ID KIND: ...`, keeps the last
+  good document and exits 1. A top-level session with no user turn is still written,
+  with a `no-user-turns` warning. Findings persist in `<data_root>/exporter/findings.json`
+  until a later parse succeeds. The hook worker records the same message as the request
+  error.
+- `cairn <source> export --json` prints one JSON object on stdout: documents written,
+  findings and the spec target. Human lines go to stderr.
+- Trailing-window gap check in `cairn sync --cron` / `--all` for Claude Code, Codex and
+  Antigravity. Sessions changed in the last 30 days with no document are re-exported once
+  and checked again. A gap that stays open fails `gap-check:<collection>`. A
+  `[exporter-drift]` log line repeats while any finding is open.
+- `cairn doctor` prints warn-only `exporter [SOURCE]` (spec target), `parser drift` and
+  `gap check [COLLECTION]` lines.
+- Every exported document carries `exporter_version` and `exporter_spec_target`.
+- Invented per-source parser fixtures with an exact message-recall test.
+
+### Changed
+- An existing document with unparseable frontmatter now blocks its re-export with
+  `Error: refusing to re-export SOURCE:ID: ...; fix or move it`, recorded as a finding.
+  The export no longer aborts with a traceback.
+- A document deleted by hand comes back on the next full sync while its source file is
+  under 30 days old.
+
 ## [2.10.0]
 
 ### Added
