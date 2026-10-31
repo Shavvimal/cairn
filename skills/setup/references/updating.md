@@ -59,7 +59,21 @@ From the verified environment in step 1, run this for each already-installed hos
 
 ```bash
 cairn hook install --harness HOST  # replace HOST with claude or codex
+cairn instructions status --harness HOST  # recall-first block: HOST STATE vN PATH
 ```
+
+Act on the STATE column of the recall-first line. An update never adds the block without
+the user's yes:
+
+- `stale`: run `cairn instructions install --harness HOST`. It upgrades the block in place.
+- `current` or `declined`: nothing to do. `declined` is the user's opt-out.
+- `absent` or `no-file`: the user has not chosen yet. Ask setup's separate question ("Add a
+  10-line recall-first note to your user instruction file?"), show
+  `cairn instructions install --harness HOST --dry-run`, then run `install` on yes or
+  `cairn instructions remove --harness HOST` on no, which records the opt-out.
+- `edited` or `damaged`: report the line and leave the file alone.
+
+Do not pass `--force` unless the user asks.
 
 If the user already uses Cairn cron, refresh its entry with `cairn cron install` and
 check that its configured schedule is retained. Leave cron absent if it was absent;

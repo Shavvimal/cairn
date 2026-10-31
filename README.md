@@ -153,6 +153,7 @@ hooks additionally check that the plugin remains enabled and installed.
 
 ```sh
 cairn hook uninstall --harness codex  # only Cairn's unchanged Codex handler and trust entry
+cairn instructions remove --harness codex  # the recall-first block; records an opt-out
 codex plugin remove cairn@cairn
 codex plugin marketplace remove cairn
 ```
@@ -659,6 +660,22 @@ Locks live under `~/.local/state/cairn/locks/`, outside the corpus and QMD direc
 Their identities use canonical resource paths, so different config/cache environments
 still coordinate on shared files. Lock files remain in place to keep waiting writers
 on the same inode.
+
+### Recall-first instructions
+
+The recall and search skills only help when the agent thinks to use them.
+`cairn instructions install --harness claude|codex` adds a short marked block to the user
+instruction file: `CLAUDE.md` in the Claude Code config directory (`$CLAUDE_CONFIG_DIR`,
+else `~/.claude`), or `AGENTS.md` in the Codex home (`AGENTS.override.md` when that file
+holds text, because Codex then loads it instead). The block tells the agent to run recall
+before it asks about past work, to use `--exact` search for literals, and to ask with a
+hypothesis. cairn changes only the text between `<!-- cairn:recall-first:begin v1 -->` and
+`<!-- cairn:recall-first:end -->`, plus the one blank line that separates the block from the
+text above it. `--dry-run` prints the diff, `show` prints the block for
+a paste by hand, and `status` reports each harness. `cairn instructions remove --harness
+claude|codex` deletes the block and records an opt-out, so a later `install` from the setup or update workflow does
+not add it back without `--force`. Deleting the block by hand counts as the same opt-out.
+`cairn doctor` reports the block state as a warning only.
 
 ## Repository layout
 

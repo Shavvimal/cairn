@@ -70,6 +70,13 @@ a session: it refreshes the marketplace and updates the plugins installed from i
 closing the panel runs `/reload-plugins` (`/reload-plugins --force` if it warned about the
 prompt cache). Re-run `cairn hook install` after an engine reinstall.
 
+The recall-first block (`cairn instructions install --harness claude`) goes into
+`CLAUDE.md` in the Claude Code config directory: `$CLAUDE_CONFIG_DIR` when it is set, else
+`~/.claude`. Claude Code 2.1.314 loads its user instruction file from that directory. A
+symlinked `CLAUDE.md` stays a symlink, and the file mode is kept. Opt out with
+`cairn instructions remove --harness claude`; `install` then skips the block until
+`--force`.
+
 Bundled `hooks/hooks.json` supplies SessionEnd through `hooks/launch.sh`. `cairn hook
 install` records absolute engine/config paths in `hook-launcher.env`; it does not add
 another global hook. Claude gives every SessionEnd hook a shared 1.5 s budget that a

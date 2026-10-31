@@ -102,6 +102,12 @@ checkbox is confusing.
   for the paths (they're free-form, so let them type as many as they want). Each path must be
   a real directory - you'll validate when you add it in step 4.
 
+- **recall-first note?** (separate yes/no) - "Add a 10-line recall-first note to your user
+  instruction file?" The note tells the agent to search past sessions with cairn before it
+  asks the user to re-explain past work. The file is `CLAUDE.md` in the Claude Code config
+  directory or `AGENTS.md` in the Codex home. Ask this on its own: it edits the user's
+  personal file, which is a separate decision from the hook. Step 6 shows the exact diff.
+
 Hold the answers for steps 3-4. **Whether granola was selected decides the install target in
 step 3** - granola needs the optional `cryptography` dependency, shipped as the `[granola]`
 extra.
@@ -241,6 +247,17 @@ cairn hook install --harness HOST  # HOST is claude or codex from the adapter
 cairn hook install --harness antigravity  # when antigravity is enabled: agy's Stop hook in ~/.gemini/config/hooks.json
 cairn cron install     # absolute-path 'cairn sync --cron' entry, safe under cron's PATH
 ```
+
+Then the recall-first note from step 2. Show the diff first:
+
+```bash
+cairn instructions install --harness HOST --dry-run   # prints a unified diff, writes nothing
+```
+
+If the user said yes, run `cairn instructions install --harness HOST`. If the user said
+no, run `cairn instructions remove --harness HOST`: it records the opt-out, so the update
+workflow does not offer the block again. An `Error:` line (a missing harness home, damaged
+markers, a hand edit inside the markers) exits 1; report it and do not edit the file by hand.
 
 Verify the bundled hook through the harness reference. On the Codex versions in the
 harness reference's verified table, `cairn hook install --harness codex` also writes the

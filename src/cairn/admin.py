@@ -1189,6 +1189,62 @@ def _check_drift(config: CairnConfig) -> None:
         _warn("parser drift", f"+{len(found) - 5} more; see {store.path}")
 
 
+def _check_recall_first(harness: str | None) -> None:
+    """Warn-only report of the recall-first block (``cairn instructions``); no config needed."""
+    from .instructions import (
+        ABSENT,
+        BLOCK_VERSION,
+        CURRENT,
+        DAMAGED,
+        EDITED,
+        NO_FILE,
+        STALE,
+        InstructionsError,
+        harness_home,
+        inspect,
+    )
+
+    if harness == "antigravity":
+        return
+    for name in (harness,) if harness else ("claude", "codex"):
+        label = f"recall-first [{name}]"
+        home = harness_home(name)
+        if not home.is_dir():
+            if harness:
+                _warn(label, f"{home} not found")
+            continue
+        try:
+            view = inspect(name)
+        except InstructionsError as exc:
+            _warn(label, str(exc))
+            continue
+        install = f"cairn instructions install --harness {name}"
+        suffix = " (AGENTS.override.md is the active file)" if view.override_active else ""
+        if view.state in (ABSENT, NO_FILE) and view.declined:
+            date = str((view.record or {}).get("updated_at") or "")[:10] or "an unknown date"
+            _ok(label, f"opted out on {date}; '{install} --force' adds it{suffix}")
+        elif view.state in (ABSENT, NO_FILE) and view.deleted_by_hand:
+            _ok(label, f"opted out (block deleted by hand); '{install} --force' adds it{suffix}")
+        elif view.state in (ABSENT, NO_FILE):
+            _warn(
+                label, f"not in {view.path}; run '{install}' (or 'remove' to silence this){suffix}"
+            )
+        elif view.state == CURRENT:
+            _ok(label, f"v{BLOCK_VERSION} current in {view.path}{suffix}")
+        elif view.state == STALE:
+            old = f"v{view.version}" if view.version is not None else "unversioned"
+            _warn(
+                label, f"stale ({old} on disk, v{BLOCK_VERSION} shipped); run '{install}'{suffix}"
+            )
+        elif view.state == EDITED:
+            _warn(
+                label,
+                f"edited by hand inside the markers; edits there are replaced by 'install --force'{suffix}",
+            )
+        elif view.state == DAMAGED:
+            _warn(label, f"damaged markers in {view.path}; fix them by hand{suffix}")
+
+
 def doctor_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cairn doctor", description="Check the cairn install")
     parser.add_argument(
@@ -1361,6 +1417,9 @@ def doctor_main(argv: list[str] | None = None) -> int:
                 "hook execution",
                 "not observed; end a real host session and check cairn hook status",
             )
+
+    # recall-first block in the user instruction file (runs without a config)
+    _check_recall_first(args.harness)
 
     # cron
     if any(_CRON_TAG in ln for ln in _current_crontab()):

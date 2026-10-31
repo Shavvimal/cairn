@@ -40,22 +40,52 @@ def document_lock(path: Path) -> Path:
     return lock_path(path, "document")
 
 
-def atomic_write(path: Path, text: str, *, mode: int | None = None) -> None:
-    """Replace ``path`` with ``text`` through a temporary file and ``os.replace``.
+class ConcurrentChangeError(RuntimeError):
+    """The file changed between the caller's read and the replace; nothing was written."""
 
-    A new file gets ``mkstemp``'s mode 0600 unless ``mode`` is given. ``os.replace``
-    replaces a symlink at ``path`` with a file: pass the resolved path to write
-    through a symlink instead.
+
+def _current_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def atomic_write(
+    path: Path,
+    text: str,
+    *,
+    mode: int | None = None,
+    follow_symlinks: bool = False,
+    check_unchanged: bool = False,
+    expected: bytes | None = None,
+) -> None:
+    """Replace ``path`` with ``text`` (UTF-8) through a temporary file and ``os.replace``.
+
+    The defaults keep the original behaviour: a symlink at ``path`` is replaced by a
+    regular file, missing parents are created, and the file mode is the temporary
+    file's 0600. ``mode`` sets the final mode before the replace. ``follow_symlinks``
+    writes through the resolved target, so a symlink stays a symlink; the target's
+    parent must exist. ``check_unchanged`` reads the file again just before the
+    replace and raises :class:`ConcurrentChangeError` unless its bytes equal
+    ``expected`` (``None`` means the file must not exist).
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if follow_symlinks:
+        path = Path(os.path.realpath(path))
+        if not path.parent.is_dir():
+            raise FileNotFoundError(f"{path.parent} does not exist")
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
+            if mode is not None:
+                os.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
-        if mode is not None:
-            os.chmod(temporary, mode)
+        if check_unchanged and _current_bytes(path) != expected:
+            raise ConcurrentChangeError(f"{path} changed while it was being updated")
         os.replace(temporary, path)
         directory = os.open(path.parent, os.O_RDONLY)
         try:

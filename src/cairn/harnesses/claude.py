@@ -68,6 +68,16 @@ KEYCHAIN_GUIDANCE = (
 )
 
 
+def claude_home() -> Path:
+    """``$CLAUDE_CONFIG_DIR`` if set and non-empty, else ``~/.claude``.
+
+    Claude Code 2.1.314 resolves its config directory the same way and reads the
+    user instruction file from ``<config dir>/CLAUDE.md``.
+    """
+    home = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(home).expanduser() if home else Path.home() / ".claude"
+
+
 def _clip(text: str, limit: int) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 3] + "..."
