@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.0]
+
+### Added
+- Every exported session document and every peer exchange document carries a
+  `provenance` key in its front matter: `tool` (a session a person drove), `agent` (a
+  peer run, a subagent or an exchange), `imported` (a Granola meeting) or `user`
+  (hand-written). A session document carries it directly before `status:`, an exchange
+  document directly before `title:`. Documents exported earlier get a value derived from
+  their front matter when they are read; nothing is rewritten and no backfill is needed.
+- `cairn recall list --provenance VALUE` and `cairn recall digest --provenance VALUE`
+  (repeatable) keep only documents with that value. `--provenance tool` leaves out peer
+  and routine runs.
+
+### Changed
+- `cairn recall list --json` and `cairn recall digest --json` rows carry `provenance` and
+  `owner`. Text rows of both commands show the provenance value, and `cairn recall expand`
+  prints a `Provenance:` line. Digest files carry `provenance` in their front matter.
+- A present but empty `provenance` value warns and is derived again, as an invalid one is.
+- The digest reads the `cairn invoke` preamble (role, parent, owner, provenance) only at
+  the start of the first user frame with text. A preamble pasted later in a session no
+  longer marks it as a peer or routine run.
+
 ## [2.9.0]
 
 ### Added

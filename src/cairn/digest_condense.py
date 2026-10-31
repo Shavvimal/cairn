@@ -269,8 +269,8 @@ def escape(text: str) -> str:
 def preamble_match(body: str) -> re.Match[str] | None:
     """The invoke preamble at the start of a user frame's text, if present."""
     text = body.replace("\r\n", "\n")
-    rest = text.split("\n", 1)[1].removeprefix("\n") if "\n" in text else ""
-    return INVOKE_PREAMBLE.match(rest)
+    rest = text.split("\n", 1)[1].lstrip() if "\n" in text else ""
+    return INVOKE_PREAMBLE.match(rest)  # leading whitespace stripped, as at export
 
 
 def peer_prompt(body: str) -> str:

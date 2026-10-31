@@ -121,6 +121,30 @@ class MutationScoping(unittest.TestCase):
     def test_no_frontmatter_returns_none(self):
         self.assertIsNone(rewrite_preserved_tail("no frontmatter here", lambda fm: None))
 
+    def test_provenance_survives_tail_mutations(self):
+        # The provenance key sits in the head, directly before status: every tail
+        # mutation keeps the head, so the key survives byte for byte.
+        doc = CANONICAL.replace("\nstatus: active", "\nprovenance: tool\nstatus: active", 1)
+        head = doc.split("\nstatus:", 1)[0]
+        mutations: tuple[tuple[str, object], ...] = (
+            ("status", "done"),
+            ("tags", ["widget"]),
+            ("rating", 7),
+            ("comments", "a note"),
+            ("owner", "routine:example-daily"),
+            ("links", ["parent claude:abc12345-feed-0000-0000-000000000000"]),
+        )
+        for key, value in mutations:
+            with self.subTest(key=key):
+
+                def mutate(fm: dict, k: str = key, v: object = value) -> None:
+                    fm[k] = v
+
+                out = rewrite_preserved_tail(doc, mutate)
+                assert out is not None
+                self.assertTrue(out.startswith(head + "\nstatus:"))
+                self.assertEqual(parse_frontmatter(out)["provenance"], "tool")
+
 
 class ParserHardening(unittest.TestCase):
     """The hardened parser fails loudly on YAML it can't faithfully round-trip,

@@ -9,7 +9,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 
-from . import digest
+from . import digest, provenance
 from .config import ConfigError, get_config
 from .registry import SOURCES
 from .store import SessionStore, bounded_content
@@ -46,6 +46,11 @@ def refresh(sources: list[str] | None = None) -> bool:
             )
             success = False
     return success
+
+
+def _owner(fm: dict) -> str | None:
+    """The stored ``owner`` label, or ``None`` (blank and ``null`` included)."""
+    return provenance.owner_of(fm)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -89,6 +94,13 @@ def main(argv: list[str] | None = None) -> int:
     digest_cmd.add_argument(
         "--refresh", action="store_true", help="refresh exports first, without embedding"
     )
+    for command in (listing, digest_cmd):
+        command.add_argument(
+            "--provenance",
+            action="append",
+            choices=provenance.VALUES,
+            help="keep only documents with this provenance value (repeatable)",
+        )
     frame = sub.add_parser("frame", help="print one exported frame and check its digest hash")
     frame.add_argument("session_id", help="source:full-id or unique prefix")
     frame.add_argument("ordinal", type=int, help="0-based frame index in the whole session")
@@ -135,7 +147,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.max_msgs < 1 or args.max_chars < 1:
                 raise ValueError("expansion limits must be positive")
             record = store.resolve(args.session_id, records)
-            print(f"Session: {record.reference}\nFile: {record.path}\n")
+            value = provenance.effective(record.metadata, record.source, record.path)
+            owner = _owner(record.metadata)
+            print(f"Session: {record.reference}\nFile: {record.path}")
+            print(f"Provenance: {value}" + (f" (owner {owner})" if owner else "") + "\n")
             print(bounded_content(record, args.max_msgs, args.max_chars))
             if record.user_messages is not None:
                 print(f"\n{record.user_messages} user messages total")
@@ -150,6 +165,9 @@ def main(argv: list[str] | None = None) -> int:
             if r.in_window(start, end)
             and (r.is_subagent or r.user_messages is None or r.user_messages >= args.min_msgs)
         ]
+        values = {r.path: provenance.effective(r.metadata, r.source, r.path) for r in selected}
+        if args.provenance:
+            selected = [r for r in selected if values[r.path] in args.provenance]
         selected.sort(key=lambda r: r.started_at or datetime.min.replace(tzinfo=UTC))
         output = [
             {
@@ -166,6 +184,8 @@ def main(argv: list[str] | None = None) -> int:
                 "path": str(r.path),
                 "type": r.session_type,
                 "parent": r.parent_id,
+                "provenance": values[r.path],
+                "owner": _owner(r.metadata),
             }
             for r in selected
         ]
@@ -178,9 +198,10 @@ def main(argv: list[str] | None = None) -> int:
             for row in output:
                 parent = row["parent"]
                 lineage = f" (subagent of {str(parent)[:8]})" if parent else ""
+                owner = f" owner={row['owner']}" if row["owner"] else ""
                 print(
                     f"{row['reference']}  {row['time']}  {row['title']}  "
-                    f"[{row['precision']}]{lineage}"
+                    f"[{row['precision']}] {row['provenance']}{owner}{lineage}"
                 )
             print(f"{len(output)} sessions")
         limited = sum(r.precision != "messages" or r.user_messages is None for r in selected)

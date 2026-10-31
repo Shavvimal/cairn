@@ -479,6 +479,7 @@ cairn recall list yesterday --all-projects --refresh --json
 cairn recall list "last week" --source codex --project /absolute/project
 cairn recall expand codex:FULL_ID --max-msgs 30 --max-chars 20000
 cairn recall digest yesterday --all-projects --json
+cairn recall digest yesterday --all-projects --provenance tool --json
 cairn recall frame claude:FULL_ID 12 --frames DIR/claude-SHORTID.frames.jsonl
 ```
 
@@ -492,11 +493,37 @@ frames, not ids. `cairn recall frame REF ORDINAL` prints one frame as exported, 
 exported frames: a Codex tool result that arrives after midnight stays on its call's day.
 
 `--json` prints `{"sessions": [...], "skipped": [...]}`: one row per written session (`ref`,
-`path`, `frames_path`, `role`, `parent`, `project`, `cwd`, `frames_today`, `chars`,
-`truncated`), and one `{"ref", "reason"}` per legacy or corrupt export left out. Exit 0
-means at least one session was written. Exit 3 means an empty day: no session qualified,
-so the directory holds only its marker. This is the routine's `prepare` contract, so a
-digest as `prepare` stamps such a day `empty`.
+`path`, `frames_path`, `role`, `parent`, `provenance`, `owner`, `project`, `cwd`,
+`frames_today`, `chars`, `truncated`), and one `{"ref", "reason"}` per legacy or corrupt
+export left out. Exit 0 means at least one session was written. Exit 3 means an empty
+day: no session qualified, so the directory holds only its marker. This is the routine's
+`prepare` contract, so a digest as `prepare` stamps such a day `empty`.
+
+Every session document and every peer exchange document carries a `provenance` key in its
+front matter: directly before `status:` in a session document, directly before `title:` in
+an exchange document. The key says who produced the body text. It is
+not the digest's frame citations, which this README also calls provenance.
+
+| Value | Meaning |
+|---|---|
+| `tool` | cairn exported it from the harness log of a session that a person drove |
+| `agent` | an agent wrote the prompts: a peer run (first user message is the `cairn invoke` preamble), a subagent transcript, an exchange document |
+| `imported` | mirrored from another application: a Granola meeting |
+| `user` | a person wrote it by hand |
+
+The exporter owns the key and writes it again on every re-render, so a hand edit does not
+last; use `tags` to label a document yourself. A document exported before the key existed
+gets a value from its front matter when it is read: a subagent type reads `agent`, Granola
+reads `imported`, an `owner` label or a `parent` link reads `agent`, and the rest read
+`tool`. The digest also reads `agent` when the first user message with text starts with
+the invoke preamble. A stored value outside the four prints a warning on stderr and reads as the derived value.
+
+`cairn recall list --json` and `cairn recall digest --json` rows carry `provenance` and
+`owner` (the stored owner label, or `null`; the digest also takes the label from the
+invoke preamble). On both commands, the repeatable `--provenance VALUE` keeps only
+documents with that value: `--provenance tool` leaves out peer runs and routine runs.
+Neither filter needs QMD. The `recall list` filter reads front matter only. A digest
+filtered down to no session exits 3, as an empty day does.
 
 Dates are UTC and match recorded activity, not every day between start and finish.
 Listing defaults strictly to the current directory; use `--all-projects` to broaden it.

@@ -6,7 +6,9 @@ import json
 import re
 import unittest
 from pathlib import Path
+from typing import Any, cast
 
+from cairn import provenance
 from cairn.digest import front_matter
 from cairn.digest_condense import select
 from cairn.frontmatter import parse_frontmatter
@@ -238,7 +240,7 @@ class TestSelection(DigestFixture):
         out = self.root / "human"
         code, stdout, _ = self.cli("digest", DAY, "--all-projects", "--out", str(out))
         self.assertEqual(code, 0)
-        self.assertIn("claude:fixture-0001  primary  frames_today=8  chars=", stdout)
+        self.assertIn("claude:fixture-0001  primary  tool  frames_today=8  chars=", stdout)
         self.assertIn(f"1 sessions written to {out}", stdout)
 
 
@@ -348,6 +350,135 @@ class TestRolesAndPeers(DigestFixture):
         self.assertTrue(call.endswith("MIDNIGHT RESULT"))
         code, data, _, _ = self.digest(day="2026-03-29")
         self.assertEqual((code, data["sessions"]), (3, []))  # no input that day
+
+
+class TestProvenanceKey(DigestFixture):
+    """The ``provenance`` front-matter key in digest files, rows and the filter."""
+
+    def write_peer(self, session_id: str, who: str) -> None:
+        name = session_id.replace("-", "")
+        self.write_doc(f"{name}.md", document(session_id, peer_messages(who=who), source="codex"),
+                       "codex-sessions")  # fmt: skip
+
+    def test_digest_carries_provenance(self):
+        self.write_doc("fixture.md", fixture_document())
+        self.write_peer("owned-0001", "routine:example-daily")
+        code, data, _, out = self.digest()
+        self.assertEqual(code, 0)
+        rows = {row["ref"]: row for row in data["sessions"]}
+        primary, owned = rows["claude:fixture-0001"], rows["codex:owned-0001"]
+        self.assertEqual((primary["provenance"], primary["owner"]), ("tool", None))
+        self.assertEqual((owned["provenance"], owned["owner"]), ("agent", "routine:example-daily"))
+        self.assertEqual(list(primary)[4:7], ["parent", "provenance", "owner"])
+        fm = split((out / "claude-fixture0001.md").read_text())[0]
+        self.assertEqual(fm["provenance"], "tool")
+        fm = split((out / "codex-owned0001.md").read_text())[0]
+        self.assertEqual((fm["provenance"], fm["owner"]), ("agent", "routine:example-daily"))
+
+    def test_text_row_shows_provenance_and_owner(self):
+        self.write_peer("owned-0001", "routine:example-daily")
+        out = self.root / "text"
+        code, stdout, _ = self.cli("digest", DAY, "--all-projects", "--out", str(out))
+        self.assertEqual(code, 0)
+        self.assertIn("codex:owned-0001  primary  agent  frames_today=", stdout)
+        self.assertIn("  owner=routine:example-daily", stdout)
+
+    def test_provenance_tool_drops_peers(self):
+        self.write_doc("fixture.md", fixture_document())
+        self.write_peer("peer-0001", "claude session claude:fixture-0001")
+        self.write_peer("owned-0001", "routine:example-daily")
+        code, data, _, out = self.digest("--provenance", "tool")
+        self.assertEqual(code, 0)
+        self.assertEqual([row["ref"] for row in data["sessions"]], ["claude:fixture-0001"])
+        self.assertEqual(data["skipped"], [])
+        self.assertFalse((out / "codex-peer0001.md").exists())
+        code, data, _, _ = self.digest("--provenance", "agent")
+        refs = sorted(row["ref"] for row in data["sessions"])
+        self.assertEqual(refs, ["codex:owned-0001", "codex:peer-0001"])
+
+    def test_operator_peer_without_key_is_agent(self):
+        self.write_peer("operator-0001", "an operator")
+        code, data, _, out = self.digest()
+        self.assertEqual(code, 0)
+        self.assertEqual(data["sessions"][0]["provenance"], "agent")
+        fm = split((out / "codex-operator0001.md").read_text())[0]
+        self.assertEqual(
+            (fm["role"], fm["orphan_peer"], fm["provenance"]), ("primary", "true", "agent")
+        )
+
+    def test_later_preamble_without_key_is_tool(self):
+        # Only the first user message with text decides, as at export: a person who
+        # pastes a preamble later in the session still drove it, so neither the
+        # provenance nor the lineage (role, parent, orphan_peer, owner) reads it.
+        for who in ("an operator", "routine:example-daily", "claude session claude:fixture-0001"):
+            with self.subTest(who=who):
+                messages = [
+                    msg("user", "2026-03-28T09:00:00Z", "Look at this prompt"),
+                    msg("assistant", "2026-03-28T09:01:00Z", "Reading it."),
+                    msg("user", "2026-03-28T09:02:00Z", PREAMBLE.format(who=who, n=1)),
+                ]
+                self.write_doc("later.md", document("later-0001", messages, source="codex"),
+                               "codex-sessions")  # fmt: skip
+                code, data, _, out = self.digest("--provenance", "tool")
+                self.assertEqual(code, 0)
+                (row,) = data["sessions"]
+                self.assertEqual(row["ref"], "codex:later-0001")
+                self.assertEqual(
+                    (row["role"], row["parent"], row["provenance"], row["owner"]),
+                    ("primary", None, "tool", None),
+                )
+                fm = split((out / "codex-later0001.md").read_text())[0]
+                self.assertEqual(
+                    (fm["role"], fm["parent"], fm["orphan_peer"], fm["provenance"]),
+                    ("primary", "null", "false", "tool"),
+                )
+                self.assertNotIn("owner", fm)
+
+    def test_indented_preamble_reads_as_at_export(self):
+        # ``at_export`` strips leading whitespace before the preamble; the digest
+        # must read the same document the same way.
+        for lead in ("  ", "\n", "\n\n  "):
+            with self.subTest(lead=repr(lead)):
+                text = lead + PREAMBLE.format(who="an operator", n=1)
+                messages = [msg("user", "2026-03-28T09:00:00Z", text)]
+                exported = provenance.at_export("codex", "codex-session", cast(Any, messages))
+                self.assertEqual(exported, "agent")
+                self.write_doc("lead.md", document("lead-0001", messages, source="codex"),
+                               "codex-sessions")  # fmt: skip
+                code, data, _, _ = self.digest()
+                self.assertEqual(code, 0)
+                self.assertEqual(data["sessions"][0]["provenance"], "agent")
+
+    def test_stored_key_beats_body_evidence(self):
+        for stored, expected in (("tool", "tool"), ("robot", "agent"), ("", "agent")):
+            with self.subTest(stored=stored):
+                text = document("stored-0001", peer_messages(who="an operator"), source="codex",
+                                head_extra=(f"provenance: {stored}".rstrip(),))  # fmt: skip
+                self.write_doc("stored.md", text, "codex-sessions")
+                code, data, stderr, _ = self.digest()
+                self.assertEqual(code, 0)
+                self.assertEqual(data["sessions"][0]["provenance"], expected)
+                warning = f"provenance '{stored}' is not one of user, agent, tool, imported"
+                self.assertEqual(warning in stderr, stored != "tool")
+
+    def test_filter_to_nothing_exits_3(self):
+        self.write_doc("fixture.md", fixture_document())
+        code, data, _, out = self.digest("--provenance", "imported")
+        self.assertEqual(code, 3)
+        self.assertEqual(data, {"sessions": [], "skipped": []})
+        self.assertEqual([p.name for p in out.iterdir()], [".cairn-digest"])
+
+    def test_filter_to_nothing_clears_a_populated_directory(self):
+        self.write_doc("fixture.md", fixture_document())
+        code, _, _, out = self.digest()
+        self.assertEqual(code, 0)
+        written = sorted(p.name for p in out.iterdir())
+        self.assertEqual(
+            written, [".cairn-digest", "claude-fixture0001.frames.jsonl", "claude-fixture0001.md"]
+        )
+        code, data, _, _ = self.digest("--provenance", "agent")
+        self.assertEqual((code, data), (3, {"sessions": [], "skipped": []}))
+        self.assertEqual([p.name for p in out.iterdir()], [".cairn-digest"])
 
 
 if __name__ == "__main__":

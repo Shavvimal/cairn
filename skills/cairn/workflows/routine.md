@@ -87,6 +87,11 @@ The exit codes are the contract:
 
 A timeout is `prepare-timeout` or `validate-timeout`. A missing executable is exit 127.
 
+A digest `prepare` that adds `"--provenance", "tool"` leaves out peer and routine runs,
+so the routine does not digest its own earlier output. The journal entries the peer writes
+are not exported by cairn, so cairn writes no `provenance` key into them. The prompt should
+tell the peer to put `provenance: agent` in each entry's front matter.
+
 ## 3. Dry-run
 
 ```bash

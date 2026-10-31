@@ -478,13 +478,14 @@ For each candidate record, in this order:
    document and `child <peer>:<thread>` on the caller (`src/cairn/invoke.py:535-555`,
    roles in `src/cairn/mutations.py:35`). `role: peer`, `parent` = that reference. With
    more than one `parent` entry, take the first and print a warning.
-3. Peer by preamble. A user frame whose text, after the header and blank line, matches
-   the regex in 6.2. Scan all user frames of the whole session in ordinal order and use
-   the first match. Not only the first user frame: a Codex session can open with
-   host-context user messages (UNVERIFIED: whether Codex records the environment context
-   as a `user_message` before the prompt; `user_message` at
-   `src/cairn/sources/codex.py:214-225` takes both event and response items). If the
-   match names a caller, `role: peer`, `parent` = the caller reference.
+3. Peer by preamble. The first user frame with text, after the header and blank line,
+   matches the regex in 6.2. Later user frames do not count: a person who pastes a
+   preamble into a session they drive does not make it a peer run. (Changed by the
+   provenance layer, `docs/provenance-spec.md` 4.5; this step first scanned every user
+   frame in case a Codex session opened with host-context user messages, but the Codex
+   exporter drops `<environment_context>`, AGENTS.md instructions and `<skill>` messages
+   before they become user messages, `src/cairn/sources/codex.py:313-315`.) If the match
+   names a caller, `role: peer`, `parent` = the caller reference.
 4. Orphan peer. A preamble match that names no caller (`an operator`, or an owner label
    such as `routine:daily` from `cairn invoke --owner`), or a caller whose
    reference fails `_LINK_REF`-style validation (`src/cairn/mutations.py:36-37`):
@@ -654,7 +655,8 @@ Front matter keys, in this order. Scalars are written as `key: "value"` with
 | `role` | `primary`, `peer` or `subagent` |
 | `parent` | `source:id` or `null` |
 | `orphan_peer` | `true` or `false` |
-| `owner` | copied from the session front matter when present; the key is omitted otherwise |
+| `provenance` | `user`, `agent`, `tool` or `imported` (added by the provenance layer, `docs/provenance-spec.md`): a valid stored key; otherwise `agent` when the first user frame with text starts with the invoke preamble; otherwise the value derived from front matter |
+| `owner` | the session's front-matter `owner` when it is a non-blank label other than `null`; otherwise the owner label of the invoke preamble (6.1 step 4, added by the provenance layer); the key is omitted when neither exists |
 | `date` | the window day, `YYYY-MM-DD` |
 | `session_started_at` | `record.started_at` in UTC, or `null` |
 | `first_ts`, `last_ts` | first and last effective timestamp among in-window frames |
@@ -700,6 +702,7 @@ cwd: "/tmp/demo"
 role: "primary"
 parent: null
 orphan_peer: false
+provenance: "tool"
 date: "2026-03-28"
 session_started_at: "2026-03-27T22:10:00Z"
 first_ts: "2026-03-28T09:02:11Z"
@@ -775,6 +778,8 @@ then `ref`:
       "frames_path": "~/.cache/cairn/digests/2026-03-28/claude-3f2a9c1e7b4d.frames.jsonl",
       "role": "primary",
       "parent": null,
+      "provenance": "tool",
+      "owner": null,
       "project": "demo",
       "cwd": "/tmp/demo",
       "frames_today": 6,
@@ -787,12 +792,16 @@ then `ref`:
 ```
 
 `path` and `frames_path` are absolute in real output (the `~` above is for the
-example). `chars` is the digest body length. Skipped sessions (legacy, corrupt) are not
+example). `chars` is the digest body length. `provenance` and `owner` were added by the
+provenance layer (`docs/provenance-spec.md`): `owner` is the front-matter value, else the
+owner label of the invoke preamble that `lineage` found, or `null`.
+`--provenance VALUE` (repeatable) drops sessions outside the set before anything is
+written; a dropped session is not listed in `skipped`. Skipped sessions (legacy, corrupt) are not
 rows; they are stderr warnings and entries of `skipped[]`. With `--json`, stdout is one
 object, `{"sessions": [rows], "skipped": [{"ref", "reason"}]}` (answer 2).
 
 Without `--json`, stdout is one line per written session,
-`REF  ROLE  frames_today=N  chars=C  [truncated F]`, then
+`REF  ROLE  PROVENANCE  frames_today=N  chars=C  [owner=X]  [truncated F]`, then
 `N sessions written to DIR`.
 
 ## 9. Test plan

@@ -14,6 +14,7 @@ import argparse
 import importlib
 import json
 import os
+import re
 import sqlite3
 import unittest
 import urllib.error
@@ -171,6 +172,115 @@ class TestCodexExport(_AdapterFixture):
         self.assertIn("Found the off-by-one", text)  # assistant turn
 
 
+class TestClaudeProvenance(_AdapterFixture):
+    """Every Claude export carries ``provenance`` as the last head line before status."""
+
+    module_name = "cairn.sources.claude"
+    session_id = "abc12345-feed-0000-0000-000000000000"
+
+    def _write(self, store: Path, *texts: str) -> Path:
+        folder = store / "-tmp-demo"
+        folder.mkdir(parents=True, exist_ok=True)
+        records = [
+            {
+                "sessionId": self.session_id,
+                "timestamp": "2026-03-28T05:20:11Z",
+                "type": "user",
+                "message": {"role": "user", "content": text},
+            }
+            for text in texts
+        ]
+        path = folder / f"{self.session_id}.jsonl"
+        path.write_text("\n".join(map(json.dumps, records)) + "\n", encoding="utf-8")
+        return path
+
+    def _export(self, mod, transcript: Path) -> Path:
+        out = mod.ClaudeSource().sync_session(
+            self.session_id, str(transcript), quiet=True, project="demo"
+        )
+        assert out is not None
+        return out
+
+    def test_export_writes_provenance_before_status(self):
+        store = self.root / "claude-store"
+        mod = self._activate({"claude-code-sessions": str(store)})
+        out = self._export(mod, self._write(store, "Investigate the widget bug"))
+        lines = out.read_text(encoding="utf-8").split("\n")
+        index = lines.index("status: active")
+        self.assertEqual(lines[index - 1], "provenance: tool")
+        self.assertEqual(parse_frontmatter("\n".join(lines))["provenance"], "tool")
+
+    def test_reexport_keeps_provenance_and_annotations(self):
+        from cairn import mutations
+
+        store = self.root / "claude-store"
+        mod = self._activate({"claude-code-sessions": str(store)})
+        source = mod.ClaudeSource()
+        out = self._export(mod, self._write(store, "Investigate the widget bug"))
+        self.assertTrue(mutations.add_comment(source.find_file, self.session_id, "keep me"))
+        self.assertTrue(
+            mutations._mutate_file(
+                source.find_file, self.session_id, lambda fm: fm.__setitem__("tags", ["widget"])
+            )
+        )
+        text = out.read_text(encoding="utf-8")
+        placeholder = re.search(r"<!-- Add your notes here\.[^>]*-->", text)
+        assert placeholder is not None
+        text = text.replace(placeholder[0], "Hand-written follow-up")
+        # A hand edit of the key does not survive: the re-render recomputes it.
+        text = text.replace("\nprovenance: tool\n", "\nprovenance: user\n", 1)
+        out.write_text(text, encoding="utf-8")
+        self.assertEqual(parse_frontmatter(text)["provenance"], "user")
+        transcript = self._write(store, "Investigate the widget bug", "Now add a test")
+        self.assertEqual(self._export(mod, transcript), out)
+        text = out.read_text(encoding="utf-8")
+        fm = parse_frontmatter(text)
+        self.assertIn("Now add a test", text)  # the re-render happened
+        self.assertEqual(fm["provenance"], "tool")
+        self.assertEqual(fm["tags"], ["widget"])
+        self.assertIn("keep me", fm["comments"])
+        self.assertEqual(text.count("Hand-written follow-up"), 1)
+        self.assertEqual(text.count("\nprovenance:"), 1)
+
+
+class TestCodexProvenance(_AdapterFixture):
+    module_name = "cairn.sources.codex"
+
+    def test_peer_export_is_agent(self):
+        from cairn.invoke import preamble
+
+        store = self.root / "codex-store"
+        store.mkdir()
+        prompt = preamble("codex", None, 1, 600, owner="routine:example-daily") + "\n\nReview"
+        rollout = [
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "abc12345-feed-7000-8000-000000000000",
+                    "timestamp": "2026-01-15T10:00:00Z",
+                    "cwd": "/tmp/demo",
+                },
+            },
+            {"type": "event_msg", "payload": {"type": "user_message", "message": prompt}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "VERDICT: accept - fine"}],
+                },
+            },
+        ]
+        (store / "rollout-2026.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rollout) + "\n", encoding="utf-8"
+        )
+        mod = self._activate({"codex-sessions": str(store)})
+        self.assertEqual(mod.CodexSource().export_rollouts(date_filter=None, quiet=True), 1)
+        (output,) = (self.root / ".context" / "codex-sessions").rglob("*.md")
+        lines = output.read_text(encoding="utf-8").split("\n")
+        self.assertEqual(lines[lines.index("status: active") - 1], "provenance: agent")
+
+
 class TestCursorExport(_AdapterFixture):
     module_name = "cairn.sources.cursor"
 
@@ -261,6 +371,14 @@ class TestCursorExport(_AdapterFixture):
 
 class TestGranolaExport(_AdapterFixture):
     module_name = "cairn.sources.granola"
+
+    def test_export_is_imported(self):
+        mod = self._activate({"granola-sessions": str(self.root / "granola")})
+        data: SessionData = {"meeting_id": "m1", "date": "2026-07-01", "title": "Meeting"}
+        path = mod.GranolaSource().export_one("m1", data, None)
+        assert path is not None
+        lines = path.read_text(encoding="utf-8").split("\n")
+        self.assertEqual(lines[lines.index("status: raw") - 1], "provenance: imported")
 
     def test_source_headings_do_not_erase_handwritten_notes_on_reexport(self):
         mod = self._activate({"granola-sessions": str(self.root / "granola")})

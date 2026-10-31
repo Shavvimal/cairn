@@ -26,7 +26,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from .. import frontmatter as fm_mod
-from .. import listing, mutations, qmd
+from .. import listing, mutations, provenance, qmd
 from ..catalog import Catalog, load_catalog
 from ..paths import get_output_path
 from ..registry import SOURCES
@@ -300,7 +300,10 @@ class ConversationSource(ABC):
                 if not ok:
                     return None
                 markdown = strip_lone_surrogates(self.render_document(data, existing_fm, my_notes))
-                metadata = "\n".join(metadata_lines(self.source_name, source_id, data))
+                metadata = "\n".join(
+                    metadata_lines(self.source_name, source_id, data)
+                    + provenance.head_lines(self.source_name, markdown, data)
+                )
                 markdown = markdown.replace("\nstatus:", "\n" + metadata + "\nstatus:", 1)
                 # Validate before replacing the file: a document the catalog cannot
                 # parse must never land on disk (it would be flagged on every listing

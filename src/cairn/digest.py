@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
+from . import provenance as provenance_mod
 from .digest_condense import (
     Condenser,
     parse_parts,
@@ -104,7 +105,10 @@ def check_out(out: Path) -> None:
 
 
 def lineage(record: SessionRecord, frames: list[Frame]) -> Lineage:
-    """Role and parent, in order: subagent, peer by link, peer by preamble, primary (6.1)."""
+    """Role and parent, in order: subagent, peer by link, peer by preamble, primary (6.1).
+
+    The preamble counts only in the first user frame with text (:func:`first_user_frame`).
+    """
     if record.is_subagent:
         return Lineage("subagent", f"{record.source}:{record.parent_id}")
     links = record.metadata.get("links")
@@ -117,14 +121,37 @@ def lineage(record: SessionRecord, frames: list[Frame]) -> Lineage:
                 file=sys.stderr,
             )
         return Lineage("peer", parents[0])
+    first = first_user_frame(frames)
+    if first is None or (match := preamble_match(first.body)) is None:
+        return Lineage("primary", None)
+    caller = match["caller"]
+    if caller and match["caller_source"] == match["ref_source"] and _LINK_REF.match(caller):
+        return Lineage("peer", caller)
+    return Lineage("primary", None, orphan_peer=True, owner=match["owner"])
+
+
+def first_user_frame(frames: list[Frame]) -> Frame | None:
+    """The first user frame with text after its header, or ``None``.
+
+    Only this frame can carry the invoke preamble of a peer run, the test that
+    ``provenance.at_export`` applies to the first user message: a preamble pasted
+    later in a session a person drove makes it neither a peer nor ``agent``. The
+    Codex exporter already drops host-context user messages (``<environment_context>``,
+    AGENTS.md instructions), so they never come first.
+    """
     for frame in frames:
-        if frame.role != "user" or (match := preamble_match(frame.body)) is None:
+        if frame.role != "user":
             continue
-        caller = match["caller"]
-        if caller and match["caller_source"] == match["ref_source"] and _LINK_REF.match(caller):
-            return Lineage("peer", caller)
-        return Lineage("primary", None, orphan_peer=True, owner=match["owner"])
-    return Lineage("primary", None)
+        text = frame.body.replace("\r\n", "\n")
+        if (text.split("\n", 1)[1] if "\n" in text else "").strip():
+            return frame
+    return None
+
+
+def opens_with_preamble(frames: list[Frame]) -> bool:
+    """Whether the first user frame with text starts with the invoke preamble."""
+    first = first_user_frame(frames)
+    return first is not None and preamble_match(first.body) is not None
 
 
 def artifacts(text: str, anchor: int) -> list[str]:
@@ -290,7 +317,13 @@ def build(
         ("parent", family.parent),
         ("orphan_peer", family.orphan_peer),
     ]
-    owner = record.metadata.get("owner") or family.owner
+    # A document exported before the key existed reads ``agent`` when its first user
+    # message with text is an invoke preamble (a parent link is front-matter evidence).
+    value = provenance_mod.effective(
+        record.metadata, record.source, record.path, peer_body=opens_with_preamble(frames)
+    )
+    fields.append(("provenance", value))
+    owner = provenance_mod.owner_of(record.metadata) or family.owner
     if owner:
         fields.append(("owner", str(owner)))
     fields += [
@@ -327,6 +360,8 @@ def build(
         "frames_path": "",
         "role": family.role,
         "parent": family.parent,
+        "provenance": value,
+        "owner": str(owner) if owner else None,
         "project": record.project,
         "cwd": record.cwd,
         "frames_today": len(today),
@@ -400,6 +435,8 @@ def run_digest(
             continue
         if digest is not None:
             digests.append(digest)
+    if getattr(args, "provenance", None):
+        digests = [d for d in digests if d.row["provenance"] in args.provenance]
     digests.sort(key=lambda d: (d.first_ts, d.record.reference))
     _stems(digests)
     write(out, digests)
@@ -410,9 +447,10 @@ def run_digest(
         for row in rows:
             dropped = row["truncated"]["frames_dropped"]
             note = f"  [truncated {dropped}]" if dropped else ""
+            owner = f"  owner={row['owner']}" if row["owner"] else ""
             print(
-                f"{row['ref']}  {row['role']}  frames_today={row['frames_today']}  "
-                f"chars={row['chars']}{note}"
+                f"{row['ref']}  {row['role']}  {row['provenance']}  "
+                f"frames_today={row['frames_today']}  chars={row['chars']}{owner}{note}"
             )
         print(f"{len(rows)} sessions written to {out}")
     return 0 if digests else 3
