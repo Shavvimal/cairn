@@ -68,13 +68,83 @@ codex plugin add cairn@cairn
 cairn hook install --harness codex
 ```
 
-Restart Codex. Review/trust the exact Cairn hook in `/hooks`; installation alone does
-not grant trust. `cairn hook status --harness codex` reports the client’s registration/trust state separately from observed events and results. A changed hook may require review again. The explicit hook file is `hooks/codex.json`. `cairn hook install --harness codex`
+Restart Codex. On a verified Codex version (table below), `cairn hook install --harness
+codex` also trusts the fallback it writes: it adds `[hooks.state."<hooks.json
+path>:session_end:<group>:0"]` with `trusted_hash` to `$CODEX_HOME/config.toml`. The
+command embeds the engine path and the background environment, so a reinstall after either
+changes refreshes the trust entry in place; a reinstall with neither changed writes nothing. On any other version, or with
+`--no-trust`, review/trust the exact Cairn hook in `/hooks`: installation alone does not
+grant trust there. `cairn hook status --harness codex` reports the client’s
+registration/trust state (`host_hooks`) and the trust state read from the files
+(`codex_trust`) separately from observed events and results. `cairn doctor --harness codex`
+prints one `Codex hook trust` line: `trusted`, `stale`, `missing`, `disabled` or `manual`.
+The explicit hook file is `hooks/codex.json`. `cairn hook install --harness codex`
 inspects the actual client: if bundled discovery works it removes any previous fallback;
 otherwise it adds only a Cairn-owned user hook and preserves unrelated entries. Tested
 0.160.0 and 0.163.0 omit hooks from the portable manifest, so need this fallback.
 Run `cairn hook uninstall --harness codex` before removing the Codex plugin; it preserves
 the shared launcher/data used by Claude. Disable/removal also gates the fallback at runtime.
+
+### Hook trust written by cairn
+
+Codex stores trust as `trusted_hash = "sha256:<hex>"` over the canonical JSON of one
+handler: `{"event_name": "<snake_case event>", "hooks": [{"type", "command", "timeout"
+(600 when absent), "async": false, "statusMessage" (when present)}]}`, keys sorted, no
+spaces. The format is not documented by Codex, so cairn writes it only on the versions
+where it recomputed a live entry:
+
+| Codex | Verified | How |
+| --- | --- | --- |
+| 0.165.0 | 2026-10-30 | Recomputed all four `hooks.state` hashes of a live `config.toml` from its `hooks.json` |
+
+The accepted range runs from the lowest verified version to the end of the highest
+verified minor (today `>= 0.165.0, < 0.166.0`). Outside it the install prints
+`Codex <version> is outside the versions cairn verified the trust hash on (...)` and the
+manual `/hooks` step. To add a version, recompute a live entry and add a row here and to
+`TRUST_FORMAT_VERIFIED` in `src/cairn/harnesses/codex_trust.py`.
+
+Files and safety rules:
+
+- `$CODEX_HOME/cairn-hook-receipt.json`: the receipt. One entry per hooks.json group and
+  trust table cairn wrote, each with a sha256. It replaces the earlier
+  `<XDG config>/cairn/codex-hook-registration.json`, which the next install or uninstall
+  reads once and deletes.
+- `$CODEX_HOME/config.toml.cairn-bak`: the bytes of `config.toml` before cairn's last edit,
+  with the same mode (beside the target file when `config.toml` is a symlink).
+- cairn edits only whole `[hooks.state."<key>"]` tables. Before it replaces the file, the
+  new text must parse back to the original with only the planned keys changed, and the file
+  must be unchanged since cairn read it (Codex does not take cairn's lock). cairn stages
+  and fsyncs the backup and the new file first and checks just before the rename, so only
+  a Codex save in that last instant can be lost. A symlinked `config.toml` or `hooks.json`
+  stays a symlink, and the file mode is kept.
+- A table at cairn's key with any key besides `trusted_hash` (for example
+  `enabled = false`) is left alone, with a warning.
+- After the write, cairn asks Codex (`hooks/list`) once more. If Codex lists the hook with
+  a `trustStatus` other than `trusted`, cairn removes the table it wrote in that run (no new
+  backup; a `config.toml` it created is deleted) and prints the `/hooks` step. If `hooks/list` fails, the table stays and the success line ends with
+  `(Codex did not answer hooks/list: <reason>)`. If it does not list the hook or gives no
+  status, the table stays and the success line has no note.
+- Reinstall replaces cairn's group only while its sha256 equals the receipt's. If you
+  edited the group (timeout, matcher, status message, an added handler), install stops
+  and changes nothing:
+  restore or remove the group, then run it again. A group whose command you changed is no
+  longer cairn's; install appends a new one.
+- During a reinstall the receipt keeps the earlier and the planned entries until the
+  writes finish, so an interrupted run can still be uninstalled or completed.
+- Uninstall removes a table or group only while its sha256 equals the receipt's; a changed
+  entry stays and gets a warning. Removing the group shifts later SessionEnd groups down
+  one index, so Codex asks to trust them again; cairn warns about that and does not
+  re-key tables it did not write.
+
+```sh
+cairn hook install --harness codex --dry-run    # print every planned write; cairn writes nothing
+cairn hook install --harness codex --no-trust   # register only; trust in /hooks
+cairn hook uninstall --harness codex --dry-run  # print the planned removals
+```
+
+`--dry-run` writes no file and takes no lock. Install still asks Codex for its loaded hooks
+(`codex app-server`, `hooks/list`), as a real install does, and Codex itself can create its
+state files in `$CODEX_HOME` while it answers.
 
 SessionEnd runs when the main session ends (normal client shutdown, archive/delete of an
 open conversation, or the host's idle timeout). Switching conversations does not immediately

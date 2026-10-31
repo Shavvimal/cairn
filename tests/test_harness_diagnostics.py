@@ -65,3 +65,106 @@ class TestHarnessDiagnostics(unittest.TestCase):
             caller, warnings = resolve_caller(None)
             self.assertIsNone(caller)
             self.assertIn("no single host session detected", warnings[0])
+
+
+class TestCodexTrustDoctor(unittest.TestCase):
+    def test_doctor_reports_trust_states(self):
+        from cairn.harnesses import codex_registration as registration
+        from cairn.harnesses import codex_trust as trust
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "codex-home"
+            home.mkdir()
+            environment = {
+                "HOME": str(root / "home"),
+                "CODEX_HOME": str(home),
+                "XDG_CONFIG_HOME": str(root / "xdg"),
+            }
+            hooks_path = home.resolve() / "hooks.json"
+            handler = {
+                "type": "command",
+                "command": "echo cairn",
+                "timeout": 3,
+                "statusMessage": "Cairn automatic session sync",
+            }
+            hooks_path.write_text(json.dumps({"hooks": {"SessionEnd": [{"hooks": [handler]}]}}))
+            key = f"{hooks_path}:session_end:0:0"
+            good = trust.trusted_hash("SessionEnd", handler)
+            entry = {
+                "kind": "config_toml_table",
+                "key": key,
+                "trusted_hash": good,
+                "sha256": trust.canonical_sha({"trusted_hash": good}),
+            }
+            receipt = {
+                "receipt_version": 2,
+                "hooks_path": str(hooks_path),
+                "commands": ["echo cairn"],
+            }
+            header = trust.table_header(key)
+            cases = [
+                (
+                    "0.165.0",
+                    f'{header}\ntrusted_hash = "{good}"\n',
+                    [{**entry, "origin": "written"}],
+                    "ok   Codex hook trust - trusted (written by cairn)",
+                ),
+                (
+                    "0.165.0",
+                    f'{header}\ntrusted_hash = "{good}"\n',
+                    [],
+                    "ok   Codex hook trust - trusted (written by Codex)",
+                ),
+                (
+                    "0.165.0",
+                    f'{header}\ntrusted_hash = "sha256:old"\n',
+                    [],
+                    "warn Codex hook trust - stale: SessionEnd group 0 changed after it was trusted",
+                ),
+                (
+                    "0.165.0",
+                    "",
+                    [],
+                    "warn Codex hook trust - missing: no trust table for SessionEnd group 0",
+                ),
+                (
+                    "0.165.0",
+                    f'{header}\ntrusted_hash = "{good}"\nenabled = false\n',
+                    [],
+                    "warn Codex hook trust - disabled: SessionEnd group 0 has enabled = false",
+                ),
+                (
+                    "0.170.0",
+                    "",
+                    [],
+                    "warn Codex hook trust - manual: Codex 0.170.0 is outside the verified range "
+                    "(>= 0.165.0, < 0.166.0); Review/trust the Cairn SessionEnd hook in /hooks.",
+                ),
+                (
+                    None,
+                    "",
+                    [],
+                    "warn Codex hook trust - manual: the Codex version is unknown (codex is not "
+                    "on PATH), so cairn cannot check it against the verified range",
+                ),
+            ]
+            for version, toml, entries, expected in cases:
+                with self.subTest(expected=expected), patch.dict(os.environ, environment):
+                    (home / "config.toml").write_text(toml)
+                    (home / registration.RECEIPT_NAME).write_text(
+                        json.dumps({**receipt, "entries": entries})
+                    )
+                    output = io.StringIO()
+                    with (
+                        patch.object(
+                            trust,
+                            "codex_version",
+                            return_value=(version, "" if version else "codex is not on PATH"),
+                        ),
+                        redirect_stdout(output),
+                    ):
+                        admin._check_codex_trust()
+                    line = output.getvalue().strip()
+                    self.assertTrue(line.startswith(expected), line)
+                    self.assertEqual(line.count("\n"), 0)
