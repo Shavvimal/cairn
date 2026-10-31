@@ -1,0 +1,14 @@
+{"intent": "sync all my claude and codex sessions now", "expected": "cairn"}
+{"intent": "export the last week of sessions to markdown", "expected": "cairn"}
+{"intent": "export my codex threads from today", "expected": "cairn"}
+{"intent": "export the cursor chats for this workspace", "expected": "cairn"}
+{"intent": "export yesterday's granola meetings", "expected": "cairn"}
+{"intent": "resume the session I had open on the hooks branch", "expected": "cairn"}
+{"intent": "add a note to this session saying the fix is in PR 33", "expected": "cairn"}
+{"intent": "close out this session as done", "expected": "cairn"}
+{"intent": "log this session with a one-line summary", "expected": "cairn"}
+{"intent": "sync the service docs from the config", "expected": "cairn"}
+{"intent": "pull in the transcripts from today's meetings", "expected": "cairn"}
+{"intent": "is my scheduled journal routine still running", "expected": "cairn"}
+{"intent": "resume my last codex session", "expected": "cairn", "ambiguous_with": ["invoke-codex"]}
+{"intent": "sync the docs listed in my config", "expected": "cairn"}

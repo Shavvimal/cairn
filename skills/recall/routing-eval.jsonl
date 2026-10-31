@@ -1,0 +1,12 @@
+{"intent": "what did we end up working on yesterday afternoon?", "expected": "recall"}
+{"intent": "can you recall where we got to with the auth refactor", "expected": "recall"}
+{"intent": "load up the context about the qmd timeout bug before we start", "expected": "recall"}
+{"intent": "do you remember back when we moved the config to json?", "expected": "recall"}
+{"intent": "prime yourself with context from my past sessions on the exporter", "expected": "recall"}
+{"intent": "what was I actually doing last tuesday", "expected": "recall"}
+{"intent": "show me the history of my sessions this week", "expected": "recall"}
+{"intent": "give me a digest of what happened yesterday", "expected": "recall"}
+{"intent": "write the daily journal digest for 2026-10-28", "expected": "recall"}
+{"intent": "cite the exact frame where we decided on BM25", "expected": "recall"}
+{"intent": "what did we get done on the sync robustness work last week", "expected": "recall"}
+{"intent": "pull up the history of my coding sessions about launchd", "expected": "recall"}

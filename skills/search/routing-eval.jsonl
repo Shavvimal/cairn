@@ -1,0 +1,12 @@
+{"intent": "do a search in cairn for 'trusted_hash'", "expected": "search"}
+{"intent": "search through my old sessions for the word keychain", "expected": "search"}
+{"intent": "search all my past claude sessions for the qmd embed error", "expected": "search"}
+{"intent": "search my session notes from last month for 'quota'", "expected": "search"}
+{"intent": "grep across my old sessions for example-quota-project", "expected": "search"}
+{"intent": "do an exact-match search for SessionEnd in my memory", "expected": "search"}
+{"intent": "can you search cairn for the granola decrypt discussion", "expected": "search"}
+{"intent": "search my meeting notes for the pricing decision", "expected": "search"}
+{"intent": "search the history of my sessions for the launchd plist error", "expected": "search", "ambiguous_with": ["recall"]}
+{"intent": "search the web for the python 3.13 release notes", "expected": null, "note": "description excludes ordinary web search"}
+{"intent": "find where parse_frontmatter is defined in this repo", "expected": null, "note": "description excludes repository code search"}
+{"intent": "look up the docs for argparse subparsers", "expected": null, "note": "description excludes unrelated find/look up"}

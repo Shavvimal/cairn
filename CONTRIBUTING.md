@@ -50,6 +50,27 @@ Each source is a thin adapter over the shared renderer. Adding one is typically:
 3. A config block in `cairn.config.example.json` and a reference doc under `skills/cairn/reference/`.
 4. Tests under `tests/`.
 
+## Changing a skill description
+
+A harness picks a skill from the `description` in its `SKILL.md` frontmatter. The
+quoted phrases after "Use when the user says" are the trigger list.
+
+1. If you add, remove or reword a quoted phrase, update `skills/<name>/routing-eval.jsonl`.
+   Each line is `{"intent": ..., "expected": ..., "ambiguous_with": [...]}`. Write the
+   intent as a user would type it. Never copy a phrase of two or more words into it; a
+   single-word trigger such as "recall" may appear inside a longer request. Each phrase
+   needs one row that matches it and no other phrase of the same skill, unless it holds
+   every word of a shorter phrase of that skill.
+2. Run `uv run python -m unittest tests.test_skill_routing -v`. If you add or remove a
+   `recall` phrase on purpose, also update the count in
+   `test_quoted_phrases_after_marker_only`.
+3. If the test reports a new overlap pair, decide whether the overlap is real. If it is,
+   add the skill to the row's `ambiguous_with` and the pair to `DECLARED_OVERLAPS`. If it
+   is not, reword the trigger.
+
+The test checks the trigger text, not the harness router. A pass means the description
+still names each request; it does not prove the harness picks that skill.
+
 ## Pull request process
 
 1. Fork and create a topic branch (`git checkout -b my-change`).
