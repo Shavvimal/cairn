@@ -10,8 +10,10 @@ mapping and exit codes: `reference/claude.md`, section
 ## Privacy
 
 A memory holds whatever Claude chose to save, including private names. The import
-writes only under `data_root`, which QMD indexes. Never copy a decisions document or a
-memory row into a tracked file. To hide a row from `cairn recall decisions` and the
+writes only into the data root, beside the exported sessions, and never into the memory
+directory. QMD indexes the data root. If the data root is inside a git work tree, keep it
+git-ignored and untracked (the import does not check). Never copy a decisions document or
+a memory row into a tracked file. To hide a row from `cairn recall decisions` and the
 digest, withdraw it (step 6). Withdrawing does not erase it: the text stays in the file,
 and QMD and rg still find it.
 
