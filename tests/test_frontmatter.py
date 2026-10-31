@@ -15,6 +15,7 @@ from cairn.frontmatter import (
     parse_frontmatter,
     preserved_tail,
     rewrite_preserved_tail,
+    scan_annotations,
     title_line,
 )
 
@@ -282,3 +283,17 @@ class TestQuotedListItems(unittest.TestCase):
         again = parse_frontmatter("---\n" + "\n".join(preserved_tail(fm)) + "\n---\nx\n")
         self.assertEqual(again["tags"], ['"q"', "a b"])
         self.assertEqual(again["projects"], ['"p"'])
+
+
+class TestScanAnnotations(unittest.TestCase):
+    def test_scan_annotations_unclosed_fence_fallback(self):
+        notes = "## My Notes\n\n```md\n## Not a heading\n```\nmine\n\n"
+        table = "## Decisions\n\n| # | claim |\n```python\n| left open\n"
+        body = "## Conversation\n\n<!-- cairn:turn 9 -->\n### User\nhi\n"
+        lines = (notes + table + body).splitlines()
+        # The fence in My Notes is closed, so its heading stays inside My Notes; the
+        # fence in Decisions is not, so that section falls back to ending at the
+        # next heading instead of swallowing the conversation.
+        self.assertEqual(scan_annotations(lines), ((0, 7), (7, 12)))
+        self.assertEqual(lines[12], "## Conversation")
+        self.assertEqual(scan_annotations(lines, conversation_heading=None), ((0, 7), (7, 12)))

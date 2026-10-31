@@ -1,7 +1,7 @@
 # Google Antigravity (agy) Conversations
 
 Export Google Antigravity CLI conversations to markdown. Shared verbs (`export`, `list`,
-`context`, `note`, `close`, `log`) work as documented in `../SKILL.md`, plus `resume`
+`context`, `note`, `close`, `log`, `decide`, `supersede`) work as documented in `../SKILL.md`, plus `resume`
 (`cairn antigravity resume <id>` prints `agy --conversation <id>`). Windowed - `export`
 defaults to the last 24h; use `--since` / `--all`.
 
@@ -67,6 +67,10 @@ Then the shared metadata (`cairn_schema`, `source`, `native_id`, `source_revisio
 - **Fixtures.** `tests/fixtures/antigravity/` holds invented transcripts with expected
   messages; `tests/test_parser_fixtures.py` scores message recall exactly.
 - **Drift.** agy files any step type it does not know as a tool result, so the guard counts only rendered user and assistant turns: a transcript of unknown step types is `zero-messages`, not a list of tool turns. Child conversations never warn `no-user-turns`.
+
+Content sections: My Notes, Decisions (once `decide` adds a row), Conversation.
+Preserved on export: `## My Notes`, the `## Decisions` table after it, and the
+frontmatter tail above.
 
 ## Hook
 

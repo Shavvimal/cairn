@@ -12,18 +12,20 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import io
 import json
 import os
 import re
 import sqlite3
 import unittest
 import urllib.error
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
-from cairn import config
+from cairn import cli, config, decisions
 from cairn.frontmatter import parse_frontmatter
 from cairn.schema import SessionData
 
@@ -411,6 +413,34 @@ class TestGranolaExport(_AdapterFixture):
                     self.assertEqual(content.count("Native transcript"), 1)
                     self.assertEqual(content.count("Transcript text"), 1)
                     self.assertIn("```md\n## Conversation\n```", content)
+
+    def test_decide_by_command_and_reexport_keep_the_table(self):
+        mod = self._activate({"granola-sessions": str(self.root / "granola")})
+        source = mod.GranolaSource()
+        data: SessionData = {
+            "meeting_id": "m-0001",
+            "date": "2026-07-01",
+            "title": "Meeting",
+            "notes_markdown": "## Decisions\nnative heading",
+            "transcript_markdown": "## Decisions\nsaid aloud",
+        }
+        path = source.export_one("m-0001", data, None)
+        assert path is not None
+        args = cli.build_parser(source).parse_args(
+            ["decide", "Hire", "--kind", "commitment", "--json", "--session-id", "m-0001"]
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = args.func(args)
+        source.flush_catalog()
+        self.assertEqual((code, err.getvalue()), (0, ""))
+        self.assertEqual(json.loads(out.getvalue())["row"]["ref"], "granola:m-0001#1")
+        written = path.read_bytes()
+        rows = decisions.parse(written.decode("utf-8"), conversation_heading=None)
+        self.assertEqual([(r.number, r.claim) for r in rows], [(1, "Hire")])
+        self.assertEqual(source.export_one("m-0001", data, path), path)
+        # Everything after the front matter (which holds the export time) is unchanged.
+        self.assertEqual(path.read_bytes().split(b"\n---\n", 1)[1], written.split(b"\n---\n", 1)[1])
 
 
 class TestGranolaHelpers(unittest.TestCase):

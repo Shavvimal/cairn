@@ -460,5 +460,99 @@ class TestRoutineExclusion(DigestFixture):
         self.assertEqual(data["excluded"], [{"ref": "claude:run-0001", "owner": "routine:daily"}])
 
 
+OVERDUE_NOTES = (
+    "## My Notes\n\nmine\n\n## Decisions\n\n"
+    "| # | claim | kind | confidence | since | revisit_by | source |\n"
+    "|---|-------|------|------------|-------|------------|--------|\n"
+    "| 1 | Due on the day | commitment | high | 2026-03-01 | 2026-03-28 |  |\n"
+    "| 2 | Due the day after | commitment | high | 2026-03-01 | 2026-03-29 |  |\n"
+    "| 3 | ~~Struck~~ superseded by #4 | fact | low | 2026-03-01 | 2026-03-02 |  |\n"
+    "| 4 | Undated | fact | low | 2026-03-02 |  | supersedes #3 |"
+)
+
+
+class TestDigestOverdue(DigestFixture):
+    def test_digest_json_lists_overdue_relative_to_day_after(self):
+        messages = [msg("user", "2026-03-28T10:00:00Z", "x"), msg("assistant", None, "y")]
+        self.write_doc("due.md", document("due-0001", messages, notes=OVERDUE_NOTES))
+        code, data, _stderr, _out = self.digest()
+        self.assertEqual(code, 0)
+        self.assertLessEqual({"sessions", "skipped", "overdue"}, set(data))
+        self.assertEqual([r["ref"] for r in data["overdue"]], ["claude:due-0001#1"])
+        self.assertEqual(data["overdue"][0]["revisit_by"], "2026-03-28")
+        self.assertTrue(data["overdue"][0]["overdue"])
+        code, data, _stderr, _out = self.digest(day="2026-03-29")
+        self.assertEqual([r["number"] for r in data["overdue"]], [1, 2])
+        out = self.root / "human"
+        code, stdout, _ = self.cli("digest", DAY, "--all-projects", "--out", str(out))
+        self.assertEqual(code, 0)
+        self.assertIn("Overdue: claude:due-0001#1  revisit_by 2026-03-28  Due on the day\n", stdout)
+
+    def test_overdue_does_not_change_exit_3(self):
+        messages = [msg("user", "2026-03-20T10:00:00Z", "x"), msg("assistant", None, "y")]
+        self.write_doc("due.md", document("due-0001", messages, notes=OVERDUE_NOTES))
+        code, data, _stderr, out = self.digest()
+        self.assertEqual((code, data["sessions"]), (3, []))
+        self.assertEqual([r["number"] for r in data["overdue"]], [1])
+        self.assertEqual(sorted(p.name for p in out.iterdir()), [".cairn-digest"])
+
+    def routine_family(self) -> None:
+        """A routine run outside the day and its subagent, each with an overdue row."""
+        earlier = [msg("user", "2026-03-20T10:00:00Z", "x"), msg("assistant", None, "y")]
+        tail = ('owner: "routine:daily"',)
+        self.write_doc(
+            "run.md", document("run-0001", earlier, notes=OVERDUE_NOTES, tail_extra=tail)
+        )
+        child = document(
+            "agent-0009",
+            earlier,
+            doc_type="claude-subagent",
+            notes=OVERDUE_NOTES,
+            head_extra=("parent_session_id: run-0001",),
+        )
+        self.write_doc("child.md", child)
+        today = [msg("user", "2026-03-28T10:00:00Z", "x"), msg("assistant", None, "y")]
+        self.write_doc("due.md", document("due-0001", today, notes=OVERDUE_NOTES))
+
+    def test_routine_sessions_and_subagents_give_no_overdue_rows(self):
+        self.routine_family()
+        code, data, _stderr, _out = self.digest("--include-subagents")
+        self.assertEqual(code, 0)
+        self.assertEqual([r["ref"] for r in data["overdue"]], ["claude:due-0001#1"])
+
+    def test_include_routine_sessions_keeps_their_overdue_rows(self):
+        self.routine_family()
+        code, data, _stderr, _out = self.digest("--include-subagents", "--include-routine-sessions")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            sorted(r["ref"] for r in data["overdue"]),
+            ["claude:agent-0009#1", "claude:due-0001#1", "claude:run-0001#1"],
+        )
+
+    def test_provenance_filter_applies_to_overdue_rows(self):
+        earlier = [msg("user", "2026-03-20T10:00:00Z", "x"), msg("assistant", None, "y")]
+        child = document(
+            "agent-0007",
+            earlier,
+            doc_type="claude-subagent",
+            notes=OVERDUE_NOTES,
+            head_extra=("parent_session_id: lead-0001",),
+        )
+        self.write_doc("child.md", child)
+        today = [msg("user", "2026-03-28T10:00:00Z", "x"), msg("assistant", None, "y")]
+        self.write_doc("due.md", document("due-0001", today, notes=OVERDUE_NOTES))
+        for value, refs in (
+            ("tool", ["claude:due-0001#1"]),
+            ("agent", ["claude:agent-0007#1"]),
+            ("user", []),
+        ):
+            with self.subTest(value=value):
+                code, data, _stderr, _out = self.digest(
+                    "--include-subagents", "--provenance", value
+                )
+                self.assertEqual(code, 0 if value == "tool" else 3)
+                self.assertEqual([r["ref"] for r in data["overdue"]], refs)
+
+
 if __name__ == "__main__":
     unittest.main()

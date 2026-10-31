@@ -1,7 +1,7 @@
 # Claude Code Sessions
 
 Export Claude Code conversations to markdown, and resume them. Shared verbs
-(`export`, `list`, `context`, `note`, `close`, `log`) work as documented in
+(`export`, `list`, `context`, `note`, `close`, `log`, `decide`, `supersede`) work as documented in
 `../SKILL.md`. Claude additionally has `resume`.
 
 ## Data source
@@ -43,8 +43,9 @@ comments: |
 related: []
 ```
 
-Content sections: Summary, Skills Used, Artifacts, Subagents, My Notes, Conversation.
-Preserved on export: `## My Notes` plus frontmatter `comments`, `related`, `status`,
+Content sections: Summary, Skills Used, Artifacts, Subagents, My Notes, Decisions (once
+`decide` adds a row), Conversation.
+Preserved on export: `## My Notes`, the `## Decisions` table after it, plus frontmatter `comments`, `related`, `status`,
 `tags`, `rating`.
 
 A message that another Claude session or a subagent sent to this session

@@ -35,7 +35,7 @@ from .config import CairnConfig
 from .frontmatter import (
     _TAIL_KEYS,
     FrontmatterParseError,
-    extract_my_notes_section,
+    extract_annotations,
     head_close,
     head_open,
     notes_block,
@@ -404,7 +404,7 @@ def _read_existing(path: Path, thread_id: str) -> tuple[dict | None, str | None]
         existing_fm = parse_frontmatter(content)
     except FrontmatterParseError as exc:
         raise ValueError(f"cannot parse frontmatter in {path}: {exc}") from exc
-    return existing_fm, extract_my_notes_section(content, conversation_heading=ROUNDS_HEADING)
+    return existing_fm, extract_annotations(content, conversation_heading=ROUNDS_HEADING)
 
 
 def write_exchange(

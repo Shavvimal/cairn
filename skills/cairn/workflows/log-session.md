@@ -2,8 +2,8 @@
 
 Annotate the current session with title, tags, status, rating, comments, and an
 auto-generated summary. Works for any **conversation** source - substitute the source name
-in `cairn <source> note/close/log` (Claude shown below; the same verbs exist for codex,
-cursor, and granola). service-docs is a file mirror and has no annotation verbs.
+in `cairn <source> note/close/log/decide/supersede` (Claude shown below; the same verbs exist
+for codex, antigravity, cursor, and granola). service-docs is a file mirror and has no annotation verbs.
 
 ## Behavior
 
@@ -60,6 +60,34 @@ Agent:
 - **Rating:** number 1-10
 - **Tags:** match against `../schema/tags.yaml`
 - **Comment:** everything else, or auto-generate
+
+## Record a decision
+
+A decision, fact, commitment or hunch that the session established goes in the
+`## Decisions` table, one row per claim, not in a comment. The table sits directly after
+`## My Notes`, survives every re-export, and `cairn recall decisions` lists it.
+
+```bash
+cairn claude decide "One PR per layer, each based on the layer below" \
+  --kind decision --confidence high --source "[claude:3f2a9c1e f12]"
+cairn claude decide "Send the review notes" --kind commitment --revisit-by 2026-11-15
+cairn claude supersede 3 "Keep confidence as three words until grading lands"
+```
+
+- **Kind** (`--kind`, default `decision`): `decision` is a choice between options,
+  `fact` is something observed and checkable, `commitment` is something promised
+  (`--revisit-by` is its due date), `hunch` is a belief not yet checked.
+- **Confidence** (`--confidence`, default `medium`): `high`, `medium` or `low`.
+- **Citation** (`--source`): one or more frame citations `[<source>:<shortid> f<N>]`,
+  separated by single spaces. `N` is the 0-based frame ordinal from
+  `cairn recall digest` or `cairn recall frame`.
+- **Correction:** never edit a row's claim. Run `supersede N`: row N is struck as
+  `~~claim~~ superseded by #M` and the new row M gets `supersedes #N` in its source cell.
+  The new row keeps row N's kind unless `--kind` is given. It does not keep `revisit_by`.
+- **Export first:** the verbs write to the exported document. If the live session is not
+  exported yet, run `cairn <source> export` before you annotate it, or `decide` exits 1
+  with `Session file not found`.
+- A claim is one line of at most 500 characters and must not contain `~~`.
 
 ## Finding the current session
 

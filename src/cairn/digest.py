@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
+from . import decisions
 from . import provenance as provenance_mod
 from .digest_condense import (
     Condenser,
@@ -399,6 +400,19 @@ def write(out: Path, digests: list[Digest]) -> None:
         digest.row["path"], digest.row["frames_path"] = str(markdown), str(frames)
 
 
+def _not_routine(records: list[SessionRecord], excluded: dict[str, str]) -> list[SessionRecord]:
+    """``records`` without routine-owned sessions and their subagents: front matter
+    ``owner`` for every record, plus the refs the digest loop already ``excluded`` (which
+    also holds the owner-form preambles of the day's sessions)."""
+    owned = {r.reference for r in records if _routine_owned(provenance_mod.owner_of(r.metadata))}
+    owned.update(excluded)
+    return [
+        r
+        for r in records
+        if r.reference not in owned and not (r.is_subagent and f"{r.source}:{r.parent_id}" in owned)
+    ]
+
+
 def _routine_owned(owner: object) -> bool:
     """Whether ``owner`` names a routine (``routine:<name>``): its session is a routine's
     own output and stays out of the next digest."""
@@ -499,8 +513,26 @@ def run_digest(
                     continue
             kept.append(digest)
         digests = kept
+    # Rows due for review: revisit_by before the day after the digest day. They depend
+    # on the documents only, so the output stays deterministic. A routine's sessions and
+    # their subagents give no rows, in or out of the window, unless they are kept.
+    # ``--provenance`` keeps the same documents: a session of the day by its digest row,
+    # any other by its front matter.
+    scanned = records if keep_routine else _not_routine(records, excluded)
     if getattr(args, "provenance", None):
+        of_day = {d.record.reference: d.row["provenance"] for d in digests}
+        scanned = [
+            r
+            for r in scanned
+            if (
+                of_day[r.reference]
+                if r.reference in of_day
+                else provenance_mod.effective(r.metadata, r.source, r.path)
+            )
+            in args.provenance
+        ]
         digests = [d for d in digests if d.row["provenance"] in args.provenance]
+    overdue = decisions.overdue_rows(scanned, end.date())
     digests.sort(key=lambda d: (d.first_ts, d.record.reference))
     _stems(digests)
     write(out, digests)
@@ -509,6 +541,7 @@ def run_digest(
     cov = coverage(bool(digests), skipped) if coverage is not None else None
     if args.json:
         payload: dict = {"sessions": rows, "skipped": skipped, "excluded": excluded_rows}
+        payload["overdue"] = overdue
         if cov is not None:
             payload["coverage"] = cov
         print(json.dumps(payload, indent=2))
@@ -527,6 +560,8 @@ def run_digest(
                 "pass --include-routine-sessions to keep them"
             )
         print(f"{len(rows)} sessions written to {out}")
+        for item in overdue:
+            print(f"Overdue: {item['ref']}  revisit_by {item['revisit_by']}  {item['claim']}")
     if cov is not None and (degraded := coverage_note(cov)):
         print(degraded, file=sys.stderr)
     return 0 if digests else 3

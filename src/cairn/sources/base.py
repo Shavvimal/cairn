@@ -374,7 +374,8 @@ class ConversationSource(ABC):
             else:
                 self._unparseable_document(source_id, output_file, e)
             return None, None, False
-        my_notes = fm_mod.extract_my_notes_section(
+        # My Notes plus a ## Decisions section that follows it, preserved as one block.
+        my_notes = fm_mod.extract_annotations(
             content, conversation_heading=self.conversation_heading
         )
         return existing_fm, my_notes, True
@@ -624,6 +625,15 @@ class ConversationSource(ABC):
             print("Error: No note text provided", file=sys.stderr)
             return 2
         return 0 if mutations.add_comment(self.find_file, session_id, text) else 1
+
+    def cmd_decide(self, args: argparse.Namespace) -> int:
+        """``decide`` and ``supersede N``: write a row of the ``## Decisions`` table."""
+        from .. import decisions
+
+        session_id = self._require_session_id(getattr(args, "session_id", None))
+        if not session_id:
+            return 1
+        return decisions.cmd_decide(self, session_id, args)
 
     def cmd_close(self, args: argparse.Namespace) -> int:
         session_id = self._require_session_id(getattr(args, "session_id", None))

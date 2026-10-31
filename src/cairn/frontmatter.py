@@ -36,6 +36,10 @@ PRESERVED_FIELDS = {
     "owner",
 }
 PRESERVED_SECTION = "## My Notes"
+# The decisions table: preserved like My Notes, but only directly after it.
+DECISIONS_SECTION = "## Decisions"
+# A ``(start, end)`` range of line indexes, end exclusive.
+Span = tuple[int, int]
 
 _DOCUMENT_RE = re.compile(r"\A(---\n)(.*?)(\n---\n)(.*)\Z", re.DOTALL)
 _TAIL_KEYS = ("status:", "tags:", "rating:", "comments:", "projects:", "links:", "owner:")
@@ -201,22 +205,84 @@ def extract_my_notes_section(
     My Notes and may legitimately contain any heading, including Conversation.
     """
     lines = content.splitlines()
-    result = _scan_my_notes(lines, track_fences=True, conversation_heading=conversation_heading)
-    if result == "unclosed":
-        return _scan_my_notes(lines, track_fences=False, conversation_heading=conversation_heading)
-    return result
+    notes, _decisions = scan_annotations(lines, conversation_heading=conversation_heading)
+    return _section_text(lines, notes)
+
+
+def extract_annotations(
+    content: str, *, conversation_heading: str | None = "## Conversation"
+) -> str | None:
+    """The preserved annotation block: My Notes, then ``## Decisions`` when it follows.
+
+    Each part is right-stripped and the two are joined by one blank line, so a
+    document rendered from this value (through :func:`notes_block`) gives the same
+    value again. Without a Decisions section the result equals
+    :func:`extract_my_notes_section`.
+    """
+    lines = content.splitlines()
+    notes, decisions = scan_annotations(lines, conversation_heading=conversation_heading)
+    text = _section_text(lines, notes)
+    if text is None or decisions is None:
+        return text
+    return f"{text}\n\n{_section_text(lines, decisions)}"
+
+
+def _section_text(lines: list[str], span: Span | None) -> str | None:
+    return "\n".join(lines[span[0] : span[1]]).rstrip() if span is not None else None
+
+
+def scan_annotations(
+    lines: list[str], *, conversation_heading: str | None = "## Conversation"
+) -> tuple[Span | None, Span | None]:
+    """The ``(start, end)`` line ranges of My Notes and of the Decisions section.
+
+    ``lines`` may carry their line endings (``splitlines(keepends=True)``) or not.
+    My Notes runs from its heading to the next ``## `` line outside a fence. A
+    Decisions section counts only when its heading is the line where My Notes ends,
+    so a ``## Decisions`` line in a summary, in meeting notes or in a conversation is
+    never captured. It runs to the next ``## `` line outside a fence, or to the end.
+    Each scan falls back to a scan without fences when a fence is left open.
+    """
+    bare = [_bare_line(line) for line in lines]
+    notes = _scan_my_notes(bare, track_fences=True, conversation_heading=conversation_heading)
+    if notes == "unclosed":
+        notes = _scan_my_notes(bare, track_fences=False, conversation_heading=conversation_heading)
+    if not isinstance(notes, tuple):
+        return None, None
+    end = notes[1]
+    if end >= len(bare) or bare[end] != DECISIONS_SECTION:
+        return notes, None
+    decisions_end = _section_end(bare, end + 1, track_fences=True, anchor=conversation_heading)
+    if decisions_end is None:
+        decisions_end = _section_end(bare, end + 1, track_fences=False)
+    assert decisions_end is not None  # the scan without fences always ends
+    return notes, (end, decisions_end)
+
+
+_TURN_MARKER = "<!-- cairn:turn "
+_LINE_BREAKS = "\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def _bare_line(line: str) -> str:
+    """``line`` without the line break that ``splitlines(keepends=True)`` kept."""
+    return line.rstrip(_LINE_BREAKS)
+
+
+def _fence_token(line: str) -> str | None:
+    match = re.match(r"(`{3,}|~{3,})", line.lstrip())
+    return match[1] if match else None
 
 
 def _scan_my_notes(
     lines: list[str], *, track_fences: bool, conversation_heading: str | None
-) -> str | None:
+) -> Span | str | None:
+    """My Notes as a line range, ``None`` when absent, or ``"unclosed"`` (fence open)."""
     start = None
     fence = None
     for index, line in enumerate(lines):
         if track_fences:
-            match = re.match(r"(`{3,}|~{3,})", line.lstrip())
-            if match:
-                token = match[1]
+            token = _fence_token(line)
+            if token:
                 if fence is None:
                     fence = token
                 elif token[0] == fence[0] and len(token) >= len(fence):
@@ -230,10 +296,44 @@ def _scan_my_notes(
             if line == PRESERVED_SECTION:
                 start = index
         elif line.startswith("## "):
-            return "\n".join(lines[start:index]).rstrip()
+            return start, index
     if start is not None and fence is not None:
         return "unclosed"
-    return "\n".join(lines[start:]).rstrip() if start is not None else None
+    return (start, len(lines)) if start is not None else None
+
+
+def _section_end(
+    lines: list[str], begin: int, *, track_fences: bool, anchor: str | None = None
+) -> int | None:
+    """The index of the next ``## `` line at or after ``begin`` outside a fence, the
+    line count at the end, or ``None`` when a fence is left open to the end.
+
+    An ``anchor`` heading followed by a blank line and a turn marker (the frame anchor)
+    ends the section even inside a fence, so a fence left open in the section cannot
+    pair with the conversation's fences and pull the conversation in."""
+    fence = None
+    for index in range(begin, len(lines)):
+        line = lines[index]
+        if anchor is not None and line == anchor and _turn_follows(lines, index):
+            return index
+        if track_fences:
+            token = _fence_token(line)
+            if token:
+                if fence is None:
+                    fence = token
+                elif token[0] == fence[0] and len(token) >= len(fence):
+                    fence = None
+                continue
+            if fence is not None:
+                continue
+        if line.startswith("## "):
+            return index
+    return None if fence is not None else len(lines)
+
+
+def _turn_follows(lines: list[str], index: int) -> bool:
+    following = lines[index + 1 : index + 3]
+    return len(following) == 2 and following[0] == "" and following[1].startswith(_TURN_MARKER)
 
 
 def resolve_title(
@@ -386,9 +486,11 @@ def notes_block(my_notes: str | None, preserved_note: str = "syncs") -> list[str
 
 
 __all__ = [
+    "DECISIONS_SECTION",
     "PRESERVED_FIELDS",
     "PRESERVED_SECTION",
     "FrontmatterParseError",
+    "extract_annotations",
     "extract_my_notes_section",
     "head_close",
     "head_open",
@@ -397,5 +499,6 @@ __all__ = [
     "preserved_tail",
     "resolve_title",
     "rewrite_preserved_tail",
+    "scan_annotations",
     "title_line",
 ]

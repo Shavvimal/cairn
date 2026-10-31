@@ -72,6 +72,23 @@ def invalid_status_message(status: str) -> str:
     return f"invalid status {status!r}. Must be one of: {valid}"
 
 
+def locate(find_file: FindFile, session_id: str) -> Path | None:
+    """The session's exported file, or ``None`` with the reason on stderr.
+
+    An ambiguous id (``FileExistsError`` from ``find_file``) and a missing file are
+    both refused here, so every in-place writer reports them with the same words.
+    """
+    try:
+        session_file = find_file(session_id)
+    except FileExistsError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return None
+    if not session_file or not session_file.exists():
+        print(f"Error: Session file not found for {session_id[:8]}", file=sys.stderr)
+        return None
+    return session_file
+
+
 def _mutate_file(find_file: FindFile, session_id: str, mutate: Callable[[dict], None]) -> bool:
     """Locate the session file, apply ``mutate`` to its frontmatter, write it back.
 
@@ -79,13 +96,8 @@ def _mutate_file(find_file: FindFile, session_id: str, mutate: Callable[[dict], 
     frontmatter block, has unparseable frontmatter, or its short id is ambiguous -
     we never silently no-op.
     """
-    try:
-        session_file = find_file(session_id)
-    except FileExistsError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return False
-    if not session_file or not session_file.exists():
-        print(f"Error: Session file not found for {session_id[:8]}", file=sys.stderr)
+    session_file = locate(find_file, session_id)
+    if session_file is None:
         return False
 
     with locked(document_lock(session_file)):
@@ -235,6 +247,7 @@ __all__ = [
     "invalid_owner_message",
     "invalid_status_message",
     "is_valid_status",
+    "locate",
     "set_owner",
     "set_session_rating",
     "set_session_status",

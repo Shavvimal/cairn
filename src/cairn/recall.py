@@ -9,7 +9,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 
-from . import digest, provenance, verify
+from . import decisions, digest, provenance, verify
 from . import recall_gaps as gaps
 from .config import ConfigError, get_config
 from .registry import SOURCES
@@ -73,6 +73,11 @@ def _add_verify_parser(sub) -> None:
     command.add_argument(
         "--fix", action="store_true", help="move failing blocks under ## Unverified in FILE"
     )
+
+
+def _add_decisions_parser(sub: argparse._SubParsersAction, session_sources: list[str]) -> None:
+    """``recall decisions``: its own flags, kept apart from the shared project loop."""
+    decisions.add_recall_parser(sub, session_sources)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -153,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_verify_parser(sub)
     session_sources = [s.source for s in SOURCES if s.session_type]
+    _add_decisions_parser(sub, session_sources)
     for command in (listing, expand, digest_cmd, frame):
         projects = command.add_mutually_exclusive_group()
         projects.add_argument("--project", help="exact project/repo label or working directory")
@@ -169,6 +175,8 @@ def main(argv: list[str] | None = None) -> int:
         store = SessionStore(get_config())
         if args.command == "verify":
             return verify.run_verify(args, store)
+        if args.command == "decisions":
+            return decisions.run_recall(args, store)
         sources = args.source
         if args.command in ("list", "digest"):
             if args.command == "digest":

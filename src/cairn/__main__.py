@@ -49,9 +49,10 @@ sources (each forwards its remaining args to that source's CLI):
   cairn granola export --since 2w            export Granola meetings + transcripts
   cairn service-docs export [--clean]        mirror service docs into one collection
 
-shared per-source commands: export, list, context, note, close, log
+shared per-source commands: export, list, context, note, close, log, decide, supersede
   cairn claude list --json
   cairn codex note "got it working"
+  cairn codex decide "Use one PR per layer" --kind decision --revisit-by 2026-12-01
   cairn cursor log --status done --tags "x,y" --rating 8
 
 recall (temporal view over shared exported sessions; topic search is qmd's job):
@@ -62,6 +63,7 @@ recall (temporal view over shared exported sessions; topic search is qmd's job):
   cairn recall frame <source:session-id> N [--frames FILE]   print frame N, check its hash
   cairn recall gaps --json                   what recall cannot see right now
   cairn recall verify FILE --digest DIR [--fix]   check a journal's [SOURCE:ID fN] citations and quotes
+  cairn recall decisions [DATE] [--overdue] [--json]   ## Decisions rows across sessions
 
 peer agents (one foreground round per call; run it in the background):
   cairn invoke codex --prompt TEXT [--effort E] [--profile review|edit|full] [--json]
