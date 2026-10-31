@@ -28,6 +28,8 @@ jobs:
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
       - run: uv run mypy
+      # The exact and title-bare recall qrels run the skills' rg pass; without rg they skip.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
       - run: uv run python -m unittest discover -s tests
       # Tests must keep catalogs and lock files in their temp homes. Leaks come from
       # subprocesses the tests spawn, so check the runner's real home afterwards.

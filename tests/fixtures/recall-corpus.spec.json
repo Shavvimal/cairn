@@ -1,0 +1,590 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {
+      "key": "C01",
+      "source": "claude",
+      "id": "c1000001-0000-4000-8000-000000000001",
+      "project": "harbour",
+      "repo": "api",
+      "title": "Fix ECONNRESET in webhook retry loop",
+      "branch": "fix/webhook-retry",
+      "files_modified": ["src/harbour/webhooks/retry.py"],
+      "turns": [
+        ["user", "2026-03-02T09:10:00Z", "The webhook worker keeps dying with ECONNRESET when the partner endpoint drops the socket."],
+        ["assistant", "2026-03-02T09:14:00Z", "The retry loop in retry_with_backoff catches TimeoutError only, so ECONNRESET escapes and kills the worker."],
+        ["user", "2026-03-02T09:18:00Z", "Catch the connection reset as well and keep the backoff."],
+        ["assistant", "2026-03-02T09:22:00Z", "Done: retry_with_backoff now retries on ECONNRESET with the same jittered backoff."],
+        ["user", "2026-03-02T09:26:00Z", "Add a test that simulates the reset."],
+        ["assistant", "2026-03-02T09:30:00Z", "Added test_retry_on_connection_reset; it raises ECONNRESET twice, then succeeds."],
+        ["user", "2026-03-02T09:34:00Z", "Run the suite."],
+        ["assistant", "2026-03-02T09:38:00Z", "All 212 tests pass."]
+      ]
+    },
+    {
+      "key": "C02",
+      "source": "claude",
+      "id": "c1000002-0000-4000-8000-000000000002",
+      "project": "harbour",
+      "repo": "api",
+      "title": "Add idempotency keys to payment intents",
+      "branch": "feat/idempotency",
+      "turns": [
+        ["user", "2026-03-03T14:00:00Z", "Payment intents get created twice when the client retries a timed-out request."],
+        ["assistant", "2026-03-03T14:05:00Z", "Add an Idempotency-Key header and store the key with the intent."],
+        ["user", "2026-03-03T14:10:00Z", "What happens when the same key arrives with a different body?"],
+        ["assistant", "2026-03-03T14:15:00Z", "We raise IdempotencyKeyConflict and return 409."],
+        ["user", "2026-03-03T14:20:00Z", "Good. Make the key column unique."],
+        ["assistant", "2026-03-03T14:25:00Z", "The model now has a unique idempotency_key column."],
+        ["user", "2026-03-03T14:30:00Z", "Write the handler test."],
+        ["assistant", "2026-03-03T14:35:00Z", "The test posts twice with one key and checks a single intent exists."],
+        ["user", "2026-03-03T14:40:00Z", "And the conflict case?"],
+        ["assistant", "2026-03-03T14:45:00Z", "A second test sends a different amount with the same key and expects IdempotencyKeyConflict."]
+      ]
+    },
+    {
+      "key": "C03",
+      "source": "claude",
+      "id": "c1000003-0000-4000-8000-000000000003",
+      "project": "harbour",
+      "repo": "web",
+      "title": "Migrate checkout form to server actions",
+      "branch": "feat/server-actions",
+      "turns": [
+        ["user", "2026-03-04T10:00:00Z", "Move the checkout form submit to a server action."],
+        ["assistant", "2026-03-04T10:08:00Z", "The form now posts through submitCheckout on the server."],
+        ["user", "2026-03-04T10:16:00Z", "The page logs: Hydration failed because the server rendered HTML didn't match the client."],
+        ["assistant", "2026-03-04T10:24:00Z", "The total renders a locale-formatted price on the server and a raw number on the client; format both the same way."],
+        ["user", "2026-03-04T10:32:00Z", "That fixed it. Remove the old API route."],
+        ["assistant", "2026-03-04T10:40:00Z", "Removed the route and its test."]
+      ]
+    },
+    {
+      "key": "C04",
+      "source": "claude",
+      "id": "c1000004-0000-4000-8000-000000000004",
+      "project": "harbour",
+      "repo": "api",
+      "title": "Investigate slow invoice PDF export",
+      "branch": "fix/invoice-pdf",
+      "files_modified": ["src/harbour/billing/invoice_pdf.py"],
+      "turns": [
+        ["user", "2026-03-05T09:00:00Z", "Invoice PDF export takes 40 seconds for large customers."],
+        ["assistant", "2026-03-05T09:05:00Z", "The time goes into render_invoice_pdf in src/harbour/billing/invoice_pdf.py; it loads every line item font per row."],
+        ["user", "2026-03-05T09:10:00Z", "Cache the font once per document."],
+        ["assistant", "2026-03-05T09:15:00Z", "Cached; a 900-line invoice now renders in 3.1 seconds."],
+        ["user", "2026-03-05T09:20:00Z", "Profile the remaining time."],
+        ["assistant", "2026-03-05T09:25:00Z", "Most of it is the table layout pass."],
+        ["user", "2026-03-09T16:12:00Z", "Pick this up again: the export timed out in production overnight."],
+        ["assistant", "2026-03-09T16:17:00Z", "The worker timeout is 30 seconds and one invoice had 4,000 lines."],
+        ["user", "2026-03-09T16:22:00Z", "Stream the table pages instead of building them all first."],
+        ["assistant", "2026-03-09T16:27:00Z", "render_invoice_pdf now streams pages; memory stays flat."],
+        ["user", "2026-03-09T16:32:00Z", "Raise the timeout to 60 seconds as a backstop."],
+        ["assistant", "2026-03-09T16:37:00Z", "Raised the timeout in the worker config."]
+      ]
+    },
+    {
+      "key": "C05",
+      "source": "claude",
+      "id": "c1000005-0000-4000-8000-000000000005",
+      "project": "lantern",
+      "title": "Rewrite frontmatter parser for block lists",
+      "turns": [
+        ["user", "2026-03-06T16:20:00Z", "The parser fails on a tags block with an empty item."],
+        ["assistant", "2026-03-06T16:25:00Z", "It raises FrontmatterParseError: unterminated block list when the list ends the head."],
+        ["user", "2026-03-06T16:30:00Z", "Rewrite parse_block_list so a list can end at the closing fence."],
+        ["assistant", "2026-03-06T16:35:00Z", "Rewritten; the new loop stops at the fence or at the first unindented key."],
+        ["user", "2026-03-06T16:40:00Z", "Find every caller before we change the signature."],
+        ["assistant", "2026-03-06T16:45:00Z", "Spawning a subagent to list the callers."],
+        ["user", "2026-03-06T16:55:00Z", "Then update them."],
+        ["assistant", "2026-03-06T17:00:00Z", "Updated the three callers."]
+      ]
+    },
+    {
+      "key": "C06",
+      "source": "claude",
+      "id": "agent-c1000006a",
+      "project": "lantern",
+      "title": "Find every caller of parse_block_list",
+      "kind": "subagent",
+      "parent": "C05",
+      "agent_id": "c1000006a",
+      "agent_type": "Explore",
+      "turns": [
+        ["user", "2026-03-06T17:05:00Z", "Find every caller of parse_block_list in the lantern repo and list file and line."],
+        ["assistant", "2026-03-06T17:12:00Z", "parse_block_list is called from lantern/head.py:88, lantern/tags.py:14 and lantern/links.py:40."]
+      ]
+    },
+    {
+      "key": "C07",
+      "source": "claude",
+      "id": "c1000007-0000-4000-8000-000000000007",
+      "project": "quarry",
+      "title": "Tune BM25 weights for the docs index",
+      "turns": [
+        ["user", "2026-03-08T11:00:00Z", "Search ranks long changelog pages above the guides."],
+        ["assistant", "2026-03-08T11:09:00Z", "Lower bm25_k1 from 1.2 to 0.9 and raise b to 0.8 to damp long documents."],
+        ["user", "2026-03-08T11:18:00Z", "Try it on the evaluation set."],
+        ["assistant", "2026-03-08T11:27:00Z", "The guides now rank first on 14 of 16 queries."],
+        ["user", "2026-03-08T11:36:00Z", "Keep it and note the values."],
+        ["assistant", "2026-03-08T11:45:00Z", "Recorded bm25_k1=0.9 and b=0.8 in the index config."]
+      ]
+    },
+    {
+      "key": "C08",
+      "source": "claude",
+      "id": "c1000008-0000-4000-8000-000000000008",
+      "project": "harbour",
+      "repo": "api",
+      "title": "Rotate the staging database credentials",
+      "branch": "ops/rotate-staging",
+      "turns": [
+        ["user", "2026-03-10T23:50:00Z", "The staging database password expires tonight. Rotate it."],
+        ["assistant", "2026-03-10T23:57:00Z", "Run rotate_credentials.sh with the staging profile; it writes the new secret to the vault."],
+        ["user", "2026-03-11T00:04:00Z", "Run it now."],
+        ["assistant", "2026-03-11T00:11:00Z", "Rotated; the new secret version is 7."],
+        ["user", "2026-03-11T00:18:00Z", "Restart the API pods."],
+        ["assistant", "2026-03-11T00:25:00Z", "Restarted; health checks are green."]
+      ]
+    },
+    {
+      "key": "C09",
+      "source": "claude",
+      "id": "c1000009-0000-4000-8000-000000000009",
+      "project": "fieldnotes",
+      "title": "Short question about rg flags",
+      "turns": [
+        ["user", "2026-03-11T08:00:00Z", "What does --sortr modified do in rg?"],
+        ["assistant", "2026-03-11T08:03:00Z", "It sorts the results by file modification time, newest first."],
+        ["user", "2026-03-11T08:06:00Z", "Is it slower?"],
+        ["assistant", "2026-03-11T08:09:00Z", "Yes: sorting disables parallel search."]
+      ]
+    },
+    {
+      "key": "C10",
+      "source": "claude",
+      "id": "c1000010-0000-4000-8000-000000000010",
+      "project": "harbour",
+      "repo": "web",
+      "title": "Follow-up: webhook retries after the ECONNRESET fix",
+      "branch": "fix/delivery-counter",
+      "turns": [
+        ["user", "2026-03-12T15:00:00Z", "After the session \"Fix ECONNRESET in webhook retry loop\" the web dashboard still shows failed deliveries."],
+        ["assistant", "2026-03-12T15:08:00Z", "The dashboard counts every attempt; it should count a delivery as failed only after the last retry."],
+        ["user", "2026-03-12T15:16:00Z", "Change the counter."],
+        ["assistant", "2026-03-12T15:24:00Z", "The counter now groups attempts by delivery id."],
+        ["user", "2026-03-12T15:32:00Z", "Check the ECONNRESET rows in the last day."],
+        ["assistant", "2026-03-12T15:40:00Z", "Twelve deliveries hit ECONNRESET and all succeeded on a later attempt."]
+      ]
+    },
+    {
+      "key": "C11",
+      "source": "claude",
+      "id": "c1000011-0000-4000-8000-000000000011",
+      "project": "lantern",
+      "title": "Release checklist for 2.4.0",
+      "turns": [
+        ["user", "2026-03-13T09:30:00Z", "Walk me through the release for 2.4.0."],
+        ["assistant", "2026-03-13T09:36:00Z", "Run make check, update the changelog, tag, then publish."],
+        ["user", "2026-03-13T09:42:00Z", "make check is green."],
+        ["assistant", "2026-03-13T09:48:00Z", "Next, the changelog entry for the block-list fix."],
+        ["user", "2026-03-13T09:54:00Z", "Changelog written."],
+        ["assistant", "2026-03-13T10:00:00Z", "Tag v2.4.0 and push the tag."],
+        ["user", "2026-03-13T10:06:00Z", "Tagged. Publish?"],
+        ["assistant", "2026-03-13T10:12:00Z", "Published; the package page shows 2.4.0."]
+      ]
+    },
+    {
+      "key": "C12",
+      "source": "claude",
+      "id": "c1000012-0000-4000-8000-000000000012",
+      "project": "quarry",
+      "title": "Legacy: seed the quarry fixtures",
+      "kind": "pre-schema",
+      "last_activity": "2026-03-08T17:00:00Z",
+      "turns": [
+        ["user", "2026-03-04T13:00:00Z", "Write seed_fixtures.py to load the sample documents."],
+        ["assistant", "2026-03-04T13:10:00Z", "seed_fixtures.py loads 40 sample documents into the test index."],
+        ["user", "2026-03-08T16:50:00Z", "Add the long-document case."],
+        ["assistant", "2026-03-08T17:00:00Z", "Added a 2 MB document to the seed set."]
+      ]
+    },
+    {
+      "key": "C13",
+      "source": "claude",
+      "id": "c1000013-0000-4000-8000-000000000013",
+      "project": "harbour",
+      "repo": "api",
+      "title": "Plan the ledger reconciliation job",
+      "branch": "feat/ledger-reconcile",
+      "turns": [
+        ["user", "2026-03-15T18:00:00Z", "We need a nightly job that reconciles the ledger against the payment provider."],
+        ["assistant", "2026-03-15T18:03:00Z", "A reconcile_ledger task can page through provider payouts and compare totals per day."],
+        ["user", "2026-03-15T18:06:00Z", "What do we do on a mismatch?"],
+        ["assistant", "2026-03-15T18:09:00Z", "Raise LedgerMismatch with the day, the two totals and the payout ids."],
+        ["user", "2026-03-15T18:12:00Z", "Should the job stop on the first mismatch?"],
+        ["assistant", "2026-03-15T18:15:00Z", "No: collect every LedgerMismatch and report them together."],
+        ["user", "2026-03-15T18:18:00Z", "Where does the report go?"],
+        ["assistant", "2026-03-15T18:21:00Z", "To the finance channel and a CSV in the reports bucket."],
+        ["user", "2026-03-15T18:24:00Z", "Ask the reviewer for a second opinion on the plan."],
+        ["assistant", "2026-03-15T18:27:00Z", "Sent the plan to a codex review."]
+      ]
+    },
+    {
+      "key": "X01",
+      "source": "exchange",
+      "id": "0195b0ee-7c00-7000-8000-e00000000001",
+      "project": "harbour",
+      "repo": "api",
+      "title": "codex review of the reconciliation plan",
+      "kind": "exchange",
+      "anchor": "C13",
+      "prompt": "Review the reconciliation plan: reconcile_ledger pages provider payouts and raises LedgerMismatch per day.",
+      "answer": "The plan holds. Store each LedgerMismatch row before you report it, so a crash after the report does not lose the evidence.",
+      "started_at": "2026-03-15T18:40:00+00:00",
+      "finished_at": "2026-03-15T18:45:00+00:00",
+      "turns": []
+    },
+    {
+      "key": "K01",
+      "source": "codex",
+      "id": "0195a001-7c00-7000-8000-b00000000001",
+      "project": "harbour",
+      "repo": "api",
+      "title": "Review the webhook retry patch",
+      "branch": "fix/webhook-retry",
+      "model": "gpt-5-codex",
+      "turns": [
+        ["user", "2026-03-02T11:30:00Z", "Review the retry patch in src/harbour/webhooks/retry.py."],
+        ["assistant", "2026-03-02T11:36:00Z", "retry_with_backoff now catches the reset; the worker log shows: socket hang up (econnreset) after 3 attempts."],
+        ["user", "2026-03-02T11:42:00Z", "Is the jitter bounded?"],
+        ["assistant", "2026-03-02T11:48:00Z", "Yes, it is capped at 30 seconds."],
+        ["user", "2026-03-02T11:54:00Z", "Any missing test?"],
+        ["assistant", "2026-03-02T12:00:00Z", "One: a reset on the final attempt should surface the error."]
+      ]
+    },
+    {
+      "key": "K02",
+      "source": "codex",
+      "id": "0195a002-7c00-7000-8000-b00000000002",
+      "project": "lantern",
+      "title": "Port the frontmatter tests to unittest",
+      "branch": "chore/unittest",
+      "model": "gpt-5-codex",
+      "turns": [
+        ["user", "2026-03-03T09:00:00Z", "Port test_frontmatter.py from pytest to unittest."],
+        ["assistant", "2026-03-03T09:06:00Z", "Ported; the fixtures became setUp methods."],
+        ["user", "2026-03-03T09:12:00Z", "Keep the parametrised cases."],
+        ["assistant", "2026-03-03T09:18:00Z", "They are subTest loops now."],
+        ["user", "2026-03-03T09:24:00Z", "Run it."],
+        ["assistant", "2026-03-03T09:30:00Z", "38 tests pass."]
+      ]
+    },
+    {
+      "key": "K03",
+      "source": "codex",
+      "id": "0195a003-7c00-7000-8000-b00000000003",
+      "project": "quarry",
+      "title": "Profile the tokenizer on large transcripts",
+      "branch": "perf/tokenizer",
+      "model": "gpt-5-codex",
+      "turns": [
+        ["user", "2026-03-05T13:00:00Z", "Indexing a 200 MB transcript dies with MemoryError."],
+        ["assistant", "2026-03-05T13:06:00Z", "tokenize_markdown builds the whole token list in memory."],
+        ["user", "2026-03-05T13:12:00Z", "Make it a generator."],
+        ["assistant", "2026-03-05T13:18:00Z", "tokenize_markdown now yields tokens; peak memory fell from 6 GB to 180 MB."],
+        ["user", "2026-03-05T13:24:00Z", "Profile the time too."],
+        ["assistant", "2026-03-05T13:30:00Z", "The regex for fenced blocks is 60 percent of the time."],
+        ["user", "2026-03-05T13:36:00Z", "Precompile it."],
+        ["assistant", "2026-03-05T13:42:00Z", "Precompiled; indexing is 2.3 times faster."]
+      ]
+    },
+    {
+      "key": "K04",
+      "source": "codex",
+      "id": "0195a004-7c00-7000-8000-b00000000004",
+      "project": "harbour",
+      "repo": "api",
+      "title": "Write the idempotency key migration",
+      "branch": "feat/idempotency",
+      "model": "gpt-5-codex",
+      "turns": [
+        ["user", "2026-03-07T10:00:00Z", "Write the migration for the idempotency key column."],
+        ["assistant", "2026-03-07T10:10:00Z", "Added 0042_idempotency_keys.sql with a unique index on idempotency_key."],
+        ["user", "2026-03-07T10:20:00Z", "What about existing duplicates?"],
+        ["assistant", "2026-03-07T10:30:00Z", "The migration fails with IdempotencyKeyConflict if duplicates exist; a subagent checks a copy of staging first."],
+        ["user", "2026-03-07T10:40:00Z", "Ship it when the check passes."],
+        ["assistant", "2026-03-07T10:50:00Z", "The check passed; the migration is ready."]
+      ]
+    },
+    {
+      "key": "K05",
+      "source": "codex",
+      "id": "0195a005-7c00-7000-8000-b00000000005",
+      "project": "harbour",
+      "repo": "api",
+      "title": "Check the migration on a copy of staging",
+      "kind": "subagent",
+      "parent": "K04",
+      "agent_type": "worker",
+      "model": "gpt-5-codex",
+      "turns": [
+        ["user", "2026-03-07T10:20:00Z", "Run 0042 on a copy of staging and report any IdempotencyKeyConflict."],
+        ["assistant", "2026-03-07T10:55:00Z", "No IdempotencyKeyConflict on the copy; the unique index built in 4 seconds."]
+      ]
+    },
+    {
+      "key": "K06",
+      "source": "codex",
+      "id": "0195a006-7c00-7000-8000-b00000000006",
+      "project": "fieldnotes",
+      "title": "Draft the weekly notes template",
+      "model": "gpt-5-codex",
+      "turns": [
+        ["user", "2026-03-09T12:00:00Z", "Draft a weekly notes template."],
+        ["assistant", "2026-03-09T12:04:00Z", "Sections: done, doing, blocked, next."],
+        ["user", "2026-03-09T12:08:00Z", "Add a links section."],
+        ["assistant", "2026-03-09T12:12:00Z", "Added."],
+        ["user", "2026-03-09T12:16:00Z", "Save it as weekly.md."],
+        ["assistant", "2026-03-09T12:20:00Z", "Saved."]
+      ]
+    },
+    {
+      "key": "K07",
+      "source": "codex",
+      "id": "0195a007-7c00-7000-8000-b00000000007",
+      "project": "lantern",
+      "title": "Fix the Windows path bug in catalog keys",
+      "branch": "fix/windows-keys",
+      "model": "gpt-5-codex",
+      "turns": [
+        ["user", "2026-03-11T14:00:00Z", "On Windows the catalog fails with OSError: [WinError 123] The filename, directory name, or volume label syntax is incorrect."],
+        ["assistant", "2026-03-11T14:05:00Z", "The catalog key joins a drive letter into a POSIX path."],
+        ["user", "2026-03-11T14:10:00Z", "Build the key with PureWindowsPath on Windows."],
+        ["assistant", "2026-03-11T14:15:00Z", "Done; keys use PureWindowsPath.as_posix() for the relative part."],
+        ["user", "2026-03-11T14:20:00Z", "Add a test that runs on every platform."],
+        ["assistant", "2026-03-11T14:25:00Z", "The test builds a PureWindowsPath key directly."],
+        ["user", "2026-03-11T14:30:00Z", "Run the suite."],
+        ["assistant", "2026-03-11T14:35:00Z", "All tests pass."]
+      ]
+    },
+    {
+      "key": "K08",
+      "source": "codex",
+      "id": "0195a008-7c00-7000-8000-b00000000008",
+      "project": "quarry",
+      "title": "Benchmark BM25 against exact match",
+      "branch": "bench/exact",
+      "model": "gpt-5-codex",
+      "turns": [
+        ["user", "2026-03-12T10:00:00Z", "Compare BM25 with bm25_k1=0.9 against rg exact match on the evaluation set."],
+        ["assistant", "2026-03-12T10:08:00Z", "BM25 wins on prose queries; exact match wins on identifiers."],
+        ["user", "2026-03-12T10:16:00Z", "How was rg run?"],
+        ["assistant", "2026-03-12T10:24:00Z", "rg -l -i -F --sortr modified over the docs folder, newest first."],
+        ["user", "2026-03-12T10:32:00Z", "Write the table."],
+        ["assistant", "2026-03-12T10:40:00Z", "Table written to bench.md."]
+      ]
+    },
+    {
+      "key": "K09",
+      "source": "codex",
+      "id": "0195a009-7c00-7000-8000-b00000000009",
+      "project": "harbour",
+      "repo": "web",
+      "title": "Audit retry(attempt=3) call sites",
+      "branch": "fix/double-retry",
+      "model": "gpt-5-codex",
+      "turns": [
+        ["user", "2026-03-14T11:00:00Z", "Find every retry(attempt=3) call in the web app."],
+        ["assistant", "2026-03-14T11:06:00Z", "Seven call sites use retry(attempt=3); two are inside loops that also retry."],
+        ["user", "2026-03-14T11:12:00Z", "Remove the inner retries."],
+        ["assistant", "2026-03-14T11:18:00Z", "Removed; each request now retries once at one level."],
+        ["user", "2026-03-14T11:24:00Z", "Commit."],
+        ["assistant", "2026-03-14T11:30:00Z", "Committed."]
+      ]
+    },
+    {
+      "key": "K10",
+      "source": "codex",
+      "id": "0195a010-7c00-7000-8000-b00000000010",
+      "project": "lantern",
+      "title": "Bump version to 2.4.1",
+      "branch": "release/2.4.1",
+      "model": "gpt-5-codex",
+      "turns": [
+        ["user", "2026-03-15T20:00:00Z", "Bump __version__ to 2.4.1."],
+        ["assistant", "2026-03-15T20:04:00Z", "Bumped in lantern/__init__.py."],
+        ["user", "2026-03-15T20:08:00Z", "Add the changelog line."],
+        ["assistant", "2026-03-15T20:12:00Z", "Added under 2.4.1."],
+        ["user", "2026-03-15T20:16:00Z", "Tag it."],
+        ["assistant", "2026-03-15T20:20:00Z", "Tagged v2.4.1."]
+      ]
+    },
+    {
+      "key": "U01",
+      "source": "cursor",
+      "id": "u1000001-0000-4000-8000-000000000001",
+      "project": "harbour",
+      "repo": "web",
+      "title": "Style the checkout summary card",
+      "branch": "feat/checkout-card",
+      "mode": "agent",
+      "model": "claude-sonnet",
+      "turns": [
+        ["user", "2026-03-02T15:00:00Z", "Make the summary card in CheckoutSummary.tsx match the design."],
+        ["assistant", "2026-03-02T15:06:00Z", "Updated spacing and the total row in CheckoutSummary.tsx."],
+        ["user", "2026-03-02T15:12:00Z", "Use the brand colour for the total."],
+        ["assistant", "2026-03-02T15:18:00Z", "Done."],
+        ["user", "2026-03-02T15:24:00Z", "Check the dark theme."],
+        ["assistant", "2026-03-02T15:30:00Z", "The dark theme uses the muted brand colour."]
+      ]
+    },
+    {
+      "key": "U02",
+      "source": "cursor",
+      "id": "u1000002-0000-4000-8000-000000000002",
+      "project": "harbour",
+      "repo": "web",
+      "title": "Debug the hydration mismatch on checkout",
+      "branch": "fix/hydration",
+      "mode": "agent",
+      "model": "claude-sonnet",
+      "turns": [
+        ["user", "2026-03-04T16:30:00Z", "Checkout logs \"Hydration failed because the server rendered HTML didn't match the client\" again."],
+        ["assistant", "2026-03-04T16:35:00Z", "The delivery date uses the local time zone on the client only."],
+        ["user", "2026-03-04T16:40:00Z", "Render the date on the server in UTC."],
+        ["assistant", "2026-03-04T16:45:00Z", "Done; the client formats the same UTC value."],
+        ["user", "2026-03-04T16:50:00Z", "Any other mismatch?"],
+        ["assistant", "2026-03-04T16:55:00Z", "None in the checkout tree."],
+        ["user", "2026-03-04T17:00:00Z", "Add a regression test."],
+        ["assistant", "2026-03-04T17:05:00Z", "Added a test that renders on both sides and compares the HTML."]
+      ]
+    },
+    {
+      "key": "U03",
+      "source": "cursor",
+      "id": "u1000003-0000-4000-8000-000000000003",
+      "project": "fieldnotes",
+      "title": "Outline the onboarding guide",
+      "mode": "agent",
+      "model": "claude-sonnet",
+      "turns": [
+        ["user", "2026-03-05T18:00:00Z", "Outline an onboarding guide for new contributors."],
+        ["assistant", "2026-03-05T18:04:00Z", "Setup, first change, review, release."],
+        ["user", "2026-03-05T18:08:00Z", "Add a glossary."],
+        ["assistant", "2026-03-05T18:12:00Z", "Added."],
+        ["user", "2026-03-05T18:16:00Z", "Keep it under two pages."],
+        ["assistant", "2026-03-05T18:20:00Z", "It is one and a half pages."]
+      ]
+    },
+    {
+      "key": "U04",
+      "source": "cursor",
+      "id": "u1000004-0000-4000-8000-000000000004",
+      "project": "quarry",
+      "title": "Add a docs index status page",
+      "mode": "agent",
+      "model": "claude-sonnet",
+      "turns": [
+        ["user", "2026-03-06T09:00:00Z", "Add a status page that shows how many docs are indexed."],
+        ["assistant", "2026-03-06T09:06:00Z", "Added /status with the document and vector counts."],
+        ["user", "2026-03-06T09:12:00Z", "Show the last index time too."],
+        ["assistant", "2026-03-06T09:18:00Z", "Done."],
+        ["user", "2026-03-06T09:24:00Z", "Cache it for a minute."],
+        ["assistant", "2026-03-06T09:30:00Z", "Cached for 60 seconds."]
+      ]
+    },
+    {
+      "key": "U05",
+      "source": "cursor",
+      "id": "u1000005-0000-4000-8000-000000000005",
+      "project": "harbour",
+      "repo": "web",
+      "title": "Add ECONNRESET toast to the retry UI",
+      "branch": "feat/retry-toast",
+      "mode": "agent",
+      "model": "claude-sonnet",
+      "turns": [
+        ["user", "2026-03-09T10:00:00Z", "Show a toast when a delivery fails with ECONNRESET."],
+        ["assistant", "2026-03-09T10:06:00Z", "The toast says the partner dropped the connection and that a retry is queued."],
+        ["user", "2026-03-09T10:12:00Z", "Hide it after the retry succeeds."],
+        ["assistant", "2026-03-09T10:18:00Z", "Done."],
+        ["user", "2026-03-09T10:24:00Z", "Test it."],
+        ["assistant", "2026-03-09T10:30:00Z", "The component test covers both states."]
+      ]
+    },
+    {
+      "key": "U06",
+      "source": "cursor",
+      "id": "u1000006-0000-4000-8000-000000000006",
+      "project": "lantern",
+      "title": "Rename parse_block_list to parse_yaml_list",
+      "branch": "refactor/yaml-list",
+      "mode": "agent",
+      "model": "claude-sonnet",
+      "turns": [
+        ["user", "2026-03-10T13:00:00Z", "Rename parse_block_list to parse_yaml_list everywhere."],
+        ["assistant", "2026-03-10T13:06:00Z", "Renamed in the module and the three callers."],
+        ["user", "2026-03-10T13:12:00Z", "Keep an alias for one release."],
+        ["assistant", "2026-03-10T13:18:00Z", "parse_block_list is now a deprecated alias."],
+        ["user", "2026-03-10T13:24:00Z", "Run the tests."],
+        ["assistant", "2026-03-10T13:30:00Z", "All pass."]
+      ]
+    },
+    {
+      "key": "U07",
+      "source": "cursor",
+      "id": "u1000007-0000-4000-8000-000000000007",
+      "project": "quarry",
+      "title": "Fix flaky tokenizer test",
+      "branch": "fix/flaky-tokenizer",
+      "mode": "agent",
+      "model": "claude-sonnet",
+      "turns": [
+        ["user", "2026-03-12T17:00:00Z", "test_large_input fails one run in five with MemoryError."],
+        ["assistant", "2026-03-12T17:06:00Z", "The test calls tokenize_markdown on a 500 MB string built in memory."],
+        ["user", "2026-03-12T17:12:00Z", "Make the input smaller but keep the shape."],
+        ["assistant", "2026-03-12T17:18:00Z", "The test now streams a 5 MB input through tokenize_markdown."],
+        ["user", "2026-03-12T17:24:00Z", "Run it twenty times."],
+        ["assistant", "2026-03-12T17:30:00Z", "Twenty passes."]
+      ]
+    },
+    {
+      "key": "U08",
+      "source": "cursor",
+      "id": "u1000008-0000-4000-8000-000000000008",
+      "project": "harbour",
+      "repo": "web",
+      "title": "Ledger reconciliation UI",
+      "branch": "feat/ledger-ui",
+      "mode": "agent",
+      "model": "claude-sonnet",
+      "turns": [
+        ["user", "2026-03-15T21:00:00Z", "Build the screen for the job from \"Plan the ledger reconciliation job\"."],
+        ["assistant", "2026-03-15T21:06:00Z", "A table of days with the two totals and a status column."],
+        ["user", "2026-03-15T21:12:00Z", "Link each day to its payouts."],
+        ["assistant", "2026-03-15T21:18:00Z", "Done."],
+        ["user", "2026-03-15T21:24:00Z", "Add a filter for mismatched days."],
+        ["assistant", "2026-03-15T21:30:00Z", "Added."]
+      ]
+    },
+    {
+      "key": "U09",
+      "source": "cursor",
+      "id": "u1000009-0000-4000-8000-000000000009",
+      "project": "harbour",
+      "repo": "api",
+      "title": "Explain the \"invoice PDF\" timeout",
+      "mode": "agent",
+      "model": "claude-sonnet",
+      "turns": [
+        ["user", "2026-03-14T09:00:00Z", "Why did the invoice job time out last week?"],
+        ["assistant", "2026-03-14T09:06:00Z", "render_invoice_pdf built every page before writing; a 4,000-line invoice ran past the worker timeout."],
+        ["user", "2026-03-14T09:12:00Z", "Is it fixed?"],
+        ["assistant", "2026-03-14T09:18:00Z", "Yes, pages stream now."],
+        ["user", "2026-03-14T09:24:00Z", "Write a short note for support."],
+        ["assistant", "2026-03-14T09:30:00Z", "Note written."]
+      ]
+    }
+  ]
+}

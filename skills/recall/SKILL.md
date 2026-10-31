@@ -174,8 +174,10 @@ the counts and every failure with its reason.
    Then list matching files, newest first, capped:
 
    ```bash
-   rg -l -i -F "TERM" --type md --sortr modified "PATH1" "PATH2" ... | head -n 10
+   rg -l -i -F -e "TERM" --type md --sortr modified "PATH1" "PATH2" ... | head -n 10
    ```
+
+   `-e` keeps a query that starts with `-` from being read as a flag.
 
    Never print matched lines from a whole collection. If you need lines, run rg again on
    the chosen files only, with `-M 300 -m 5` (a session transcript can hold a single line

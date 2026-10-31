@@ -167,6 +167,8 @@ Public-directory submission is deferred; this release is distributed through Git
 
 Clone the repo and `uv pip install -e .`. The editable install finds `cairn.config.json` at the repo root via the dev fallback, so live edits are picked up — no global install.
 
+Retrieval quality has its own test: `tests/test_recall_qrels.py` runs fixed queries over an invented exported store and gates recall@5 and top-1 per query family. See [the recall qrels spec](docs/recall-qrels-spec.md), including how to add a query when a retrieval bug is fixed.
+
 ## Usage
 
 ### `/recall` — load context from previous sessions
