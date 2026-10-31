@@ -38,6 +38,9 @@ _LINK_REF: Final[re.Pattern[str]] = re.compile(rf"^({'|'.join(_LINK_SOURCES)}):\
 
 # An owner label (``cairn invoke --owner``): safe to emit unquoted in front matter.
 OWNER_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+# ``cairn routine run`` invokes its peer with ``--owner routine:<name>``; the digest
+# leaves sessions with this owner prefix out of the next day's input.
+ROUTINE_OWNER_PREFIX: Final[str] = "routine:"
 
 
 def valid_owner(owner: str) -> bool:
@@ -225,6 +228,7 @@ def set_owner(find_file: FindFile, session_id: str, owner: str) -> bool:
 __all__ = [
     "LINK_ROLES",
     "OWNER_RE",
+    "ROUTINE_OWNER_PREFIX",
     "VALID_STATUSES",
     "add_comment",
     "add_link",

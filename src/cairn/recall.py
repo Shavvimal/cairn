@@ -9,7 +9,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 
-from . import digest, provenance
+from . import digest, provenance, verify
 from . import recall_gaps as gaps
 from .config import ConfigError, get_config
 from .registry import SOURCES
@@ -54,6 +54,27 @@ def _owner(fm: dict) -> str | None:
     return provenance.owner_of(fm)
 
 
+def _add_verify_parser(sub) -> None:
+    """``recall verify``: check a journal's citations and quotes against a digest."""
+    command = sub.add_parser(
+        "verify",
+        help="check a journal's [SOURCE:ID fN] citations and quotes against a digest",
+        description=(
+            "Check that every [SOURCE:ID fN] citation in FILE names a frame the digest kept, "
+            "unchanged since, and that every quoted span is in a cited frame. Exit 0 when "
+            "everything verifies, 4 when a check failed, 1 on an error."
+        ),
+    )
+    command.add_argument("file", metavar="FILE", help="the journal (any Markdown file)")
+    command.add_argument(
+        "--digest", required=True, metavar="DIR", help="a directory written by recall digest"
+    )
+    command.add_argument("--json", action="store_true")
+    command.add_argument(
+        "--fix", action="store_true", help="move failing blocks under ## Unverified in FILE"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cairn recall",
@@ -93,6 +114,11 @@ def main(argv: list[str] | None = None) -> int:
     digest_cmd.add_argument("--min-msgs", type=int, default=1)
     digest_cmd.add_argument("--include-subagents", action="store_true")
     digest_cmd.add_argument(
+        "--include-routine-sessions",
+        action="store_true",
+        help="keep sessions owned by a routine (owner routine:NAME); excluded by default",
+    )
+    digest_cmd.add_argument(
         "--out", help="output directory (default: $XDG_CACHE_HOME/cairn/digests/DATE)"
     )
     digest_cmd.add_argument("--json", action="store_true")
@@ -125,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     gaps_cmd.add_argument(
         "--source", action="append", choices=[s.source for s in SOURCES], metavar="SOURCE"
     )
+    _add_verify_parser(sub)
     session_sources = [s.source for s in SOURCES if s.session_type]
     for command in (listing, expand, digest_cmd, frame):
         projects = command.add_mutually_exclusive_group()
@@ -140,6 +167,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "gaps":
             return _gaps(args)
         store = SessionStore(get_config())
+        if args.command == "verify":
+            return verify.run_verify(args, store)
         sources = args.source
         if args.command in ("list", "digest"):
             if args.command == "digest":
@@ -153,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("--min-msgs must be nonnegative")
             if args.refresh and not refresh(sources):
                 return 1
-        records = store.records(sources)
+        records = family = store.records(sources)
         # An explicit ID is global unless a project filter is requested. Listing and
         # digest default strictly to cwd; absence of project metadata never broadens it.
         project = args.project or (
@@ -175,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
                     skipped=skipped,
                     named=args.source,
                 ),
+                family=family,
             )
         if args.command == "frame":
             return digest.run_frame(args, store.resolve(args.session_id, records))

@@ -21,6 +21,7 @@ from .config import (
     resolve_profile,
     routine_paths,
 )
+from .mutations import ROUTINE_OWNER_PREFIX
 from .storage import atomic_write
 
 ATTEMPT_CAP = 3
@@ -319,7 +320,7 @@ def invoke_argv(
         argv += ["--model", spec.model]
     if spec.timeout_s:
         argv += ["--timeout-s", str(spec.timeout_s)]
-    argv += ["--owner", f"routine:{spec.name}", "--json"]
+    argv += ["--owner", f"{ROUTINE_OWNER_PREFIX}{spec.name}", "--json"]
     if remaining_usd is not None:
         argv += ["--extra", "--max-budget-usd", f"{remaining_usd:.2f}"]
     return argv

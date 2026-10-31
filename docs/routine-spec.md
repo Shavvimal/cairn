@@ -739,7 +739,8 @@ A session record's `metadata` is the parsed front matter
 (`store.py:203-219`, the `fm` argument of `SessionRecord`). A consumer reads
 `record.metadata.get("owner")`. The `cairn recall digest` spec (elsewhere) should skip
 or label rows whose owner starts with `routine:`. Otherwise tomorrow's journal digests
-today's journal run. Exchange documents are `agent-exchange` and never become records
+today's journal run. Built: `recall digest` now excludes these sessions by default
+(`docs/journal-verify-spec.md`, section 4.6). Exchange documents are `agent-exchange` and never become records
 (`store.py:182-184`), so only the peer session document matters.
 
 Timing: the routine runs at 05:20 on day D+1 for day D. Its own peer session is active

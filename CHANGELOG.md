@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.15.0]
+
+### Added
+- `cairn recall verify FILE --digest DIR [--json] [--fix]` checks a journal written from a
+  digest: every `[SOURCE:ID fN]` citation must name a frame the digest kept, unchanged
+  since, and every quoted span must be in a cited frame. One `FILE:LINE: REASON: DETAIL`
+  line per failure, 10 fixed reason codes, `--json` with `schema_version`, exit 0 / 4 / 1.
+  `--fix` moves failing blocks under `## Unverified`; a second run changes nothing.
+- `cairn recall digest --include-routine-sessions` keeps routine-owned sessions.
+- The example routine writes the day's digest in `prepare` and runs `recall verify` as
+  `validate`; its `scheduled` profile allows `Bash(cairn recall verify *)`.
+
+### Changed
+- `cairn recall digest` leaves out sessions owned by a routine (`owner: routine:<name>`,
+  from front matter or the owner-form preamble) and their subagents, so a journal run is
+  never input to the next day's journal. `--json` lists them under `excluded`.
+
 ## [2.14.0]
 
 ### Added

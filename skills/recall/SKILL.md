@@ -85,6 +85,22 @@ lengths, never ids. To dig into a cited line, run `recall frame` with that ordin
 prints the frame as exported and warns on stderr if the export changed since the digest.
 Exit 3 means an empty day: no session was written. A legacy or corrupt export is skipped with a warning and listed under `skipped` in the JSON; the rest still exit 0.
 The digest JSON also has a `coverage` key, in the same shape as `list --coverage`.
+Sessions owned by a routine (`owner: routine:<name>`) and their subagents are left out and
+listed under `excluded`; `--include-routine-sessions` keeps them.
+
+When you write from a digest, cite each claim as `[SOURCE:ID fN]` (for example
+`[claude:3f2a9c1e f11]`, the `ref` from the digest file's front matter, full or a unique
+prefix of at least 8 characters, and the marker ordinal). Quote only text copied exactly
+from the cited frame. Then check the file:
+
+```bash
+cairn recall verify FILE --digest DIR          # FILE:LINE: REASON: DETAIL per failure
+cairn recall verify FILE --digest DIR --fix    # move failing blocks under ## Unverified
+```
+
+Exit 0: every citation and quote verifies (or `--fix` moved the failures). Exit 4: at
+least one failure. Exit 1: an error, such as DIR without `.cairn-digest`. `--json` gives
+the counts and every failure with its reason.
 
 → Go to Step 4 (Gaps).
 
