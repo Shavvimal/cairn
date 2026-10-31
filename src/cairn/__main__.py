@@ -49,10 +49,11 @@ sources (each forwards its remaining args to that source's CLI):
   cairn granola export --since 2w            export Granola meetings + transcripts
   cairn service-docs export [--clean]        mirror service docs into one collection
 
-shared per-source commands: export, list, context, note, close, log, decide, supersede
+shared per-source commands: export, list, context, note, close, log, decide, supersede, forget
   cairn claude list --json
   cairn codex note "got it working"
   cairn codex decide "Use one PR per layer" --kind decision --revisit-by 2026-12-01
+  cairn codex forget 3 --reason hallucination
   cairn cursor log --status done --tags "x,y" --rating 8
 
 recall (temporal view over shared exported sessions; topic search is qmd's job):

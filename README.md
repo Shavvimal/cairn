@@ -190,7 +190,7 @@ Clone the repo and `uv pip install -e .`. The editable install finds `cairn.conf
 
 ### `/cairn` — drive the CLI (export, list, annotate, resume)
 
-Every windowed source (claude, codex, cursor, granola) shares the same verbs — `export`, `list`, `context`, `note`, `close`, `log`, `decide`, `supersede` — with `export` defaulting to the last 24h:
+Every windowed source (claude, codex, cursor, granola) shares the same verbs — `export`, `list`, `context`, `note`, `close`, `log`, `decide`, `supersede`, `forget` — with `export` defaulting to the last 24h:
 
 ```bash
 cairn claude export --since 7d   # export the last week of Claude sessions
@@ -202,8 +202,16 @@ cairn claude resume --pick       # legacy interactive Claude picker
 cairn codex note "progress"      # add a timestamped note
 cairn codex decide "Use one PR per layer" --kind decision --revisit-by 2026-12-01
                                  # add a row to the session's ## Decisions table
+cairn codex forget 3 --reason hallucination
+                                 # withdraw row 3; a later decide of the claim exits 3
 cairn recall decisions --overdue # active decision rows due for review
 ```
+
+`forget` strikes the row as `~~claim~~ withdrawn: <reason>` and appends a SHA-256
+fingerprint of the normalised claim to `withdrawn.jsonl` in the data root. The ledger
+holds no claim text. Withdrawal does not erase: the claim stays in the session document
+until you edit the file, in the QMD index until the next index update after that edit,
+and in any backup or copy of the file. Recall and the digest hide withdrawn rows.
 
 Service docs is a verbatim mirror with no `--since`/`--all`:
 `cairn service-docs export [--clean]`.

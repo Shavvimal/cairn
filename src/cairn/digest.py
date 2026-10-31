@@ -25,8 +25,9 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
-from . import decisions
+from . import decisions, withdrawals
 from . import provenance as provenance_mod
+from .config import get_config
 from .digest_condense import (
     Condenser,
     parse_parts,
@@ -532,7 +533,10 @@ def run_digest(
             in args.provenance
         ]
         digests = [d for d in digests if d.row["provenance"] in args.provenance]
-    overdue = decisions.overdue_rows(scanned, end.date())
+    # A withdrawn claim is never listed: the rows depend on the documents and the
+    # withdrawal ledger only, so the output stays deterministic.
+    ledger = withdrawals.ledger_path(get_config())
+    overdue = decisions.overdue_rows(scanned, end.date(), withdrawals.load(ledger))
     digests.sort(key=lambda d: (d.first_ts, d.record.reference))
     _stems(digests)
     write(out, digests)

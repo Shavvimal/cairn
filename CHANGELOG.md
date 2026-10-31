@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.0]
+
+### Added
+- `cairn <source> forget N --reason R` withdraws row N of the `## Decisions` table. It
+  strikes the row as `~~claim~~ withdrawn: R` and appends a SHA-256 fingerprint of the
+  normalised claim to `<data_root>/withdrawn.jsonl` (mode 0600, no claim text). `R` is one
+  of `stale`, `wrong_source`, `hallucination`, `cross_attribution`, `private`, `other`.
+- `decide` and `supersede` refuse a withdrawn claim, in any session and any source, with
+  exit 3. `--force` adds it and records it as unwithdrawn.
+- `recall decisions --json` and the digest `overdue` rows carry `withdrawn`,
+  `withdrawn_reason` and `withdrawn_via`.
+
+### Changed
+- `recall decisions` and the digest `overdue` list hide withdrawn rows, including an
+  unstruck row whose claim the ledger lists as withdrawn. `recall decisions
+  --include-struck` shows them; the digest has no such flag and never lists a withdrawn
+  row.
+
 ## [2.16.0]
 
 ### Added

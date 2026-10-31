@@ -2,7 +2,7 @@
 
 Annotate the current session with title, tags, status, rating, comments, and an
 auto-generated summary. Works for any **conversation** source - substitute the source name
-in `cairn <source> note/close/log/decide/supersede` (Claude shown below; the same verbs exist
+in `cairn <source> note/close/log/decide/supersede/forget` (Claude shown below; the same verbs exist
 for codex, antigravity, cursor, and granola). service-docs is a file mirror and has no annotation verbs.
 
 ## Behavior
@@ -88,6 +88,36 @@ cairn claude supersede 3 "Keep confidence as three words until grading lands"
   exported yet, run `cairn <source> export` before you annotate it, or `decide` exits 1
   with `Session file not found`.
 - A claim is one line of at most 500 characters and must not contain `~~`.
+
+## Withdraw a claim
+
+A row that is wrong and has no replacement is withdrawn, not deleted. If a replacement
+exists, use `supersede` instead.
+
+```bash
+cairn claude forget 3 --reason hallucination
+```
+
+`forget N` strikes row N as `~~claim~~ withdrawn: <reason>` (a superseded row keeps its
+marker: `superseded by #4, withdrawn: <reason>`). It also appends a fingerprint of the
+claim to `withdrawn.jsonl` in the data root. After that, `decide` or `supersede` with the
+same claim, in any session and any source, exits 3. Case, punctuation and spacing do not
+matter to the match.
+
+| `--reason`          | Use when                                                    |
+| ------------------- | ----------------------------------------------------------- |
+| `stale`             | It was true and is no longer                                |
+| `wrong_source`      | The source cell points at the wrong session, file or person |
+| `hallucination`     | No source supports it                                       |
+| `cross_attribution` | It is true of a different project, repo or person           |
+| `private`           | It must not be recalled                                     |
+| `other`             | None of the above                                           |
+
+- **Do not pass `--force` on your own.** `decide --force` adds a withdrawn claim again
+  and records it as unwithdrawn. Use it only when the user confirms the claim is true now.
+- **Withdrawn is not erased.** The claim text stays in the session document and in the
+  QMD index until someone edits the file. `--reason private` prints a note that says so.
+- Run `forget` again on the same row: it reports `already withdrawn` and changes nothing.
 
 ## Finding the current session
 

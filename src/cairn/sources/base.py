@@ -635,6 +635,18 @@ class ConversationSource(ABC):
             return 1
         return decisions.cmd_decide(self, session_id, args)
 
+    def cmd_forget(self, args: argparse.Namespace) -> int:
+        """``forget N --reason R``: strike row N of ``## Decisions`` as withdrawn."""
+        from .. import decisions
+
+        if args.number < 1:
+            print(f"Error: row number must be 1 or greater, got {args.number}", file=sys.stderr)
+            return 2
+        session_id = self._require_session_id(getattr(args, "session_id", None))
+        if not session_id:
+            return 1
+        return decisions.cmd_forget(self, session_id, args)
+
     def cmd_close(self, args: argparse.Namespace) -> int:
         session_id = self._require_session_id(getattr(args, "session_id", None))
         if not session_id:

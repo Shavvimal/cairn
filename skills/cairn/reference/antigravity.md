@@ -1,7 +1,8 @@
 # Google Antigravity (agy) Conversations
 
 Export Google Antigravity CLI conversations to markdown. Shared verbs (`export`, `list`,
-`context`, `note`, `close`, `log`, `decide`, `supersede`) work as documented in `../SKILL.md`, plus `resume`
+`context`, `note`, `close`, `log`, `decide`, `supersede`, `forget`) work as documented in
+`../SKILL.md`, plus `resume`
 (`cairn antigravity resume <id>` prints `agy --conversation <id>`). Windowed - `export`
 defaults to the last 24h; use `--since` / `--all`.
 

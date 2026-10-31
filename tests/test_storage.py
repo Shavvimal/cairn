@@ -49,6 +49,11 @@ class TestExternalLocks(StoreFixture):
         native = self.native("codex", "lock-cleanliness")
         self.run_cli("codex", "export", "--all")
         self.run_cli("codex", "note", "Keep this annotation", "--session-id", "lock-cleanliness")
+        self.run_cli("codex", "decide", "Withdraw me", "--session-id", "lock-cleanliness")
+        self.run_cli(
+            "codex", "forget", "1", "--reason", "other", "--session-id", "lock-cleanliness"
+        )
+        self.assertTrue((cfg.data_root / "withdrawn.jsonl").is_file())
         probe = self.root / "qmd"
         probe.write_text(f"#!{sys.executable}\nprint('qmd://codex-sessions/')\n")
         probe.chmod(0o755)
