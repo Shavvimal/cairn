@@ -690,7 +690,7 @@ def _config_remove_service_doc(name: str) -> int:
     return _edit_config(apply)
 
 
-def config_main(argv: list[str] | None = None) -> int:
+def build_config_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cairn config", description="Manage the per-user config")
     sub = parser.add_subparsers(dest="action", metavar="ACTION", required=True)
     p_init = sub.add_parser("init", help="create the per-user config from the bundled template")
@@ -744,7 +744,11 @@ def config_main(argv: list[str] | None = None) -> int:
         "remove-service-doc", help="remove a docs folder from the service-docs collection"
     )
     p_rm.add_argument("name", metavar="NAME", help="service name to remove")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def config_main(argv: list[str] | None = None) -> int:
+    args = build_config_parser().parse_args(argv)
 
     if args.action == "init":
         enable = args.enable.split(",") if args.enable is not None else None
@@ -836,14 +840,18 @@ def _cron_uninstall() -> int:
     return 0
 
 
-def cron_main(argv: list[str] | None = None) -> int:
+def build_cron_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cairn cron", description="Manage the hourly sync crontab entry"
     )
     sub = parser.add_subparsers(dest="action", metavar="ACTION", required=True)
     sub.add_parser("install", help="add/refresh the hourly 'cairn sync --cron' entry")
     sub.add_parser("uninstall", help="remove the cairn cron entry")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def cron_main(argv: list[str] | None = None) -> int:
+    args = build_cron_parser().parse_args(argv)
     return _cron_install() if args.action == "install" else _cron_uninstall()
 
 
@@ -1275,7 +1283,7 @@ def _check_recall_first(harness: str | None) -> None:
             )
 
 
-def doctor_main(argv: list[str] | None = None) -> int:
+def build_doctor_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cairn doctor", description="Check the cairn install")
     parser.add_argument(
         "--plugin-manifest",
@@ -1288,7 +1296,11 @@ def doctor_main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="fail unless the QMD index is readable and fully embedded (setup/acceptance)",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def doctor_main(argv: list[str] | None = None) -> int:
+    args = build_doctor_parser().parse_args(argv)
     print(f"cairn {__version__} - health check\n")
     critical_failures = 0
     index_caveat: str | None = None

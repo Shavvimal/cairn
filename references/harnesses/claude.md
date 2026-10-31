@@ -25,7 +25,7 @@ A foreground `Bash` call dies long before a ten-minute model download finishes, 
    "model" or "download"; failures show `Error`/`Traceback`/`failed`/`Killed`/`OOM`.
 
    > Monitor invocation:
-   > - **description:** `cairn first sync (model download + embed) progress`
+   > - **description:** `cairn first sync (model download + embed) progress` <!-- cairn-cli: skip -->
    > - **timeout_ms:** `3600000` (60 min)
    > - **command:**
    >   ```bash

@@ -264,7 +264,7 @@ the codes are not published until this layer ships.
 
 - `test_codes_are_upper_snake_and_unique`: every key matches `^[A-Z][A-Z0-9_]+$`, active and reserved disjoint.
 - `test_every_entry_has_all_fields`: non-empty `meaning`, `why`, `next_step`; `exit` an int.
-- `test_verify_is_read_only`: each `verify` starts with an allowlisted prefix (`cairn help`, `cairn config path|show`, `cairn doctor`, `cairn routine list|status`, `cairn routine run ... --dry-run`, `cairn invoke status|tail ... --no-follow|--help`, `cairn hook status`, `cairn recall list`).
+- `test_verify_is_read_only`: each `verify` starts with an allowlisted prefix <!-- cairn-cli: skip --> (`cairn help`, `cairn config path|show`, `cairn doctor`, `cairn routine list|status`, `cairn routine run ... --dry-run`, `cairn invoke status|tail ... --no-follow|--help`, `cairn hook status`, `cairn recall list`).
 - `test_verify_parses`: each `verify`, placeholders filled, parses with the real parser (`parse_args` via the `_ADMIN` module's `build_parser`/`main` under `SystemExit` capture).
 - `test_placeholder_unfilled_drops_verify`: `fix("INVOKE_BUSY")` has no `verify`.
 - `test_render_is_fresh`: `render_markdown()` equals `docs/error-codes.md`; message names `python -m cairn.errors --render > docs/error-codes.md`.

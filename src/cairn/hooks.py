@@ -398,7 +398,7 @@ def iso(timestamp: object) -> str:
     return str(timestamp)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cairn hook")
     sub = parser.add_subparsers(dest="command", required=True)
     callback = sub.add_parser("handle", help="queue a host session-end event from stdin")
@@ -448,11 +448,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     export.add_argument("--session-id", required=True)
     export.add_argument("--transcript")
+    return parser
+
+
+def _subcommand_parser(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:
+    """The subparser registered as ``name``, so its errors keep their own prog."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices[name]
+    raise KeyError(name)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     if getattr(args, "dry_run", False) and args.harness != "codex":
-        (install if args.command == "install" else uninstall).error(
-            "--dry-run applies to --harness codex"
-        )
+        _subcommand_parser(parser, args.command).error("--dry-run applies to --harness codex")
     if args.command == "handle" and args.harness == "antigravity":
         return _handle_antigravity()
     try:

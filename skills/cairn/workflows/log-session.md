@@ -2,7 +2,7 @@
 
 Annotate the current session with title, tags, status, rating, comments, and an
 auto-generated summary. Works for any **conversation** source - substitute the source name
-in `cairn <source> note/close/log/decide/supersede/forget` (Claude shown below; the same verbs exist
+in `cairn <source> note|close|log|decide|supersede|forget` (Claude shown below; the same verbs exist
 for codex, antigravity, cursor, and granola). service-docs is a file mirror and has no annotation verbs.
 
 ## Behavior

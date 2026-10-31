@@ -280,7 +280,7 @@ def _ensure_collections(config: CairnConfig) -> str:
     return f"all up to date (exists={exists}, skipped={skipped})"
 
 
-def main(argv: list[str] | None = None):
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cairn sync",
         description="Sync context collections and update the QMD index",
@@ -298,7 +298,11 @@ def main(argv: list[str] | None = None):
         action="store_true",
         help="Sync all enabled sources and embed incrementally (same as --cron)",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None):
+    args = build_parser().parse_args(argv)
 
     config = get_config()
     mode = "hook" if args.hook else ("cron" if args.cron else "all")

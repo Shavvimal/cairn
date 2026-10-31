@@ -513,6 +513,11 @@ class CursorSource(ConversationSource):
         return 0
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """The ``cairn cursor`` parser, built without running a command."""
+    return cli.build_parser(CursorSource(), prog="cairn cursor")
+
+
 def main() -> None:
     """Console entry point - drive the Cursor source through the shared CLI."""
     cli.run(CursorSource())

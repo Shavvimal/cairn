@@ -80,7 +80,7 @@ def _add_decisions_parser(sub: argparse._SubParsersAction, session_sources: list
     decisions.add_recall_parser(sub, session_sources)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cairn recall",
         description="Recall exported sessions across sources (UTC date windows).",
@@ -168,7 +168,12 @@ def main(argv: list[str] | None = None) -> int:
             action="append",
             choices=list(digest.DIGEST_SOURCES) if command is digest_cmd else session_sources,
         )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    session_sources = [s.source for s in SOURCES if s.session_type]
     try:
         if args.command == "gaps":
             return _gaps(args)

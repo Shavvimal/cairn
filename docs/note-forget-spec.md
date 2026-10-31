@@ -266,7 +266,7 @@ deleted. Input is the logical claim (`DecisionRow.claim`), never the raw cell.
 | `Use Postgres 16 for the queue.` | `use postgres 16 for the queue` | `36e5348b0c921d29e9974b20311175686f38dba3b3bc0890f976264f2a20ece5` |
 | `  use  POSTGRES 16, for the queue!! ` | `use postgres 16 for the queue` | `36e5348b0c921d29e9974b20311175686f38dba3b3bc0890f976264f2a20ece5` |
 | `The API's rate-limit is 100 req/s` | `the apis ratelimit is 100 reqs` | `e84d7d5a98c5d452bdd0e621c85c5c8f93205a375b7679cb12f5337aa51ff067` |
-| `` `cairn sync` runs every 15 minutes `` | `cairn sync runs every 15 minutes` | `185bfafd13790869e0095dd0a230e4dfbe847eb098c44a50c4a22cd4509d44a1` |
+| `` `cairn sync` runs every 15 minutes `` | `cairn sync runs every 15 minutes` | `185bfafd13790869e0095dd0a230e4dfbe847eb098c44a50c4a22cd4509d44a1` | <!-- cairn-cli: skip -->
 
 Full-width `Ｕｓｅ` folds to `use` under NFKC. The tests pin these four hashes.
 

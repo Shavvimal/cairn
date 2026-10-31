@@ -491,7 +491,7 @@ For each candidate record, in this order:
    before they become user messages, `src/cairn/sources/codex.py:313-315`.) If the match
    names a caller, `role: peer`, `parent` = the caller reference.
 4. Orphan peer. A preamble match that names no caller (`an operator`, or an owner label
-   such as `routine:daily` from `cairn invoke --owner`), or a caller whose
+   such as `routine:daily` from `cairn invoke <peer> --owner`), or a caller whose
    reference fails `_LINK_REF`-style validation (`src/cairn/mutations.py:36-37`):
    `role: primary`, `parent: null`, `orphan_peer: true`. An owner label from the
    preamble fills `owner` when the front matter has none. It is condensed as a primary
@@ -535,7 +535,7 @@ INVOKE_PREAMBLE = re.compile(
 )
 ```
 
-The `owner` branch matches `who` when `cairn invoke --owner LABEL` runs with no caller
+The `owner` branch matches `who` when `cairn invoke <peer> --owner LABEL` runs with no caller
 (`preamble()` in `src/cairn/invoke.py`); the label follows `OWNER_RE`
 (`src/cairn/mutations.py`).
 
@@ -975,7 +975,7 @@ Do the steps in order. Run `make check` (ruff, ruff format, mypy, unittest;
 
 ## 13. Maintainer answers (proposed by the implementing agent, 2026-10-28, pending the owner's review)
 
-1. `owner` is written by `cairn invoke --owner` into the preserved tail of the peer session's front matter in the `exported` step (see `docs/routine-spec.md` section 5). Exporters stay unchanged. Digest copies it when present.
+1. `owner` is written by `cairn invoke <peer> --owner` into the preserved tail of the peer session's front matter in the `exported` step (see `docs/routine-spec.md` section 5). Exporters stay unchanged. Digest copies it when present.
 2. `--json` also lists skipped sessions in a `skipped[]` array with `{ref, reason: legacy|corrupt}`; stdout is `{"sessions": [...], "skipped": [...]}`. Exit codes follow the routine's `prepare` contract: 0 when at least one session was written (skips only warn), 3 when zero sessions were written for the day, 1 on an error, 2 on usage.
 3. A hash mismatch in `recall frame` prints the warning and exits 0; the frame it prints is still the best available evidence.
 4. `expand` moves to the anchored walker in a later PR, tracked as a follow-up issue.

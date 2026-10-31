@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.2]
+
+### Added
+- `tests/test_docs_cli.py`: every `cairn ...` command in README, CONTRIBUTING, skills,
+  references, docs and `cairn help` is parsed by the real argparse parser; a mismatch fails
+  with `path:line` and the parser's error. `<!-- cairn-cli: historical -->` and
+  `<!-- cairn-cli: skip -->` exempt old examples and non-command spans. Skill
+  `allowed-tools` Bash rules are checked for shape and coverage.
+- Each dispatch target builds its parser in a function (`build_parser()`,
+  `admin.build_config_parser()` and peers), with no behaviour change.
+
+### Fixed
+- `cairn help` and the cairn skill list one command per line; `install | uninstall NAME`
+  forms ran as a shell pipe when pasted.
+- `docs/routine-spec.md` names `--force-restart`, not `--kill`; routine and digest
+  specs write `cairn invoke <peer> --owner`.
+
 ## [2.19.1]
 
 ### Added

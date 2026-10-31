@@ -179,9 +179,10 @@ This is a model issue, not a harness one, but the harness could help. Antigravit
   directories, which do pass).
 
 None of this was wrong in the code. All of it would have been wrong in a PR description
-copied from the report. The harness cannot fix model recall, but a `cairn invoke result
-<id> --files` that lists the files the run actually wrote (from the events) next to the
-files the model claims to have written would make the mismatch visible in one line.
+copied from the report. The harness cannot fix model recall, but a
+`cairn invoke result <id> --files` <!-- cairn-cli: skip --> that lists the files the run
+actually wrote (from the events) next to the files the model claims to have written would
+make the mismatch visible in one line.
 
 ## Smaller frictions
 

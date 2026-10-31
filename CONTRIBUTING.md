@@ -32,6 +32,21 @@ Individual targets are available too: `make lint`, `make format`, `make typechec
 
 CI runs the same checks across Python 3.11, 3.12, and 3.13. A PR must be green before it can merge.
 
+## Documented commands must parse
+
+`tests/test_docs_cli.py` reads every `cairn ...` command in a fenced block, and every
+inline code span that starts with `cairn `, in README.md, CONTRIBUTING.md, `skills/`,
+`references/`, `docs/` and the `cairn help` text, and parses it with the real argparse
+parser. If you rename a flag or a subcommand, fix the docs that name it. Write one command
+per line, because `install | uninstall NAME` runs as a shell pipe when it is pasted. Put
+`<!-- cairn-cli: historical -->` on the line above a fence that shows an older release's
+CLI. Put `<!-- cairn-cli: skip -->` on a line whose inline code is not a command (an exact
+error string or a label), or on the line above a fence that quotes a file body. Rerun the
+check alone with `uv run python -m unittest tests.test_docs_cli`. Inline code is held to a
+looser rule than a fence: it can name a command group or a flag without its required
+arguments (`cairn routine`, `cairn recall digest --out`), but an unknown flag still fails.
+The spec, `docs/docs-cli-truth-spec.md` section 3.5, lists the exact relaxations.
+
 ## Public-repo hygiene
 
 This repository is public. Do not commit a private project or client name, a private

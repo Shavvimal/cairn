@@ -1048,6 +1048,11 @@ class ClaudeSource(ConversationSource):
         os.execvp("claude", cmd)
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """The ``cairn claude`` parser, built without running a command."""
+    return cli.build_parser(ClaudeSource(), prog="cairn claude")
+
+
 def main() -> None:
     """Console entry point - drive the Claude source through the shared CLI."""
     cli.run(ClaudeSource())

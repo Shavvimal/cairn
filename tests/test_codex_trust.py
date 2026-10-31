@@ -854,11 +854,19 @@ class TestUninstall(TrustFixture):
         self.assertEqual(self.tree(), before)
 
     def test_flags_apply_to_codex_only(self):
-        err = io.StringIO()
-        with redirect_stderr(err), self.assertRaises(SystemExit) as raised:
-            hooks.main(["install", "--harness", "antigravity", "--dry-run"])
-        self.assertEqual(raised.exception.code, 2)
-        self.assertIn("--dry-run applies to --harness codex", err.getvalue())
+        for command in ("install", "uninstall"):
+            err = io.StringIO()
+            with (
+                self.subTest(command=command),
+                redirect_stderr(err),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                hooks.main([command, "--harness", "antigravity", "--dry-run"])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertEqual(
+                err.getvalue().splitlines()[-1],
+                f"cairn hook {command}: error: --dry-run applies to --harness codex",
+            )
         err = io.StringIO()
         with redirect_stderr(err):
             code = hooks.main(["install", "--harness", "antigravity", "--no-trust"])

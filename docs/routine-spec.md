@@ -2,12 +2,12 @@
 
 Status: implemented on branch `feat/routine-and-digest` (PR 37), version 2.9.0. Section 14
 holds the maintainer answers; where an answer differs from an earlier section (6.2.2 strips
-the depth variable, 6.6 names `--kill`), the answer wins.
+the depth variable), the answer wins.
 
 This document specifies a generic feature: run a prompt file through a peer agent on a
 schedule, gate the result with a consumer-supplied validation command, and record
 per-day state. It also specifies the four supporting changes the feature needs:
-config-defined permission profiles, `cairn invoke --owner`, a `journal` collection and
+config-defined permission profiles, `cairn invoke <peer> --owner`, a `journal` collection and
 nested `config set` / `config show` support.
 
 Every claim about current behaviour cites `path:line` on `main` at 2.8.1. A claim this
@@ -680,7 +680,7 @@ UNVERIFIED. The example shows shape, not a tested hardening.
 
 ---
 
-## 5. `cairn invoke --owner LABEL`
+## 5. `cairn invoke <peer> --owner LABEL`
 
 ### 5.1 Flag
 
@@ -753,7 +753,7 @@ runs a day later.
   (`invoke.py:525-556`). It must match `^(claude|codex):\S+$` (`invoke.py:152`,
   checked at `invoke.py:1271-1273`). `--parent routine:daily` is refused today, and
   must stay refused. `--owner` is the label channel.
-- The two coexist. A manual `cairn invoke --owner x` from inside a Claude session
+- The two coexist. A manual `cairn invoke <peer> --owner x` from inside a Claude session
   records both.
 - A run with no caller is a warning, not a refusal: `resolve_caller` returns `None` and
   a warning (`invoke.py:1282`), and `run` only appends it (`invoke.py:1436`). Verified.
@@ -776,10 +776,12 @@ Module: `src/cairn/routine.py`, entry `main(argv=None) -> int`. Dispatcher: add
 `_HELP` under "orchestration / admin" (`__main__.py:78-87`):
 
 ```text
-  cairn routine install | uninstall NAME     add / remove the launchd job (macOS)
+  cairn routine install NAME                 add the launchd job (macOS)
+  cairn routine uninstall NAME               remove the launchd job; stamps are kept
   cairn routine run NAME [--day D] [--force] [--dry-run]   run due days now
-  cairn routine list | status NAME [--json]  routines, stamps, last run, cost, log tail
-  cairn routine kickstart NAME [--kill]      ask launchd to start the job now
+  cairn routine list [--json]                every configured routine
+  cairn routine status NAME [--json]         routines, stamps, last run, cost, log tail
+  cairn routine kickstart NAME [--force-restart]   ask launchd to start the job now
 ```
 
 ### 6.0 Shared paths
@@ -810,7 +812,7 @@ Steps:
 1. Load config. Unknown routine: exit 2, `routine 'NAME' is not in routines; known: a, b`.
 2. If `sys.platform != "darwin"`: print the crontab line below to stdout and this text
    to stderr, then exit 2:
-   `cairn routine install is launchd-only in this version; add this line with 'crontab -e' to run it under cron:`
+   `cairn routine install is launchd-only in this version; add this line with 'crontab -e' to run it under cron:` <!-- cairn-cli: skip -->
    The line, with `MM HH` from `at`:
    `MM HH * * * <shlex.join(/usr/bin/env K=V ... <cairn invocation> routine run NAME)> >> <log> 2>&1 # cairn routine NAME`
    with `%` escaped as `admin.py:514` does.
@@ -1188,7 +1190,7 @@ an unknown routine. The JSON gains `schema_version`, `state`, `exit`, `attention
 
 ### 6.5 `cairn routine uninstall NAME`
 
-1. Not macOS: exit 2, `cairn routine uninstall is launchd-only in this version`.
+1. Not macOS: exit 2, `cairn routine uninstall is launchd-only in this version`. <!-- cairn-cli: skip -->
 2. `launchctl bootout gui/<uid>/<label>`. Ignore "not loaded".
 3. Remove the plist if present.
 4. Keep stamps, attempt dirs and the log.
@@ -1198,15 +1200,15 @@ an unknown routine. The JSON gains `schema_version`, `state`, `exit`, `attention
 The routine name need not still be in config, so a deleted routine can be uninstalled.
 The name is still checked against the name regex before it becomes a path.
 
-### 6.6 `cairn routine kickstart NAME [--kill]`
+### 6.6 `cairn routine kickstart NAME [--force-restart]`
 
-Runs `launchctl kickstart gui/<uid>/<label>`. With `--kill`, adds `-k`.
+Runs `launchctl kickstart gui/<uid>/<label>`. With `--force-restart`, adds `-k`.
 
 Refinement: the brief wraps `kickstart -k`. `-k` kills a running instance first, which
 here means killing an invoke mid-round: the peer's spend is lost and the day records a
 failed attempt (`invoke-exit-130`). Without `-k`, launchd leaves a running instance
 alone, and the routine lock already makes a second start harmless. So the default is
-without `-k`, and `--kill` is opt-in. Open question 9.
+without `-k`, and `--force-restart` is opt-in. Open question 9.
 
 Not installed: exit 1, `dev.cairn.routine.NAME is not loaded; run 'cairn routine install NAME'`.
 Not macOS: exit 2.

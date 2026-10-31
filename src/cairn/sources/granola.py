@@ -871,6 +871,11 @@ class GranolaSource(ConversationSource):
         )
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """The ``cairn granola`` parser, built without running a command."""
+    return cli.build_parser(GranolaSource(), prog="cairn granola")
+
+
 def main() -> None:
     """Console entry point - drive the Granola source through the shared CLI."""
     cli.run(GranolaSource())

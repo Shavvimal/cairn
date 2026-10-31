@@ -95,8 +95,9 @@ cairn instructions status  [--harness claude|codex] [--json]
 - `--dry-run`: print a unified diff (`difflib.unified_diff`, labels `a/PATH` and `b/PATH`)
   to stdout. The command writes nothing and does not change the ledger.
 
-Dispatch: `"instructions": "cairn.instructions:main"` in `_ADMIN`. One help line:
-`cairn instructions install | remove | show | status --harness claude|codex   recall-first block in the user instruction file`.
+Dispatch: `"instructions": "cairn.instructions:main"` in `_ADMIN`. Help lines, one per action:
+`cairn instructions install --harness claude|codex`, `cairn instructions remove --harness claude|codex`,
+`cairn instructions show --harness claude|codex` and `cairn instructions status [--json]`.
 
 ### 3.2 Exit codes
 
@@ -179,6 +180,7 @@ removed and, on line 1, a BOM. End: the exact line above.
 
 Block for `claude` (10 lines, markers included):
 
+<!-- cairn-cli: skip -->
 ```
 <!-- cairn:recall-first:begin v1 -->
 ## Past work: check cairn before you ask
