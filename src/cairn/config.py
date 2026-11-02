@@ -278,6 +278,52 @@ class RoutineSpec:
     raw: dict = field(default_factory=dict, compare=False, repr=False)
 
 
+SCHEDULE_BACKENDS = ("auto", "launchd", "cron")
+SCHEDULE_PRIORITIES = ("background", "normal")
+EMBED_MODES = ("nightly", "hourly", "off")
+EMBED_ON_BATTERY = ("defer", "skip", "run")
+MAX_EMBED_SESSIONS = 12
+
+
+@dataclass(frozen=True)
+class SyncSchedule:
+    """The ``cron`` block: the scheduled sync jobs and the nightly embed policy.
+
+    ``schedule`` is the light job's crontab expression (the hourly full job's when
+    ``embed`` is ``hourly``). ``embed_at`` and ``embed_deadline`` are local ``HH:MM``.
+    """
+
+    schedule: str = DEFAULT_CRON_SCHEDULE
+    backend: str = "auto"
+    priority: str = "background"
+    embed: str = "nightly"
+    embed_at: str = "03:00"
+    embed_deadline: str = "07:00"
+    embed_max_sessions: int = 3
+    embed_on_battery: str = "defer"
+    embed_catchup: bool = True
+
+
+@dataclass(frozen=True)
+class DeepRecall:
+    """The ``recall.deep`` block: when ``cairn recall search`` runs one hybrid query."""
+
+    auto: bool = True
+    min_hits: int = 3
+    min_top_score: float | None = None
+    timeout_s: int = 30
+    rerank: bool = False
+    n: int = 10
+    max_vector_age_h: int | None = 72
+
+
+@dataclass(frozen=True)
+class RecallPolicy:
+    """The ``recall`` block."""
+
+    deep: DeepRecall = DeepRecall()
+
+
 @dataclass(frozen=True)
 class CairnConfig:
     """Read-only, validated view of ``cairn.config.json``."""
@@ -297,6 +343,8 @@ class CairnConfig:
     collections: dict[str, Collection]
     invoke: InvokePolicy = InvokePolicy()
     routines: dict[str, RoutineSpec] = field(default_factory=dict)
+    schedule: SyncSchedule = SyncSchedule()
+    recall: RecallPolicy = RecallPolicy()
 
     def output_dir(self, collection: str) -> Path:
         """Where a collection's exported markdown lives: ``data_root / <collection>``."""
@@ -637,6 +685,7 @@ DEFAULT_ROUTINE_OUTPUTS = {"journal_dir": "{{DATA_ROOT}}/journal"}
 _AT_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 _OUTPUT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 ROUTINE_LABEL_PREFIX = "dev.cairn.routine."
+SYNC_LABEL_PREFIX = "dev.cairn.sync."
 
 
 def _windowed_sources() -> tuple[str, ...]:
@@ -757,6 +806,119 @@ def _routine_outputs(where: str, value: object, data_root: Path) -> dict[str, Pa
 
 def _positive_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+_SCHEDULE_FIELDS = tuple(f.name for f in fields(SyncSchedule))
+_DEEP_FIELDS = tuple(f.name for f in fields(DeepRecall))
+_DEEP_NULLABLE_INT = {"max_vector_age_h": (1, 8760)}
+_DEEP_INT = {"min_hits": (0, 50), "timeout_s": (1, 600), "n": (1, 50)}
+_DEEP_BOOL = ("auto", "rerank")
+
+
+def _plain_values(where: str, spec: object, allowed: tuple[str, ...]) -> dict:
+    """``spec`` as a dict without ``//`` comments; unknown keys are ``CONFIG_UNKNOWN_KEY``."""
+    if not isinstance(spec, dict):
+        raise ConfigError(f"{where} must be an object, got {type(spec).__name__}")
+    values = {k: v for k, v in spec.items() if not k.startswith("//")}
+    unknown = set(values) - set(allowed)
+    if unknown:
+        raise ConfigError(
+            f"{where} has unknown keys: {', '.join(sorted(unknown))}. "
+            f"Allowed keys: {', '.join(allowed)}.",
+            code="CONFIG_UNKNOWN_KEY",
+        )
+    return values
+
+
+def _choice(where: str, value: object, allowed: tuple[str, ...]) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise ConfigError(f"{where} must be one of {', '.join(allowed)}, got {value!r}")
+    return value
+
+
+def _bool(where: str, value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{where} must be true or false, got {value!r}")
+    return value
+
+
+def _int_in(where: str, value: object, low: int, high: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ConfigError(f"{where} must be an integer from {low} to {high}, got {value!r}")
+    return value
+
+
+def _hhmm(where: str, value: object) -> str:
+    if not isinstance(value, str) or not _AT_RE.match(value):
+        raise ConfigError(f"{where} must be HH:MM in 24-hour local time, got {value!r}")
+    return value
+
+
+def parse_schedule(spec: object) -> SyncSchedule:
+    """Validate the ``cron`` block (section 6 of the nightly-embed spec)."""
+    if spec is None:
+        return SyncSchedule()
+    values = _plain_values("cron", spec, _SCHEDULE_FIELDS)
+    out: dict = {}
+    if "schedule" in values:
+        schedule = values["schedule"]
+        if not isinstance(schedule, str) or len(schedule.split()) != 5:
+            raise ConfigError(
+                f"cron.schedule must be a 5-field crontab expression, got {schedule!r}"
+            )
+        out["schedule"] = schedule
+    if "backend" in values:
+        out["backend"] = _choice("cron.backend", values["backend"], SCHEDULE_BACKENDS)
+    if "priority" in values:
+        out["priority"] = _choice("cron.priority", values["priority"], SCHEDULE_PRIORITIES)
+    if "embed" in values:
+        out["embed"] = _choice("cron.embed", values["embed"], EMBED_MODES)
+    for key in ("embed_at", "embed_deadline"):
+        if key in values:
+            out[key] = _hhmm(f"cron.{key}", values[key])
+    if "embed_max_sessions" in values:
+        out["embed_max_sessions"] = _int_in(
+            "cron.embed_max_sessions", values["embed_max_sessions"], 1, MAX_EMBED_SESSIONS
+        )
+    if "embed_on_battery" in values:
+        out["embed_on_battery"] = _choice(
+            "cron.embed_on_battery", values["embed_on_battery"], EMBED_ON_BATTERY
+        )
+    if "embed_catchup" in values:
+        out["embed_catchup"] = _bool("cron.embed_catchup", values["embed_catchup"])
+    return SyncSchedule(**out)
+
+
+def parse_recall(spec: object) -> RecallPolicy:
+    """Validate the ``recall`` block (``recall.deep``)."""
+    if spec is None:
+        return RecallPolicy()
+    values = _plain_values("recall", spec, ("deep",))
+    if "deep" not in values:
+        return RecallPolicy()
+    deep = _plain_values("recall.deep", values["deep"], _DEEP_FIELDS)
+    out: dict = {}
+    for key in _DEEP_BOOL:
+        if key in deep:
+            out[key] = _bool(f"recall.deep.{key}", deep[key])
+    for key, (low, high) in _DEEP_INT.items():
+        if key in deep:
+            out[key] = _int_in(f"recall.deep.{key}", deep[key], low, high)
+    for key, (low, high) in _DEEP_NULLABLE_INT.items():
+        if key in deep and deep[key] is not None:
+            out[key] = _int_in(f"recall.deep.{key}", deep[key], low, high)
+        elif key in deep:
+            out[key] = None
+    if "min_top_score" in deep:
+        score = deep["min_top_score"]
+        if score is not None and (
+            isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= 1
+        ):
+            raise ConfigError(
+                f"recall.deep.min_top_score must be a number from 0 to 1 or null, got {score!r}"
+            )
+        out["min_top_score"] = None if score is None else float(score)
+    return RecallPolicy(deep=DeepRecall(**out))
 
 
 def _parse_routine(
@@ -911,7 +1073,8 @@ def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig
         name: _parse_collection(name, spec) for name, spec in data["collections"].items()
     }
 
-    cron_schedule = str((data.get("cron") or {}).get("schedule", DEFAULT_CRON_SCHEDULE))
+    schedule = parse_schedule(data.get("cron"))
+    recall = parse_recall(data.get("recall"))
     raw_invoke = data.get("invoke")
     if raw_invoke is None:
         raw_invoke = {}
@@ -929,7 +1092,7 @@ def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig
         config_path=config_path,
         data_root=data_root,
         qmd_binary=data.get("qmd_binary", "qmd"),
-        cron_schedule=cron_schedule,
+        cron_schedule=schedule.schedule,
         home=home,
         code_prefix=code_prefix,
         superset_prefix=superset_prefix,
@@ -940,6 +1103,8 @@ def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig
         collections=collections,
         invoke=invoke,
         routines=routines,
+        schedule=schedule,
+        recall=recall,
     )
 
 
@@ -967,6 +1132,8 @@ __all__ = [
     "BILLING_ROUTES",
     "CONFIG_FILENAME",
     "DEFAULT_CRON_SCHEDULE",
+    "EMBED_MODES",
+    "EMBED_ON_BATTERY",
     "ENV_OVERRIDE",
     "EXAMPLE_FILENAME",
     "INVOKE_PEERS",
@@ -974,17 +1141,23 @@ __all__ = [
     "PROFILES",
     "PROFILE_PEERS",
     "ROUTINE_PEERS",
+    "SCHEDULE_BACKENDS",
+    "SCHEDULE_PRIORITIES",
+    "SYNC_LABEL_PREFIX",
     "TEMPLATE_TOKEN_RE",
     "BillingPolicy",
     "CairnConfig",
     "Collection",
     "ConfigError",
+    "DeepRecall",
     "InvokePolicy",
     "PeerPolicy",
     "ProfileSpec",
+    "RecallPolicy",
     "RoutineSpec",
     "ServiceSource",
     "SyncPolicy",
+    "SyncSchedule",
     "check_profile_args",
     "claude_slug",
     "example_template_text",
@@ -994,6 +1167,8 @@ __all__ = [
     "find_repo_root",
     "get_config",
     "load_config_from",
+    "parse_recall",
+    "parse_schedule",
     "profile_names",
     "resolve_profile",
     "routine_paths",

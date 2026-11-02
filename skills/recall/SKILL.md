@@ -1,7 +1,7 @@
 ---
 name: recall
-description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the shared exported store via the cairn CLI; topic queries search across QMD collections (BM25) plus an exact-match ripgrep pass; decision queries list recorded decisions. Every recall ends with "One Thing" - the single highest-leverage next action synthesised from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context from past sessions", "what was I doing", "session history", "digest yesterday", "daily digest", "cite the frame", "what did we decide", "list our decisions", "verify journal citations", "missing sessions", or "why can't recall see". Requires the cairn CLI and qmd (install with the setup skill); rg is optional.
-argument-hint: [yesterday|today|last week|this week|YYYY-MM-DD|TOPIC]
+description: Loads context from previous sessions and notes. Temporal queries (yesterday, last week, a date) list sessions chronologically from the shared exported store via the cairn CLI; topic queries search across QMD collections (BM25, plus one hybrid query when asked or when BM25 finds too little) plus an exact-match ripgrep pass; decision queries list recorded decisions. Every recall ends with "One Thing" - the single highest-leverage next action synthesised from the results. Use when the user says "recall", "what did we work on", "load context about", "remember when we", "prime context from past sessions", "what was I doing", "session history", "digest yesterday", "daily digest", "cite the frame", "what did we decide", "list our decisions", "verify journal citations", "missing sessions", "why can't recall see", "deep recall", or "search harder". Requires the cairn CLI and qmd (install with the setup skill); rg is optional.
+argument-hint: "[yesterday|today|last week|this week|YYYY-MM-DD|TOPIC] [--deep]"
 allowed-tools: Bash(cairn:*), Bash(qmd:*), Bash(rg:*), Bash(head:*)
 ---
 
@@ -26,6 +26,9 @@ Codex):
   "what was I doing") → Step 2. A digest of a day, or recall that must cite its
   sources → the `digest` block in Step 2.
 - **Topic** - a subject ("auth flow", "the QMD migration", "onboarding") → Step 3.
+- **Deep** - a topic query with "deep recall", "search harder", "dig deeper" or `--deep`, or
+  the user says they do not remember the words used or hedges the wording ("something
+  like", "that thing about") → Step 3 with `--deep` on the first search.
 - **Both** - temporal + topic ("what did I do with auth yesterday") → Step 2, then filter
   the listed sessions for the topic (or run Step 3 scoped to that window).
 - **Decision** - "what did we decide about X", "list our decisions" → the Decisions
@@ -141,7 +144,7 @@ the counts and every failure with its reason.
 
 → Go to Step 4 (Gaps).
 
-## Step 3: Topic recall (QMD search + rg)
+## Step 3: Topic recall (BM25, hybrid when needed, and rg)
 
 1. **Enumerate the collections to search** - do not hardcode or guess names. Run the
    gaps report once, in parallel with it (Step 4 reads it):
@@ -159,20 +162,46 @@ the counts and every failure with its reason.
    words the session actually used. Generate 3–4 alternative phrasings (synonyms / related
    terms) for the topic.
 
-3. **Search** all variants across the relevant collections (BM25 - fast, ~0.3s each), and
-   run them in parallel:
+3. **Search** with one command. It runs BM25 for the query and every variant, and runs
+   one deep search (hybrid BM25 + vectors, `qmd query`; the command calls it `hybrid` in
+   its output) only when it is asked to or when BM25 finds too little:
 
    ```bash
-   qmd search "VARIANT" -c COLLECTION -n 5
+   cairn recall search "QUERY" -q "VARIANT 1" -q "VARIANT 2" -q "VARIANT 3" -c COLLECTION -n 5 --json
    ```
 
-   Prioritise session collections for "what did we do" questions; include `notes` /
-   `granola-sessions` / `service-docs` as relevant. Use `qmd search` (BM25), **not**
-   `qmd query` (hybrid) - speed matters here.
+   Repeat `-c` for each relevant collection, or omit it to search all of them. Prioritise
+   session collections for "what did we do" questions; include `notes` /
+   `granola-sessions` / `service-docs` as relevant.
+
+   **When to add `--deep`.** A deep search takes 10 to 30 seconds and uses the GPU, so
+   it is rare and bounded:
+
+   - Add `--deep` to the first command when Step 1 classified the query as **Deep**, or
+     when an earlier recall in this conversation found nothing on the same topic. Do not
+     add it only because the query is a concept or a question: the check below decides.
+   - After the first command, run it once more with `--deep` only when `hybrid.status`
+     is `not-needed` and none of the results, read by title and snippet, is about the
+     topic. Any other `hybrid.status` means a deep search already ran or was skipped
+     for a reason: do not retry it.
+   - Never add `--deep` for an identifier, error string, file path or name (the rg pass
+     in step 4 finds those), for a temporal query, or when every hit is from one
+     unrelated project or outside the period the user named. A deep search does not fix
+     scope; say so and offer to narrow with `-c` or a date.
+   - Before any `--deep` command, tell the user in one line that a deep search takes up
+     to about 30 seconds. Never run more than one `--deep` command in one recall.
+
+   Read `results` (each has `file`, `title`, `snippet` and `label`) and `hybrid`. If
+   `hybrid.note` is not null, print it as one line under the results.
+
+   If `cairn recall search` fails with `invalid choice` (an older cairn), or exits 1,
+   run `qmd search "VARIANT" -c COLLECTION -n 5` for each variant in parallel instead,
+   as before, and say in one line that deep recall needs a newer cairn or that the
+   search command failed. Use `qmd search` (BM25) for this fallback, not `qmd query`.
 
 4. **Exact-match pass (rg).** If the topic contains literal terms - an identifier, error
    string, file path, product or person name - run one rg pass for them in parallel with
-   the BM25 searches. BM25 tokenises such terms badly, and rg also sees files that QMD has
+   step 3. BM25 tokenises such terms badly, and rg also sees files that QMD has
    not indexed yet. Skip this step if rg is not installed.
 
    Resolve each collection's directory from its `Path:` line (never hardcode paths -
@@ -194,10 +223,17 @@ the counts and every failure with its reason.
    the chosen files only, with `-M 300 -m 5` (a session transcript can hold a single line
    of several megabytes). See the search skill for the full rg rules.
 
-5. **Deduplicate** by document path (keep the highest score); present the top ~5 unique
-   hits. An rg hit at `<collection Path>/<rel>` is the same document as
-   `qmd://COLLECTION/<rel>`. Rank rg-only hits after BM25 hits unless the literal term is
-   the point of the query.
+5. **Merge and label.** `cairn recall search` already merged its own hits by document
+   and labelled each one `bm25`, `hybrid` or `bm25+hybrid`. Add the rg hits: an rg hit at
+   `<collection Path>/<rel>` is the same document as `qmd://COLLECTION/<rel>`, so append
+   `+rg` to that result's label; an rg-only hit gets the label `rg`. Keep the command's
+   order, and rank rg-only hits after the others unless the literal term is the point of
+   the query. Present the top ~5 unique hits, each with its label in brackets:
+
+   ```text
+   1. [bm25+hybrid] qmd://claude-code-sessions/example-app/2026-10-12-3f2a9c1e.md - Renewal terms
+   2. [rg] qmd://notes/vendors/contract.md - Contract notes
+   ```
 
 6. **Fetch full context** for the top 2–3:
 
@@ -305,7 +341,11 @@ as "I have no record".
 
 - Temporal recall reads exported sessions from all configured sources (no QMD needed).
   Use `--refresh` when exports may be stale. The active harness never limits source visibility.
-- Topic recall uses BM25 (`qmd search`), not hybrid (`qmd query`) - much faster inline.
+- Topic recall runs BM25 first. `cairn recall search` adds one deep search (`qmd query`)
+  only on `--deep` or when BM25 finds fewer distinct documents than
+  `recall.deep.min_hits` (default 3). A deep search takes seconds, BM25 a fraction of a
+  second. Vectors are refreshed by a nightly embed, so documents from today are found by
+  BM25 and rg; `hybrid.note` says how many are not embedded yet.
 - The rg pass wins on exact terms (identifiers, error strings, names) and on files that
   were exported after the last `qmd update`.
 - Always enumerate collections with `qmd collection list` rather than assuming a fixed set.

@@ -100,11 +100,16 @@ class TestConfigShow(_ConfigFixture):
                 "data_root",
                 "qmd_binary",
                 "cron_schedule",
+                "cron",
+                "recall",
                 "collections",
                 "invoke",
                 "routines",
             },
         )
+        self.assertEqual(data["cron"]["schedule"], data["cron_schedule"])
+        self.assertEqual(data["cron"]["embed"], "nightly")
+        self.assertEqual(data["recall"]["deep"]["min_hits"], 3)
         self.assertEqual(data["invoke"]["codex"]["model"], "gpt-6-astra")
         self.assertIsNone(data["invoke"]["claude"]["effort"])
         self.assertEqual(data["invoke"]["claude"]["profile"], "review")
@@ -131,6 +136,70 @@ class TestConfigSet(_ConfigFixture):
         data = self._show_json()
         self.assertEqual(data["cron_schedule"], "0 */4 * * *")
         self.assertEqual(data["qmd_binary"], "/opt/qmd")
+
+    def test_set_and_unset_schedule_and_deep_keys(self):
+        self.assertEqual(admin._config_set("cron.embed_at", "02:30"), 0)
+        self.assertEqual(admin._config_set("cron.embed_catchup", "false"), 0)
+        self.assertEqual(admin._config_set("cron.embed_max_sessions", "5"), 0)
+        self.assertEqual(admin._config_set("recall.deep.min_top_score", "null"), 0)
+        self.assertEqual(admin._config_set("recall.deep.timeout_s", "45"), 0)
+        self.assertEqual(admin._config_set("recall.deep.rerank", "true"), 0)
+        config.get_config.cache_clear()
+        data = self._show_json()
+        self.assertEqual(data["cron"]["embed_at"], "02:30")
+        self.assertIs(data["cron"]["embed_catchup"], False)
+        self.assertEqual(data["cron"]["embed_max_sessions"], 5)
+        self.assertIsNone(data["recall"]["deep"]["min_top_score"])
+        self.assertEqual(data["recall"]["deep"]["timeout_s"], 45)
+        self.assertIs(data["recall"]["deep"]["rerank"], True)
+        raw = json.loads(self.cfg_path.read_text())
+        self.assertEqual(raw["cron"]["embed_max_sessions"], 5)  # typed, not "5"
+        code, out, _err = _quiet(admin._config_unset, "recall.deep.timeout_s")
+        self.assertEqual(code, 0, out)
+        code, out, _err = _quiet(admin._config_unset, "cron.embed_at")
+        self.assertEqual(code, 0, out)
+        config.get_config.cache_clear()
+        data = self._show_json()
+        self.assertEqual(data["recall"]["deep"]["timeout_s"], 30)
+        self.assertEqual(data["cron"]["embed_at"], "03:00")
+        code, _out, err = _quiet(admin._config_unset, "cron.embed_at")
+        self.assertEqual(code, 1)
+        self.assertIn("is not set", err)
+
+    def test_set_into_a_null_block(self):
+        data = json.loads(self.cfg_path.read_text())
+        data["recall"] = None
+        data["cron"] = None
+        self.cfg_path.write_text(json.dumps(data))
+        config.get_config.cache_clear()
+        self.assertEqual(admin._config_set("recall.deep.min_hits", "5"), 0)
+        self.assertEqual(admin._config_set("cron.embed", "off"), 0)
+        config.get_config.cache_clear()
+        shown = self._show_json()
+        self.assertEqual(shown["recall"]["deep"]["min_hits"], 5)
+        self.assertEqual(shown["cron"]["embed"], "off")
+
+    def test_invalid_schedule_and_deep_values_are_rejected(self):
+        before = self.cfg_path.read_text()
+        for key, value, expected in (
+            ("cron.embed", "weekly", "cron.embed expects nightly|hourly|off"),
+            ("cron.embed_at", "3am", "cron.embed_at must be HH:MM"),
+            ("cron.embed_max_sessions", "many", "cron.embed_max_sessions expects an integer"),
+            (
+                "cron.embed_max_sessions",
+                "13",
+                "cron.embed_max_sessions must be an integer from 1 to 12",
+            ),
+            ("cron.zz", "1", "unknown cron field 'zz'"),
+            ("recall.deep.min_hits", "lots", "recall.deep.min_hits expects an integer"),
+            ("recall.deep.zz", "1", "unknown recall.deep field 'zz'"),
+            ("recall.other", "1", "unsupported key 'recall.other'"),
+        ):
+            with self.subTest(key=key, value=value):
+                code, out, err = _quiet(admin._config_set, key, value)
+                self.assertEqual(code, 1, err)
+                self.assertIn(expected, out + err)
+                self.assertEqual(self.cfg_path.read_text(), before)
 
     def test_unknown_collection_is_rejected(self):
         self.assertEqual(admin._config_set("bogus.store", "/x"), 1)

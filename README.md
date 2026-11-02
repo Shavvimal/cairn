@@ -92,7 +92,7 @@ For Claude Code:
 /cairn:setup                              # install the CLI, write config, register cron
 ```
 
-`/cairn:setup` installs the engine globally (`uv tool install git+https://github.com/shavvimal/cairn`), writes a per-user config, exports your sessions, **registers the QMD collections, runs the first embed**, and registers an hourly sync — then verifies a real query returns results. After it, the skills work out of the box; there are no manual `qmd` steps.
+`/cairn:setup` installs the engine globally (`uv tool install git+https://github.com/shavvimal/cairn`), writes a per-user config, exports your sessions, **registers the QMD collections, runs the first embed**, and installs an hourly keyword sync and a nightly embed — then verifies a real query returns results. After it, the skills work out of the box; there are no manual `qmd` steps.
 
 Collection registration is automatic and self-healing: every `cairn sync` idempotently runs `qmd collection add` for each enabled collection that has markdown on disk, so sources that produce data later (Cursor/Codex/Granola) register themselves on a subsequent sync — no manual step ever.
 
@@ -176,7 +176,8 @@ Retrieval quality has its own test: `tests/test_recall_qrels.py` runs fixed quer
 ```text
 /recall yesterday              # temporal: scan session history by date
 /recall last week
-/recall authentication work    # topic: BM25 search across QMD collections
+/recall authentication work    # topic: BM25 across QMD collections, one hybrid search when BM25 finds too little
+/recall --deep that pricing idea  # topic: also run one hybrid (vector) search
 /recall digest yesterday       # one day's sessions condensed, every line cited to its frame
 ```
 
@@ -189,7 +190,7 @@ Retrieval quality has its own test: `tests/test_recall_qrels.py` runs fixed quer
 /search ECONNRESET --exact            # exact string or regex, via ripgrep
 ```
 
-`/search` uses QMD BM25 for topics and ripgrep for literal strings (identifiers, error text, paths, session IDs) and regex. ripgrep reads the markdown directly, so it also finds sessions exported after the last index update. The skill resolves each collection's directory from `qmd collection show`, so collections outside cairn's data root (such as your own notes folder) are searched too.
+`/search` uses QMD BM25 for topics and ripgrep for literal strings (identifiers, error text, paths, session IDs) and regex. ripgrep reads the markdown directly, so it also finds sessions exported after the last index update. `/search QUERY --deep` runs one hybrid (BM25 + vector) search through `cairn recall search`; it takes seconds rather than a fraction of a second. The skill resolves each collection's directory from `qmd collection show`, so collections outside cairn's data root (such as your own notes folder) are searched too.
 
 ### `/cairn` — drive the CLI (export, list, annotate, resume)
 
@@ -457,7 +458,8 @@ QMD once a routine has written markdown there.
 `cairn sync` is a single orchestration command; each collection runs as its own subprocess, so one failing source never blocks the others. Two triggers keep context current:
 
 - **SessionEnd hook** — queues the originating Claude or Codex session and starts a detached worker. Export, collection registration and `qmd update` run after the callback returns. Embeddings stay out of this path. Antigravity has no SessionEnd; its `Stop` hook (end of every turn) does the same through `cairn hook handle --harness antigravity`, which always answers `{}` so it never blocks agy.
-- **Hourly cron** (`cairn cron install`) — retries failed work, exports other enabled sources, and maintains embeddings.
+- **Hourly light sync** (`cairn cron install`) — retries failed work, exports every enabled source and runs `qmd update`, so keyword search is at most an hour behind. It does not embed.
+- **Nightly embed** (`cairn cron install`, 03:00 local by default) — embeds what the day added, for up to three QMD embed sessions while the pending count falls. On a laptop it waits for mains power by default (`cron.embed_on_battery`): a deferred night runs at the next hourly sync on AC power. Both jobs run at background priority: LaunchAgents with `ProcessType Background` and `LowPriorityIO` on macOS (launchd also runs a job missed during sleep on wake), crontab lines under `nice` and `ionice` elsewhere. Set `cron.embed` to `hourly` for the old behaviour, or `off` to embed only by hand.
 
 Configure with `cairn hook install --harness claude|codex|antigravity`. The Antigravity
 installer writes one named hook (`cairn`) into the global `~/.gemini/config/hooks.json`,
@@ -484,7 +486,8 @@ no longer pins `CLAUDE_CONFIG_DIR` or `CODEX_HOME` unless the host shell set the
 `CLAUDE_CONFIG_DIR` exported, headless `claude -p` looks for its account file at
 `<CLAUDE_CONFIG_DIR>/.claude.json` instead of `~/.claude.json` and reports `Not logged in`.
 An existing install keeps the old values until `cairn hook install` and `cairn cron install`
-run again.
+run again. Upgrading from 2.20 or earlier: run `cairn cron install` once to replace the
+hourly embedding entry; until then `cairn doctor` warns `SYNC_SCHEDULE_LEGACY`.
 
 Codex SessionEnd occurs on normal shutdown, archive/delete of an open conversation, or
 its idle-session timeout; switching tabs does not immediately end the session. Check
@@ -498,8 +501,12 @@ error even though the request was saved. This POSIX worker uses flock and detach
 no new Windows support is claimed.
 
 ```bash
-cairn sync --hook    # fast: claude-sessions only + qmd update
-cairn sync --cron    # full: all exports + qmd update + qmd embed
+cairn sync --hook      # fast: claude-sessions only + qmd update
+cairn sync --light     # hourly: all exports + qmd update, no embed
+cairn sync --nightly   # nightly: --light, then embed under the power policy
+cairn sync --cron      # full: all exports + qmd update + one qmd embed
+cairn embed --until-complete   # embed sessions now, while the pending count falls
+cairn cron status      # the installed jobs, the last embed and any owed embed
 ```
 
 One `cairn sync` runs per data root at a time. A second one (an hourly cron run that
@@ -516,11 +523,28 @@ documents, vectors and pending documents from `qmd status`. Pending documents le
 the embed fail the run as `INCOMPLETE` (`failed steps: qmd-verify (incomplete)`), which is
 unfinished work, not corruption. The embed step logs `exited 0`; `[qmd-verify]` gives the
 verdict. QMD 1.1.5 and 2.5.3 cap one embed session at 30 minutes, so a large backlog takes
-several runs. Completed documents keep their vectors, but QMD 2.5.3 removes the vectors of
+several sessions: the nightly embed runs up to `cron.embed_max_sessions` (default 3) while
+the pending count falls, and `cairn embed --until-complete` drains the rest at once.
+Completed documents keep their vectors, but QMD 2.5.3 removes the vectors of
 a partly embedded document, so that document restarts on the next run. Check progress with
 the pending count in `cairn doctor`: if it does not fall across runs, a document may never
 fit in one session, so investigate instead of retrying. BM25 keyword search works as soon as a session is exported and `qmd update`
-runs (the SessionEnd hook does both); semantic search waits for the next full sync.
+runs (the SessionEnd hook and the hourly light sync do both); semantic and deep search see it after the next nightly embed.
+
+### Deep recall
+
+`cairn recall search QUERY -q VARIANT... [-c COLLECTION]... [--deep | --no-deep] [--json]`
+runs one `qmd search` (BM25) per phrasing per collection, then at most one hybrid
+`qmd query` and merges the two by document (reciprocal rank fusion, each hit labelled
+`bm25`, `hybrid` or `bm25+hybrid`). The hybrid query runs on `--deep`, or on its own when
+BM25 finds fewer than `recall.deep.min_hits` distinct documents (default 3; a score floor,
+`recall.deep.min_top_score`, is off by default because qmd 2.5.3 BM25 scores cluster between
+0.8 and 0.95 for good and nonsense queries alike). It is skipped, with a one-line note, when
+`qmd status` cannot be read, the index has no vectors, or the last embed is older than
+`recall.deep.max_vector_age_h` (default 72); pending documents do not stop it, the note says
+how many only BM25 can find. `recall.deep.timeout_s` (default 30) kills a slow query with its
+process group; `recall.deep.rerank` (default false) passes `--no-rerank`. Measured once on
+one machine: BM25 0.1 to 0.3 s, hybrid 8 to 24 s without rerank and more under load.
 
 `cairn doctor` probes the configured QMD (`--version`, then `status` as a runtime check)
 and reports pending embeddings. `cairn doctor --strict-index` fails unless the index is

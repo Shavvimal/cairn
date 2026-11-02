@@ -44,6 +44,7 @@ READ_ONLY = (
     (("cairn", "recall", "list"), None),
     (("cairn", "recall", "gaps"), None),
     (("cairn", "recall", "decisions"), None),
+    (("cairn", "cron", "status"), None),
     (("cairn", "instructions", "status"), None),
 )
 

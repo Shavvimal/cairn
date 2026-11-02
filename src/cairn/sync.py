@@ -12,9 +12,9 @@ lock held, records its mode durably under ``<data_root>/sync-requests/<mode>``,
 tries the lock once more (the holder may have just released it), and otherwise
 logs one ``skipped`` line and exits 0. Before releasing the lock, the holder
 consumes those requests and runs, once, the stages a wider request needs that its
-own run did not do (modes widen hook < cron < all). Requests that arrive during
-that follow-up pass stay on disk for the next invocation, so the holder never
-loops. Lock order, outermost first::
+own run did not do (modes widen hook < light < nightly < cron < all). Requests
+that arrive during that follow-up pass stay on disk for the next invocation, so the
+holder never loops. Lock order, outermost first::
 
     sync (this module) > hook worker > export operation > qmd index (locked_index)
 
@@ -33,23 +33,34 @@ from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 
-from .config import CairnConfig, get_config
+from . import power
+from .config import MAX_EMBED_SESSIONS, CairnConfig, get_config
 from .procs import run_capped
 from .qmd import (
+    IndexStatus,
     _has_markdown,
+    clear_owed,
     embed_failures,
     ensure_collection,
     index_status,
     list_collections,
     locked_index,
+    mark_catchup,
+    read_owed,
+    record_embed,
     record_update,
+    write_owed,
 )
 from .registry import SOURCE_COLLECTIONS as SOURCE_COLLECTIONS
 from .registry import SOURCES as _BINDINGS
 from .storage import atomic_write, lock_path, locked
 
 EMBED_TIMEOUT_S = 3600
-MODE_RANK = {"hook": 0, "cron": 1, "all": 2}
+# ``light`` exports and runs ``qmd update`` with no embed (the hourly job); ``nightly``
+# adds the embed loop under the power policy; ``cron`` and ``all`` embed once, as
+# before 2.21. The rank decides which skipped request a running sync services.
+MODE_RANK = {"hook": 0, "light": 1, "nightly": 2, "cron": 3, "all": 4}
+EMBEDDING_MODES = ("nightly", "cron", "all")
 
 
 def _log_file() -> Path:
@@ -197,33 +208,180 @@ def run_embed(qmd: str, timeout: int = EMBED_TIMEOUT_S) -> tuple[bool, bool]:
     return result.returncode == 0 and not problems, True
 
 
-def verify_index(qmd: str) -> str | None:
-    """Log the post-embed index state; return the failed-step label, or None when complete.
+INCOMPLETE = "qmd-verify (incomplete)"
 
-    Pending documents mean the run did not finish the work: ``INCOMPLETE``, a
-    failure distinct from a broken index (QMD skips whitespace-only files before
-    indexing, so they never show up as pending). An empty index is complete. All
-    counts are index-wide.
+
+def verify_index_status(qmd: str) -> tuple[str | None, IndexStatus | None]:
+    """Log the post-embed index state; return ``(failed-step label, status)``.
+
+    The label is None when the index is complete. Pending documents mean the run did
+    not finish the work: ``INCOMPLETE``, a failure distinct from a broken index (QMD
+    skips whitespace-only files before indexing, so they never show up as pending).
+    An empty index is complete. All counts are index-wide. The status is None only
+    when ``qmd status`` could not be read.
     """
     try:
         status = index_status(qmd)
     except RuntimeError as e:
         log(f"  [qmd-verify] FAILED - could not verify the index after embedding: {e}")
-        return "qmd-verify"
+        return "qmd-verify", None
     if status.state == "empty":
         log("  [qmd-verify] ok - empty index: no documents to embed")
     elif status.state == "no-vectors":
         log(f"  [qmd-verify] FAILED - {status.describe()}: no vectors after embedding")
-        return "qmd-verify"
+        return "qmd-verify", status
     elif status.state == "pending":
         log(
-            f"  [qmd-verify] INCOMPLETE - {status.describe()}; "
-            "the next 'cairn sync --cron' continues (see 'cairn doctor' for the pending count)"
+            f"  [qmd-verify] INCOMPLETE - {status.describe()}; the next nightly embed or "
+            "'cairn embed' continues (see 'cairn doctor' for the pending count)"
         )
-        return "qmd-verify (incomplete)"
+        return INCOMPLETE, status
     else:
         log(f"  [qmd-verify] ok - {status.describe()}")
-    return None
+    return None, status
+
+
+def verify_index(qmd: str) -> str | None:
+    """The failed-step label of :func:`verify_index_status`, or None when complete."""
+    return verify_index_status(qmd)[0]
+
+
+def local_now() -> datetime:
+    """The local wall clock (a seam for the deadline and catch-up tests)."""
+    return datetime.now()
+
+
+def _past_deadline(deadline: str) -> bool:
+    hour, minute = (int(part) for part in deadline.split(":"))
+    now = local_now()
+    return (now.hour, now.minute) >= (hour, minute)
+
+
+def embed_loop(
+    config: CairnConfig,
+    record,
+    *,
+    nightly: bool,
+    mode: str,
+    max_sessions: int | None = None,
+    respect_power: bool | None = None,
+) -> str:
+    """Run up to ``max_sessions`` QMD embed sessions while the pending count falls.
+
+    QMD stops one embed session after 30 minutes and exits 0, so a backlog needs
+    several sessions. Each session takes the index lock on its own, so a hook worker
+    waiting on it runs its ``qmd update`` between sessions; the sync lock stays held
+    for the whole loop. Returns the outcome written to the embed stamp:
+    ``complete``, ``incomplete``, ``stalled``, ``failed``, ``deferred`` or
+    ``skipped``. Only the last session's verdict is recorded as a failed step, so a
+    backlog that a later session finishes does not fail the run.
+    """
+    qmd = config.qmd_binary
+    policy = config.schedule
+    if max_sessions is None:
+        max_sessions = policy.embed_max_sessions if nightly else 1
+    if respect_power is None:
+        respect_power = nightly
+    outcome = "failed"
+    sessions = 0
+    status: IndexStatus | None = None
+    previous_pending: int | None = None
+    embedded = exited = True
+    label: str | None = None
+
+    def stop_before(n: int) -> str | None:
+        """``None`` to run session ``n``, else the outcome that ends the loop here.
+
+        Checked after the index lock is taken: a wait behind another writer can
+        cross the deadline or a change to battery power.
+        """
+        if n > 1 and nightly and _past_deadline(policy.embed_deadline):
+            log(
+                f"  [qmd-embed] stopped - embed_deadline {policy.embed_deadline} reached "
+                f"after {n - 1} sessions"
+            )
+            return outcome
+        if respect_power and power.power_source() == "battery":
+            if n > 1:
+                log(f"  [qmd-embed] stopped - on battery power after {n - 1} sessions")
+                write_owed("battery")
+                return outcome
+            if policy.embed_on_battery == "defer":
+                log(
+                    "  [qmd-embed] deferred - on battery power; "
+                    "the next light sync on AC power runs it"
+                )
+                write_owed("battery")
+                return "deferred"
+            if policy.embed_on_battery == "skip":
+                log("  [qmd-embed] skipped - on battery power; the next nightly run tries again")
+                return "skipped"
+        return None
+
+    for n in range(1, max_sessions + 1):
+        with locked_index():
+            stopped = stop_before(n)
+            if stopped in ("deferred", "skipped"):
+                record_embed(stopped, mode, 0, None)
+                return stopped
+            if stopped is not None:
+                break
+            log(f"  [qmd-embed] session {n}/{max_sessions}")
+            embedded, exited = run_embed(qmd)
+            label, status = verify_index_status(qmd) if exited else ("qmd-embed", None)
+        sessions = n
+        if label is None:
+            outcome = "complete"
+        elif label == INCOMPLETE and status is not None:
+            outcome = "incomplete"
+            if previous_pending is not None and status.pending >= previous_pending:
+                outcome = "stalled"
+                log(
+                    f"  [qmd-verify] STALLED - pending stayed at {status.pending} after "
+                    f"session {n}; a document may never fit in one 30-minute session. "
+                    "Investigate instead of retrying."
+                )
+            previous_pending = status.pending
+        else:
+            outcome = "failed"
+        record_embed(outcome, mode, sessions, status, exited=exited)
+        if outcome != "incomplete":
+            break
+    if sessions:
+        record("qmd-embed", embedded)
+        if outcome == "stalled":
+            record("qmd-verify (stalled)", False)
+        elif label is not None and label != "qmd-embed":
+            record(label, False)
+    record_embed(outcome, mode, sessions, status, exited=exited)
+    if outcome == "complete":
+        clear_owed()
+    return outcome
+
+
+def maybe_catch_up(config: CairnConfig, record, *, updated: bool) -> None:
+    """After a light run: run the embed a battery night deferred, once a day on mains.
+
+    Only a battery deferral writes the owed marker, so a large backlog never turns the
+    hourly job back into an hourly embed. A ``complete`` outcome deletes the marker;
+    an ``incomplete`` one keeps it for the next nightly run. A failed ``qmd update``
+    skips it: the embed would miss what was just exported.
+    """
+    policy = config.schedule
+    owed = read_owed()
+    if owed is None or policy.embed != "nightly" or not policy.embed_catchup:
+        return
+    if not updated:
+        log("  [embed-catchup] skipped - qmd-update failed")
+        return
+    if power.power_source() == "battery":
+        return
+    today = local_now().strftime("%Y-%m-%d")
+    if owed.get("catchup_on") == today:
+        return
+    mark_catchup(today)
+    log(f"  [embed-catchup] running the embed deferred at {owed['since']}")
+    embed_loop(config, record, nightly=False, mode="light", max_sessions=1, respect_power=True)
 
 
 def run_inproc(name, fn):
@@ -285,15 +443,26 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cairn sync",
         description="Sync context collections and update the QMD index",
     )
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--hook",
         action="store_true",
         help="Legacy fast sync: Claude by default, explicit on_hook overrides; new hooks use cairn hook handle",
     )
-    parser.add_argument(
-        "--cron", action="store_true", help="Full mode for the cron job (all sources)"
+    modes.add_argument(
+        "--light",
+        action="store_true",
+        help="Hourly job: every enabled source and 'qmd update', no embed",
     )
-    parser.add_argument(
+    modes.add_argument(
+        "--nightly",
+        action="store_true",
+        help="Nightly job: --light, then QMD embed sessions under the power policy",
+    )
+    modes.add_argument(
+        "--cron", action="store_true", help="Full mode: all sources, 'qmd update' and one embed"
+    )
+    modes.add_argument(
         "--all",
         action="store_true",
         help="Sync all enabled sources and embed incrementally (same as --cron)",
@@ -301,11 +470,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _mode(args: argparse.Namespace) -> str:
+    for mode in ("hook", "light", "nightly", "cron"):
+        if getattr(args, mode):
+            return mode
+    return "all"
+
+
 def main(argv: list[str] | None = None):
     args = build_parser().parse_args(argv)
 
     config = get_config()
-    mode = "hook" if args.hook else ("cron" if args.cron else "all")
+    mode = _mode(args)
     sync_lock = lock_path(config.data_root, "sync")
     with ExitStack() as stack:
         try:
@@ -358,8 +534,8 @@ def _registered(config: CairnConfig) -> list[str]:
     ]
 
 
-def _index_stages(config: CairnConfig, embed: bool, record) -> None:
-    """Collections, ``qmd update`` and (if ``embed``) embed + verify, under the index lock."""
+def _index_stages(config: CairnConfig, record) -> bool:
+    """Collections and ``qmd update`` under the index lock; return whether the update ran."""
     qmd = config.qmd_binary
     with locked_index():
         record(
@@ -372,33 +548,54 @@ def _index_stages(config: CairnConfig, embed: bool, record) -> None:
         record("qmd-update", updated)
         if updated:
             record_update(started_ns, registered)
-        if not embed:
-            return
-        if not updated:
-            log("  [qmd-embed] skipped - qmd-update failed")
-            return
-        embedded, exited = run_embed(qmd)
-        record("qmd-embed", embedded)
-        if exited:
-            label = verify_index(qmd)
-            record(label or "qmd-verify", label is None)
+    return updated
 
 
-def _stages(config: CairnConfig, mode: str, record, exported: set[str]) -> None:
-    """Run ``mode``'s stages; skip exports already in ``exported`` (and add new ones)."""
+class RunState:
+    """What a run has done so far, for the follow-up pass: the exports it ran, whether
+    its ``qmd update`` succeeded and whether an embed session ran (a deferred or
+    skipped night embedded nothing)."""
+
+    def __init__(self) -> None:
+        self.exported: set[str] = set()
+        self.updated = False
+        self.embedded = False
+
+
+def _embed_stages(config: CairnConfig, mode: str, record, state: RunState) -> None:
+    """The embed that ``mode`` owes after the index update: none for hook and light."""
+    if mode not in EMBEDDING_MODES:
+        return
+    if not state.updated:
+        log("  [qmd-embed] skipped - qmd-update failed")
+        return
+    if mode == "nightly":
+        outcome = embed_loop(config, record, nightly=True, mode=mode)
+    else:
+        outcome = embed_loop(
+            config, record, nightly=False, mode=mode, max_sessions=1, respect_power=False
+        )
+    state.embedded = state.embedded or outcome not in ("deferred", "skipped")
+
+
+def _stages(config: CairnConfig, mode: str, record, state: RunState) -> None:
+    """Run ``mode``'s stages; skip exports already in ``state.exported`` (and add new ones)."""
     from .hooks import worker
 
     if mode != "hook":
         record("hook-worker", worker(config) == 0)
-    steps = [(name, command) for name, command in _plan(config, mode) if name not in exported]
-    if not steps and not exported:
+    steps = [(name, command) for name, command in _plan(config, mode) if name not in state.exported]
+    if not steps and not state.exported:
         log("  (no enabled sources for this mode - check 'sync.enabled' in your config)")
     for name, command in steps:
         record(name, run_step(name, command))
-        exported.add(name)
+        state.exported.add(name)
     if mode != "hook":
         _exporter_stages(config, record)
-    _index_stages(config, embed=mode != "hook", record=record)
+    state.updated = _index_stages(config, record)
+    _embed_stages(config, mode, record, state)
+    if mode == "light":
+        maybe_catch_up(config, record, updated=state.updated)
 
 
 def _exporter_stages(config: CairnConfig, record) -> None:
@@ -458,7 +655,7 @@ def log_drift(config: CairnConfig) -> None:
     log(f"  [exporter-drift] {len(found)} open findings: {shown}{more}")
 
 
-def _follow_up(config: CairnConfig, mode: str, record, exported: set[str]) -> None:
+def _follow_up(config: CairnConfig, mode: str, record, state: RunState) -> None:
     """Service skipped requests once. A wider mode runs the stages this run skipped;
     a full run answering a full request re-runs only the hook-worker retry pass (a
     request that failed after the first pass); anything narrower is just consumed."""
@@ -469,7 +666,13 @@ def _follow_up(config: CairnConfig, mode: str, record, exported: set[str]) -> No
         return
     if MODE_RANK[requested] > MODE_RANK[mode] and mode == "hook":
         log(f"  [coalesced] a skipped '{requested}' sync arrived; running its remaining stages")
-        _stages(config, requested, record, exported)
+        _stages(config, requested, record, state)
+    elif requested in EMBEDDING_MODES and not state.embedded and mode != "hook":
+        # This run exported and updated the index but embedded nothing (a light run,
+        # or a night deferred on battery); the request's embed is still owed. A
+        # nightly request after a deferred night follows the same power policy.
+        log(f"  [coalesced] a skipped '{requested}' sync arrived; running its embed")
+        _embed_stages(config, requested, record, state)
     elif requested != "hook" and mode != "hook":
         log(f"  [coalesced] a skipped '{requested}' sync arrived; retrying hook requests")
         record("hook-worker", worker(config) == 0)
@@ -488,10 +691,10 @@ def _run(config: CairnConfig, mode: str) -> int:
         if not ok:
             failed.append(name)
 
-    exported: set[str] = set()
+    state = RunState()
     try:
-        _stages(config, mode, record, exported)
-        _follow_up(config, mode, record, exported)
+        _stages(config, mode, record, state)
+        _follow_up(config, mode, record, state)
     except Exception:
         import traceback
 
@@ -510,6 +713,93 @@ def _run(config: CairnConfig, mode: str) -> int:
         log(f"  failed steps: {', '.join(failed)}")
     log("=== FAILED ===" if failed else "=== done ===")
     return 1 if failed else 0
+
+
+def build_embed_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="cairn embed",
+        description=(
+            "Run QMD embed sessions now, after a 'qmd update': drains a backlog that the "
+            "nightly embed has not finished. Exit 0 on complete, deferred or skipped; 1 on "
+            "incomplete, stalled or failed; 3 when another cairn sync is running."
+        ),
+    )
+    count = parser.add_mutually_exclusive_group()
+    count.add_argument(
+        "--sessions",
+        type=int,
+        default=1,
+        metavar="N",
+        help=f"embed sessions to run while the pending count falls (1 to {MAX_EMBED_SESSIONS})",
+    )
+    count.add_argument(
+        "--until-complete",
+        action="store_true",
+        help=f"run up to {MAX_EMBED_SESSIONS} sessions; a stalled count still stops it",
+    )
+    parser.add_argument(
+        "--respect-power",
+        action="store_true",
+        help="apply cron.embed_on_battery (off by default: you asked for the embed)",
+    )
+    return parser
+
+
+EMBED_EXIT = {"complete": 0, "deferred": 0, "skipped": 0}
+
+
+def embed_main(argv: list[str] | None = None) -> int:
+    parser = build_embed_parser()
+    args = parser.parse_args(argv)
+    if not 1 <= args.sessions <= MAX_EMBED_SESSIONS:
+        parser.error(f"--sessions must be from 1 to {MAX_EMBED_SESSIONS}")
+    sessions = MAX_EMBED_SESSIONS if args.until_complete else args.sessions
+    config = get_config()
+    sync_lock = lock_path(config.data_root, "sync")
+    try:
+        with locked(sync_lock, blocking=False):
+            return _run_embed_command(config, sessions, args.respect_power)
+    except BlockingIOError:
+        print(
+            f"another cairn sync is running for {config.data_root}; "
+            "run 'cairn embed' again after it finishes",
+            file=sys.stderr,
+        )
+        return 3
+
+
+def _run_embed_command(config: CairnConfig, sessions: int, respect_power: bool) -> int:
+    rotate_log()
+    log(f"\n=== context-sync (embed) {datetime.now().isoformat()} ===")
+    failed: list[str] = []
+
+    def record(name: str, ok: bool) -> None:
+        if not ok:
+            failed.append(name)
+
+    outcome = "failed"
+    try:
+        updated = _index_stages(config, record)
+        if updated:
+            outcome = embed_loop(
+                config,
+                record,
+                nightly=False,
+                mode="embed",
+                max_sessions=sessions,
+                respect_power=respect_power,
+            )
+        else:
+            log("  [qmd-embed] skipped - qmd-update failed")
+    except Exception:
+        import traceback
+
+        failed.append("uncaught-error")
+        log("UNCAUGHT ERROR:\n" + traceback.format_exc())
+    if failed:
+        log(f"  failed steps: {', '.join(failed)}")
+    log("=== FAILED ===" if failed else "=== done ===")
+    return 1 if failed else EMBED_EXIT.get(outcome, 1)
 
 
 if __name__ == "__main__":

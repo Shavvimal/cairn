@@ -14,7 +14,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from cairn import config, decisions, recall
+from cairn import config, decisions, recall, routine
 from cairn.frontmatter import extract_my_notes_section, parse_frontmatter
 from cairn.harnesses import get_harness
 from cairn.store import SCHEMA_VERSION, SessionStore, bounded_content
@@ -32,6 +32,19 @@ HOST_IDENTITY_HINTS = (
     "CAIRN_INVOKE_DEPTH",
     "CAIRN_INVOKE_CALLER",
 )
+
+
+_REAL_LAUNCHCTL = routine.launchctl
+
+
+def _no_launchctl(*args, timeout=None):
+    """The fixture's launchctl: read-only probes run, anything that loads or unloads a
+    job is refused, so an unpatched install can never reach the developer's launchd."""
+    if args[0] in ("print", "list"):
+        return _REAL_LAUNCHCTL(*args, timeout=timeout)
+    return subprocess.CompletedProcess(
+        ["launchctl", *args], 113, "", "launchctl is disabled under the test fixture"
+    )
 
 
 class StoreFixture(unittest.TestCase):
@@ -84,6 +97,12 @@ class StoreFixture(unittest.TestCase):
         config.get_config.cache_clear()
         self.addCleanup(self.patch.stop)
         self.addCleanup(config.get_config.cache_clear)
+        # No test may reach the developer's launchd: a routine or sync-schedule test
+        # replaces this fake with its own recorder. The fake fails every call, so an
+        # unpatched install exits 1 instead of loading a plist from the temp root.
+        guard = patch("cairn.routine.launchctl", _no_launchctl)
+        guard.start()
+        self.addCleanup(guard.stop)
 
     # Lists the two collections for any subcommand; `status` reports a complete index.
     FAKE_QMD_BODY = (

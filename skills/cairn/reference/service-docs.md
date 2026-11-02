@@ -24,7 +24,8 @@ No transformation - copies markdown files verbatim, preserving directory structu
 Sync is **incremental**: it compares content hashes and copies only changed files.
 Deleted source files are cleaned up from the mirror. `--clean` forces a full re-mirror.
 
-Indexing happens automatically via `cairn sync --cron` (hourly). Manual reindex:
+Indexing happens automatically through the hourly light sync, and vectors through the
+nightly embed. Manual reindex:
 `qmd update && qmd embed`.
 
 ## Source repos (the source-repos concept)

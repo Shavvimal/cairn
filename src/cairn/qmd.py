@@ -234,6 +234,170 @@ def _iso(ns: int) -> str:
     return datetime.fromtimestamp(ns / 1e9, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _now_iso() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_iso(value: object) -> datetime | None:
+    """A ``YYYY-MM-DDTHH:MM:SSZ`` stamp as an aware datetime, else ``None``."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Embed stamp and owed marker: what the last ``qmd embed`` did
+# ---------------------------------------------------------------------------
+#
+# No QMD output says when vectors were last refreshed, so cairn records each embed
+# run next to the index stamp. ``cairn recall search`` reads it to decide whether a
+# hybrid query is worth running, and ``cairn doctor`` and ``cairn cron status`` show
+# it. The owed marker records a nightly embed deferred on battery power; the next
+# light sync on mains power runs it (``cairn sync --light``).
+
+EMBED_OUTCOMES = ("complete", "incomplete", "stalled", "failed", "deferred", "skipped")
+
+
+def embed_stamp_path() -> Path:
+    """``$XDG_STATE_HOME/cairn/qmd-embed.json``."""
+    return state_home() / "cairn" / "qmd-embed.json"
+
+
+def owed_path() -> Path:
+    """``$XDG_STATE_HOME/cairn/embed-owed.json``."""
+    return state_home() / "cairn" / "embed-owed.json"
+
+
+def _current_database() -> str:
+    return str(qmd_resources()[1])
+
+
+def record_embed(
+    outcome: str,
+    mode: str,
+    sessions: int,
+    status: IndexStatus | None,
+    *,
+    exited: bool = True,
+) -> dict:
+    """Write the embed stamp; return the payload written.
+
+    ``last_embed_at`` moves when QMD ran a session to a normal exit (any outcome but
+    ``deferred`` and ``skipped``, and only when ``exited``: a session that timed out
+    or never started refreshed nothing); ``last_complete_at`` moves on ``complete``.
+    Both are copied forward from the previous stamp otherwise. A failed write warns
+    on stderr and never fails the caller.
+    """
+    if outcome not in EMBED_OUTCOMES:
+        raise ValueError(f"unknown embed outcome {outcome!r}")
+    previous = read_embed_stamp() or {}
+    now = _now_iso()
+    ran = exited and outcome not in ("deferred", "skipped")
+    payload = {
+        "version": STAMP_VERSION,
+        "database": _current_database(),
+        "finished_at": now,
+        "outcome": outcome,
+        "mode": mode,
+        "sessions": sessions,
+        "documents": status.documents if status else previous.get("documents"),
+        "vectors": status.vectors if status else previous.get("vectors"),
+        "pending": status.pending if status else previous.get("pending"),
+        "last_embed_at": now if ran else previous.get("last_embed_at"),
+        "last_complete_at": now if outcome == "complete" else previous.get("last_complete_at"),
+    }
+    try:
+        atomic_write(embed_stamp_path(), json.dumps(payload) + "\n")
+    except OSError as exc:
+        print(f"Warning: could not record the qmd embed outcome: {exc}", file=sys.stderr)
+    return payload
+
+
+def read_embed_stamp() -> dict | None:
+    """The embed stamp, or ``None`` when missing, corrupt, another version or another
+    database than the current ``INDEX_PATH``."""
+    try:
+        data = json.loads(embed_stamp_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(data, dict)
+        or data.get("version") != STAMP_VERSION
+        or not isinstance(data.get("database"), str)
+        or data.get("outcome") not in EMBED_OUTCOMES
+        or parse_iso(data.get("finished_at")) is None
+        or type(data.get("sessions")) is not int
+    ):
+        return None
+    for key in ("last_embed_at", "last_complete_at"):
+        if data.get(key) is not None and parse_iso(data.get(key)) is None:
+            return None
+    if data["database"] != _current_database():
+        return None
+    return data
+
+
+def write_owed(reason: str) -> None:
+    """Record a deferred embed; keeps the earlier ``since`` when a marker exists."""
+    previous = read_owed()
+    payload = {
+        "version": STAMP_VERSION,
+        "database": _current_database(),
+        "since": previous["since"] if previous else _now_iso(),
+        "reason": reason,
+        "catchup_on": previous.get("catchup_on") if previous else None,
+    }
+    try:
+        atomic_write(owed_path(), json.dumps(payload) + "\n")
+    except OSError as exc:
+        print(f"Warning: could not record the owed embed: {exc}", file=sys.stderr)
+
+
+def mark_catchup(day: str) -> None:
+    """Note that a catch-up embed ran on local date ``day`` (at most one a day)."""
+    owed = read_owed()
+    if owed is None:
+        return
+    owed["catchup_on"] = day
+    try:
+        atomic_write(owed_path(), json.dumps(owed) + "\n")
+    except OSError as exc:
+        print(f"Warning: could not record the catch-up day: {exc}", file=sys.stderr)
+
+
+def read_owed() -> dict | None:
+    """The owed marker for the current database, else ``None``."""
+    try:
+        data = json.loads(owed_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(data, dict)
+        or data.get("version") != STAMP_VERSION
+        or not isinstance(data.get("database"), str)
+        or parse_iso(data.get("since")) is None
+        or not isinstance(data.get("reason"), str)
+        or not (data.get("catchup_on") is None or isinstance(data.get("catchup_on"), str))
+    ):
+        return None
+    if data["database"] != _current_database():
+        return None
+    return data
+
+
+def clear_owed() -> None:
+    """Remove the owed marker when it belongs to the current database."""
+    if read_owed() is None:
+        return  # absent, corrupt, or another database's debt
+    try:
+        owed_path().unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"Warning: could not remove the owed-embed marker: {exc}", file=sys.stderr)
+
+
 def record_update(started_ns: int, collections: Iterable[str]) -> None:
     """Write the index stamp after a ``qmd update`` that exited 0.
 
@@ -473,24 +637,34 @@ def embed_failures(output: str) -> list[str]:
 
 
 __all__ = [
+    "EMBED_OUTCOMES",
     "STAMP_VERSION",
     "CollectionInfo",
     "IndexStatus",
     "StatusFormatError",
     "add_context",
+    "clear_owed",
     "collection_details",
     "embed_failures",
+    "embed_stamp_path",
     "ensure_collection",
     "index_status",
     "list_collections",
+    "mark_catchup",
+    "owed_path",
     "parse_collection_list",
+    "parse_iso",
     "parse_status",
     "parse_version",
     "qmd_version",
+    "read_embed_stamp",
+    "read_owed",
     "read_stamp",
+    "record_embed",
     "record_update",
     "register_context",
     "register_descriptions",
     "stamp_path",
     "strip_ansi",
+    "write_owed",
 ]

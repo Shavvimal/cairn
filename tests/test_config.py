@@ -82,6 +82,8 @@ class TestConfigPrecedence(unittest.TestCase):
             "billing": lambda d: d["invoke"]["antigravity"]["billing"],
             "profile": lambda d: d["invoke"]["claude"]["profiles"]["scheduled"],
             "routine": lambda d: d["routines"]["example-daily"],
+            "cron": lambda d: d["cron"],
+            "deep": lambda d: d["recall"]["deep"],
         }
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "my.json"
@@ -122,6 +124,65 @@ class TestConfigPrecedence(unittest.TestCase):
             target.write_text("{}", encoding="utf-8")
             self.assertEqual(config.user_config_path(), target)
             self.assertEqual(config._config_path(), target)
+
+
+class TestScheduleAndRecallBlocks(unittest.TestCase):
+    """``cron.*`` and ``recall.deep.*``: defaults when absent, CONFIG_INVALID naming the key."""
+
+    def test_defaults_when_absent(self):
+        self.assertEqual(config.parse_schedule(None), config.SyncSchedule())
+        self.assertEqual(config.parse_schedule({}), config.SyncSchedule())
+        self.assertEqual(config.parse_recall(None), config.RecallPolicy())
+        self.assertEqual(config.parse_recall({"deep": {}}), config.RecallPolicy())
+        self.assertEqual(config.SyncSchedule().schedule, config.DEFAULT_CRON_SCHEDULE)
+        self.assertEqual(config.DeepRecall().max_vector_age_h, 72)
+
+    def test_invalid_schedule_values_name_the_key(self):
+        bad = {
+            "schedule": "hourly",
+            "backend": "systemd",
+            "priority": "high",
+            "embed": "weekly",
+            "embed_at": "3:00",
+            "embed_deadline": "25:00",
+            "embed_max_sessions": 13,
+            "embed_on_battery": "wait",
+            "embed_catchup": "yes",
+        }
+        for key, value in bad.items():
+            with self.subTest(key=key):
+                with self.assertRaises(config.ConfigError) as caught:
+                    config.parse_schedule({key: value})
+                self.assertEqual(caught.exception.code, "CONFIG_INVALID")
+                self.assertIn(f"cron.{key}", str(caught.exception))
+        with self.assertRaises(config.ConfigError) as caught:
+            config.parse_schedule({"embed_max_sessions": True})
+        self.assertIn("cron.embed_max_sessions", str(caught.exception))
+
+    def test_invalid_deep_values_name_the_key(self):
+        bad = {
+            "auto": "true",
+            "min_hits": 51,
+            "min_top_score": 1.5,
+            "timeout_s": 0,
+            "rerank": 1,
+            "n": 0,
+            "max_vector_age_h": 0,
+        }
+        for key, value in bad.items():
+            with self.subTest(key=key):
+                with self.assertRaises(config.ConfigError) as caught:
+                    config.parse_recall({"deep": {key: value}})
+                self.assertEqual(caught.exception.code, "CONFIG_INVALID")
+                self.assertIn(f"recall.deep.{key}", str(caught.exception))
+
+    def test_nullable_deep_values_and_comments(self):
+        policy = config.parse_recall(
+            {"//note": "x", "deep": {"//why": "x", "max_vector_age_h": None, "min_top_score": 0.4}}
+        )
+        self.assertIsNone(policy.deep.max_vector_age_h)
+        self.assertEqual(policy.deep.min_top_score, 0.4)
+        self.assertEqual(config.parse_schedule({"//x": 1, "embed": "off"}).embed, "off")
 
 
 class TestFindRepoRoot(unittest.TestCase):

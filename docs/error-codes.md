@@ -33,6 +33,7 @@ exit; the command decides it.
 | `CONFIG_UNKNOWN_KEY` | 1 (cairn routine: 2) | no | A config object holds a key cairn does not know. |
 | `DECISION_CLAIM_WITHDRAWN` | 3 | no | decide or supersede was refused because the claim was withdrawn with 'forget'. |
 | `DIGEST_EMPTY_DAY` | 3 | no | No session was written for the day. |
+| `EMBED_OVERDUE` | 0 | yes | No QMD embed has finished in the last 48 hours while the nightly embed is configured. |
 | `EXPORT_DOCUMENT_UNPARSEABLE` | 1 from 'cairn SOURCE export'; 0 in 'cairn doctor', which only warns | no | An exported document has front matter cairn cannot parse, so its re-export is refused. |
 | `EXPORT_PARSER_DRIFT` | 1 from 'cairn SOURCE export'; 0 in 'cairn doctor', which only warns | no | A source file holds records, but the parser rendered no message, read no line, or found no session id. |
 | `HOOK_NOT_TRUSTED` | 0 | no | Hook files exist, but the host has not confirmed that it trusts them. |
@@ -55,7 +56,7 @@ exit; the command decides it.
 | `QMD_MISSING` | 1 | no | The configured qmd_binary is not on PATH and is not a file. |
 | `QMD_RUNTIME_FAILED` | 1 | no | 'qmd status' failed, so QMD cannot open its index. |
 | `RECALL_DEGRADED` | 0: the status is data ('status: degraded', verdict 'degraded-miss') | yes | Coverage is degraded: export lag, index lag, unindexed files, a disabled source, a missing store or a missing rg. |
-| `RECALL_FAILED` | 1 | no | recall could not answer: a bad argument, an unreadable file, a config error, or a --refresh export that failed or timed out. |
+| `RECALL_FAILED` | 1 | no | recall could not answer: a bad argument, an unreadable file, a config error, a --refresh export that failed or timed out, or every BM25 search of 'recall search' failed. |
 | `RECALL_VERIFY_FAILED` | 4 | no | A journal citation does not resolve to an unchanged digest frame, or a quote is not in a cited frame. |
 | `ROUTINE_DAY_FAILED` | 1 | yes | A day failed or was deferred; the reasons are in 'failures'. |
 | `ROUTINE_HELD` | 2 | no | The routine is paused, or the breaker disabled it after repeated failures. |
@@ -65,6 +66,7 @@ exit; the command decides it.
 | `ROUTINE_TEMPLATE_UNKNOWN_VAR` | 2 | no | A {{NAME}} token in the prompt file, prepare, validate or profile extra_args is not a known template variable. |
 | `ROUTINE_UNKNOWN` | 2 | no | The routine name is not in the routines config. |
 | `ROUTINE_USAGE` | 2 | no | A routine argument is wrong: a bad name, a --day that has not ended, a bad --reason, or --json with --dry-run. |
+| `SYNC_SCHEDULE_LEGACY` | 0 | no | The scheduled sync is the pre-2.21 hourly entry that embeds every hour. |
 | `SYNC_SOURCE_GAP` | 1 from 'cairn sync --cron' or '--all' (step gap-check:COLLECTION); 0 in 'cairn doctor', which only warns | yes | Sessions changed in the last 30 days have no exported document. |
 
 ## CLI_UNKNOWN_COMMAND
@@ -143,6 +145,17 @@ exit; the command decides it.
 - Retryable: no
 - Shown in: stderr code line; 'code' and 'fix' in --json
 - Raised at: `src/cairn/digest.py:run_digest`
+
+## EMBED_OVERDUE
+
+- Meaning: No QMD embed has finished in the last 48 hours while the nightly embed is configured.
+- Why: Semantic and deep recall miss every document exported since then.
+- Next step: Run 'cairn cron status', then 'cairn embed'.
+- Verify: `cairn cron status`
+- Exit: 0
+- Retryable: yes
+- Shown in: doctor [CODE] suffix
+- Raised at: `src/cairn/admin.py:_check_schedule`
 
 ## EXPORT_DOCUMENT_UNPARSEABLE
 
@@ -346,7 +359,7 @@ exit; the command decides it.
 
 - Meaning: The QMD index is empty, has no vectors, has pending documents, or its status could not be read.
 - Why: Keyword search can still work, but semantic search misses what is not embedded.
-- Next step: Run 'cairn sync --cron'; investigate if the pending count does not fall across runs.
+- Next step: Run 'cairn embed'; investigate if the pending count does not fall across runs.
 - Verify: `cairn doctor --strict-index`
 - Exit: 0 as a warning; 1 with --strict-index (an empty index stays a warning)
 - Retryable: yes
@@ -361,8 +374,8 @@ exit; the command decides it.
 - Verify: `cairn doctor`
 - Exit: 1
 - Retryable: no
-- Shown in: doctor [CODE] suffix
-- Raised at: `src/cairn/admin.py:doctor_main`
+- Shown in: doctor [CODE] suffix; stderr code line; --json failure object
+- Raised at: `src/cairn/admin.py:doctor_main`, `src/cairn/recall_search.py:run`
 
 ## QMD_RUNTIME_FAILED
 
@@ -388,14 +401,14 @@ exit; the command decides it.
 
 ## RECALL_FAILED
 
-- Meaning: recall could not answer: a bad argument, an unreadable file, a config error, or a --refresh export that failed or timed out.
+- Meaning: recall could not answer: a bad argument, an unreadable file, a config error, a --refresh export that failed or timed out, or every BM25 search of 'recall search' failed.
 - Why: recall reads the exported store and never guesses a date or a session.
 - Next step: Act on the argument or file the message names.
 - Verify: `cairn recall list today`
 - Exit: 1
 - Retryable: no
 - Shown in: stderr code line; --json failure object
-- Raised at: `src/cairn/recall.py:main`
+- Raised at: `src/cairn/recall.py:main`, `src/cairn/recall_search.py:run`
 
 ## RECALL_VERIFY_FAILED
 
@@ -495,6 +508,17 @@ exit; the command decides it.
 - Retryable: no
 - Shown in: stderr code line
 - Raised at: `src/cairn/routine.py:_check_name`, `src/cairn/routine_run.py:run_routine`, `src/cairn/routine_state.py:check_reason`
+
+## SYNC_SCHEDULE_LEGACY
+
+- Meaning: The scheduled sync is the pre-2.21 hourly entry that embeds every hour.
+- Why: It uses the GPU every hour at normal priority.
+- Next step: Run 'cairn cron install'.
+- Verify: `cairn cron status`
+- Exit: 0
+- Retryable: no
+- Shown in: doctor [CODE] suffix
+- Raised at: `src/cairn/admin.py:_check_schedule`
 
 ## SYNC_SOURCE_GAP
 

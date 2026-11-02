@@ -24,7 +24,7 @@ Cairn syncs local AI activity to markdown for observability and QMD search. One 
 
 Install first with the setup
 skill (`/cairn:setup` in Claude Code, `$setup` in Codex). Run `cairn help` for the canonical overview and
-`cairn doctor` to check install, config, qmd, cron, and PATH.
+`cairn doctor` to check install, config, qmd, the sync schedule, and PATH.
 
 **Authoritative args.** Treat the CLI as the source of truth, not this page - verbs and
 flags evolve. Discover exact arguments with `cairn help`, `cairn <source> <verb> --help`
@@ -124,7 +124,7 @@ Config resolution: `$CAIRN_CONFIG`, else `$XDG_CONFIG_HOME/cairn/config.json` (e
 ## Top-level commands
 
 ```bash
-cairn sync [--hook | --cron | --all]   # sync enabled sources, then refresh QMD index
+cairn sync [--hook | --light | --nightly | --cron | --all]   # sync enabled sources, then refresh QMD index
 cairn recall list <date>               # temporal session timeline (drives the recall skill)
 cairn recall expand <id>               # one session's condensed transcript
 cairn recall digest <date>             # one day condensed with provenance
@@ -132,17 +132,20 @@ cairn recall frame <ref> <n>           # open a cited frame
 cairn recall verify <journal> --digest <dir> [--fix]  # check a journal's citations and quotes; exit 4 on a failure
 cairn recall gaps [--json]             # what recall cannot see right now: export/index lag, disabled sources, rg
 cairn recall decisions [--overdue] [--json]  # active ## Decisions rows (drives "what did we decide")
+cairn recall search "QUERY" -q "VARIANT" --json   # BM25 per phrasing; one hybrid query on --deep or too few hits
 cairn errors CODE                      # meaning, next step and verify command for a failure code
 cairn hook status --harness claude     # last hook requests and their state (codex: also codex_trust)
 cairn claude memory import --dry-run   # plan an import of Claude Code auto memory; writes nothing
-cairn doctor [--strict-index]          # check install, config, qmd + index, cron, PATH, stores
+cairn doctor [--strict-index]          # check install, config, qmd + index, sync schedule, PATH, stores
 cairn config show [--json]             # print resolved config + integrations
 cairn config init [--enable ...]       # create the per-user config
 cairn config set KEY VALUE             # set one config value
 cairn config unset KEY                 # remove a routine, routine field or invoke profile
 cairn config path                      # print the resolved config path
-cairn cron install                     # add / refresh the hourly sync crontab entry
-cairn cron uninstall                   # remove the cairn cron entry
+cairn cron install                     # install the hourly light sync and the nightly embed
+cairn cron uninstall                   # remove the cairn sync jobs
+cairn cron status [--json]             # installed jobs, last embed, owed embed
+cairn embed [--sessions N | --until-complete]   # run embed sessions now
 cairn instructions install --harness claude|codex   # add the recall-first block to the user instruction file
 cairn instructions remove --harness claude|codex    # delete the block and record an opt-out
 cairn instructions show --harness claude|codex      # print the block for a paste by hand
@@ -159,8 +162,9 @@ cairn help                             # overview an agent can read to drive the
 cairn --version
 ```
 
-`--hook` is the legacy fast sync (on_hook sources only); `--cron` is the hourly
-full sync; `--all` also updates and embeds every enabled source using its configured window. Temporal recall has
+`--hook` is the legacy fast sync (on_hook sources only); `--light` is the hourly scheduled
+sync (all sources, keyword index only); `--nightly` adds the embed under the power policy;
+`--cron` and `--all` export, index and embed once. Temporal recall has
 its own skill (`/cairn:recall` in Claude Code, `$recall` in Codex); `cairn recall --help`
 shows its args.
 

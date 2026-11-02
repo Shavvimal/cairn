@@ -76,8 +76,11 @@ the user's yes:
 Do not pass `--force` unless the user asks.
 
 If the user already uses Cairn cron, refresh its entry with `cairn cron install` and
-check that its configured schedule is retained. Leave cron absent if it was absent;
-do not enable sources or hook policies the user had disabled.
+check that its configured schedule is retained. From 2.21 that command replaces the
+hourly `cairn sync --cron` entry with an hourly light sync and a nightly embed (`cairn
+cron status` lists both); until it runs, `cairn doctor` warns `SYNC_SCHEDULE_LEGACY`.
+Leave cron absent if it was absent; do not enable sources or hook policies the user had
+disabled.
 
 Hooks and cron record absolute engine/config paths and the effective QMD environment,
 including default paths. Repeat this registration after future engine reinstalls or
