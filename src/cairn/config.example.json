@@ -4,8 +4,10 @@
   "data_root": "~/Code/cairn/.context",
   "//qmd_binary": "Path to the qmd executable, or just 'qmd' if it is on your PATH (use an absolute path if cron's minimal PATH can't find it).",
   "qmd_binary": "qmd",
-  "//cron": "Optional. Schedule for 'cairn sync --cron' as a standard 5-field crontab expression. Defaults to '7 * * * *' (hourly at minute 7) when omitted.",
-  "cron": { "schedule": "7 * * * *" },
+  "//cron": "Optional. The scheduled sync. 'schedule' is the light job (exports + qmd update, no embed) as a 5-field crontab expression, default '7 * * * *'; on the launchd backend it must have the form 'M * * * *', 'M1,M2 * * * *' or '*/N * * * *'. 'embed' is nightly | hourly | off. 'embed_at' and 'embed_deadline' are local HH:MM. 'embed_on_battery' is defer | skip | run. 'backend' is auto | launchd | cron. 'priority' is background | normal. Run 'cairn cron install' after a change.",
+  "cron": { "schedule": "7 * * * *", "embed": "nightly", "embed_at": "03:00", "embed_deadline": "07:00", "embed_max_sessions": 3, "embed_on_battery": "defer", "embed_catchup": true, "backend": "auto", "priority": "background" },
+  "//recall": "Optional. 'deep' controls the one hybrid qmd query that 'cairn recall search' runs on --deep or when BM25 finds fewer than min_hits distinct documents. rerank false passes --no-rerank (faster). max_vector_age_h skips hybrid when the last embed is older; null turns that off.",
+  "recall": { "deep": { "auto": true, "min_hits": 3, "min_top_score": null, "timeout_s": 30, "rerank": false, "n": 10, "max_vector_age_h": 72 } },
   "//invoke": "Optional. Defaults for 'cairn invoke <peer>' (codex, claude or antigravity run headlessly from either host). model/effort null = let the peer CLI choose. profile: review (read-only) | edit (workspace writes) | full (no sandbox). Timeouts in seconds: timeout_s is the wall clock, idle_timeout_s kills a run with no activity, quiet_after_s/stall_after_s drive the activity labels in 'cairn invoke status'.",
   "invoke": {
     "codex": { "model": "gpt-6-astra", "effort": "high", "profile": "review", "timeout_s": 1800, "idle_timeout_s": 900, "quiet_after_s": 120, "stall_after_s": 600 },

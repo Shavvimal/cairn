@@ -9,7 +9,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 
-from . import decisions, digest, errors, provenance, verify
+from . import decisions, digest, errors, provenance, recall_search, verify
 from . import recall_gaps as gaps
 from .config import ConfigError, get_config
 from .registry import SOURCES
@@ -156,6 +156,49 @@ def build_parser() -> argparse.ArgumentParser:
     gaps_cmd.add_argument(
         "--source", action="append", choices=[s.source for s in SOURCES], metavar="SOURCE"
     )
+    search = sub.add_parser(
+        "search",
+        help="topic search: BM25 per phrasing, one hybrid query on --deep or too few hits",
+        description=(
+            "Run 'qmd search' (BM25) for QUERY and every -q variant, then one hybrid "
+            "'qmd query' when --deep is given or BM25 finds fewer than recall.deep.min_hits "
+            "distinct documents. Results are merged by document and labelled bm25, hybrid "
+            "or bm25+hybrid. The hybrid query has a time budget (recall.deep.timeout_s) and "
+            "is skipped, with a note, when the index has no vectors or the last embed is "
+            "older than recall.deep.max_vector_age_h. Exit 0 whatever the hybrid status; "
+            "1 when every BM25 search failed; 2 on a usage error or an unknown collection."
+        ),
+    )
+    search.add_argument("query", metavar="QUERY", help="the user's own phrasing")
+    search.add_argument(
+        "-q",
+        "--variant",
+        action="append",
+        default=[],
+        metavar="VARIANT",
+        help=f"an extra phrasing for BM25 (repeatable, up to {recall_search.MAX_VARIANTS})",
+    )
+    search.add_argument(
+        "-c",
+        "--collection",
+        action="append",
+        default=[],
+        metavar="COLLECTION",
+        help="limit every search to this QMD collection (repeatable)",
+    )
+    search.add_argument(
+        "-n",
+        type=int,
+        default=5,
+        metavar="N",
+        help=f"BM25 results per phrasing (1 to {recall_search.MAX_N}, default 5)",
+    )
+    depth = search.add_mutually_exclusive_group()
+    depth.add_argument("--deep", action="store_true", help="run the hybrid query")
+    depth.add_argument(
+        "--no-deep", action="store_true", help="never run the hybrid query, whatever the counts"
+    )
+    search.add_argument("--json", action="store_true")
     _add_verify_parser(sub)
     session_sources = [s.source for s in SOURCES if s.session_type]
     _add_decisions_parser(sub, session_sources)
@@ -177,6 +220,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "gaps":
             return _gaps(args)
+        if args.command == "search":
+            return recall_search.run(args)
         store = SessionStore(get_config())
         if args.command == "verify":
             return verify.run_verify(args, store)

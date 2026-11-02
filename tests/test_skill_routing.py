@@ -381,7 +381,7 @@ class TestTriggerExtraction(_RepoCase):
     def test_quoted_phrases_after_marker_only(self) -> None:
         recall = self.skills["recall"].triggers
         self.assertNotIn("one thing", recall)
-        self.assertEqual(len(recall), 15, recall)
+        self.assertEqual(len(recall), 17, recall)
         self.assertIn("what was i doing", recall)
 
     def test_every_routable_skill_has_triggers(self) -> None:

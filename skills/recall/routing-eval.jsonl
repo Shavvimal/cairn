@@ -14,3 +14,5 @@
 {"intent": "list the decisions we recorded this week", "expected": "recall", "ambiguous_with": ["cairn"]}
 {"intent": "check that the citations in today's journal verify", "expected": "recall"}
 {"intent": "a session from this morning seems to be missing", "expected": "recall"}
+{"intent": "go deep on recall for the vendor contract, I barely remember what we called it", "expected": "recall"}
+{"intent": "that came back thin, search much harder through what we did on the billing rewrite", "expected": "recall"}

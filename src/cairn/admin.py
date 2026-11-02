@@ -12,26 +12,32 @@ import argparse
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import asdict, fields
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__, errors
 from .config import (
     BILLING_PEERS,
+    EMBED_MODES,
+    EMBED_ON_BATTERY,
     INVOKE_PEERS,
     PROFILE_PEERS,
     ROUTINE_REQUIRED,
+    SCHEDULE_BACKENDS,
+    SCHEDULE_PRIORITIES,
     BillingPolicy,
     CairnConfig,
     Collection,
     ConfigError,
+    DeepRecall,
     PeerPolicy,
     RoutineSpec,
+    SyncSchedule,
     example_template_text,
     expand,
     get_config,
@@ -45,8 +51,10 @@ from .qmd import (
     StatusFormatError,
     index_status,
     list_collections,
+    parse_iso,
     parse_version,
     qmd_version,
+    read_embed_stamp,
 )
 from .sync import SOURCE_COLLECTIONS
 
@@ -224,6 +232,8 @@ def _config_show(as_json: bool) -> int:
                     "data_root": str(cfg.data_root),
                     "qmd_binary": cfg.qmd_binary,
                     "cron_schedule": cfg.cron_schedule,
+                    "cron": asdict(cfg.schedule),
+                    "recall": {"deep": asdict(cfg.recall.deep)},
                     "collections": collections,
                     "invoke": _invoke_view(cfg),
                     "routines": {
@@ -238,7 +248,12 @@ def _config_show(as_json: bool) -> int:
     print(f"config_path : {cfg.config_path}")
     print(f"data_root   : {cfg.data_root}")
     print(f"qmd_binary  : {cfg.qmd_binary}")
-    print(f"cron        : {cfg.cron_schedule}")
+    print("cron        :")
+    for key, value in asdict(cfg.schedule).items():
+        print(f"  {key:22} {value}")
+    print("recall      :")
+    for key, value in asdict(cfg.recall.deep).items():
+        print(f"  deep.{key:17} {value}")
     print("collections :")
     for c in collections:
         state = "enabled " if c["enabled"] else "disabled"
@@ -453,20 +468,92 @@ def _set_profile(data: dict, key: str, parts: list[str], value: str) -> None:
         raise ValueError(f"unknown profile field {field!r}; known: base, extra_args")
 
 
+_SCHEDULE_FIELDS = tuple(f.name for f in fields(SyncSchedule))
+_DEEP_FIELDS = tuple(f.name for f in fields(DeepRecall))
+_SCHEDULE_KEY_HINT = "cron.<" + "|".join(_SCHEDULE_FIELDS) + ">"
+_DEEP_KEY_HINT = "recall.deep.<" + "|".join(_DEEP_FIELDS) + ">"
+_SCHEDULE_CHOICES = {
+    "backend": SCHEDULE_BACKENDS,
+    "priority": SCHEDULE_PRIORITIES,
+    "embed": EMBED_MODES,
+    "embed_on_battery": EMBED_ON_BATTERY,
+}
+
+
+def _coerce_schedule(field: str, value: str) -> object:
+    """A ``cron.<field>`` value from the command line, typed for the config file."""
+    if field not in _SCHEDULE_FIELDS:
+        raise ValueError(f"unknown cron field {field!r}; use {_SCHEDULE_KEY_HINT}")
+    if field in _SCHEDULE_CHOICES:
+        if value not in _SCHEDULE_CHOICES[field]:
+            raise ValueError(
+                f"cron.{field} expects {'|'.join(_SCHEDULE_CHOICES[field])}, got {value!r}"
+            )
+        return value
+    if field == "embed_max_sessions":
+        return _coerce_int(f"cron.{field}", value)
+    if field == "embed_catchup":
+        return _coerce_bool(f"cron.{field}", value)
+    return value  # schedule, embed_at, embed_deadline: validated on reload
+
+
+def _coerce_deep(field: str, value: str) -> object:
+    """A ``recall.deep.<field>`` value from the command line, typed for the config file."""
+    if field not in _DEEP_FIELDS:
+        raise ValueError(f"unknown recall.deep field {field!r}; use {_DEEP_KEY_HINT}")
+    if field in ("auto", "rerank"):
+        return _coerce_bool(f"recall.deep.{field}", value)
+    if field in ("max_vector_age_h", "min_top_score") and _is_null(value):
+        return None
+    if field == "min_top_score":
+        try:
+            return float(value)
+        except ValueError:
+            raise ValueError(
+                f"recall.deep.{field} expects a number or null, got {value!r}"
+            ) from None
+    return _coerce_int(f"recall.deep.{field}", value)
+
+
+def _coerce_bool(where: str, value: str) -> bool:
+    low = value.strip().lower()
+    if low not in ("true", "false"):
+        raise ValueError(f"{where} expects true|false, got {value!r}")
+    return low == "true"
+
+
+def _coerce_int(where: str, value: str) -> int:
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(f"{where} expects an integer, got {value!r}") from None
+
+
 def _set_dotted(data: dict, key: str, value: str) -> list[str]:
     """Apply ``key=value`` to the config dict in place. Raises ValueError on a bad key.
 
     Returns the notes to print about knock-on edits (a disabled collection dropped from
     the routines' ``sources``).
     """
-    if key == "cron.schedule":
-        data.setdefault("cron", {})["schedule"] = value
+    parts = key.split(".")
+    if parts[0] == "cron" and len(parts) == 2:
+        if not isinstance(data.get("cron"), dict):
+            data["cron"] = {}  # the loader accepts a null block; editing needs an object
+        data["cron"][parts[1]] = _coerce_schedule(parts[1], value)
         return []
+    if parts[0] == "recall" and len(parts) == 3 and parts[1] == "deep":
+        if not isinstance(data.get("recall"), dict):
+            data["recall"] = {}
+        if not isinstance(data["recall"].get("deep"), dict):
+            data["recall"]["deep"] = {}
+        data["recall"]["deep"][parts[2]] = _coerce_deep(parts[2], value)
+        return []
+    if parts[0] in ("recall", "cron"):
+        raise ValueError(f"unsupported key {key!r}; use {_SCHEDULE_KEY_HINT} or {_DEEP_KEY_HINT}")
     if key in _TOP_LEVEL_KEYS:
         data[key] = value
         return []
 
-    parts = key.split(".")
     if parts[0] == "routines" and 2 <= len(parts) <= 4:
         _set_routine(data, key, parts, value)
         return []
@@ -520,7 +607,8 @@ def _set_dotted(data: dict, key: str, value: str) -> list[str]:
             return []
 
     raise ValueError(
-        f"unsupported key {key!r}. Use data_root, qmd_binary, cron.schedule, "
+        f"unsupported key {key!r}. Use data_root, qmd_binary, {_SCHEDULE_KEY_HINT}, "
+        f"{_DEEP_KEY_HINT}, "
         "<collection>.store|enabled|since|on_hook, invoke.<codex|claude|antigravity>."
         "model|effort|profile|timeout_s|idle_timeout_s|quiet_after_s|stall_after_s, "
         f"{_BILLING_KEY_HINT}, {_PROFILE_KEY_HINT}, or {_ROUTINE_KEY_HINT}"
@@ -530,6 +618,18 @@ def _set_dotted(data: dict, key: str, value: str) -> list[str]:
 def _unset_dotted(data: dict, key: str) -> str:
     """Remove ``key`` from the config dict; returns the success message."""
     parts = key.split(".")
+    if parts[0] == "cron" and len(parts) == 2 and parts[1] in _SCHEDULE_FIELDS:
+        cron = data.get("cron")
+        if not isinstance(cron, dict) or parts[1] not in cron:
+            raise ValueError(f"{key} is not set")
+        del cron[parts[1]]
+        return f"Removed {key}; the default applies. Run 'cairn cron install' to apply it"
+    if parts[0] == "recall" and len(parts) == 3 and parts[1] == "deep" and parts[2] in _DEEP_FIELDS:
+        deep = (data.get("recall") or {}).get("deep")
+        if not isinstance(deep, dict) or parts[2] not in deep:
+            raise ValueError(f"{key} is not set")
+        del deep[parts[2]]
+        return f"Removed {key}; the default applies"
     if parts[0] == "invoke" and len(parts) == 4 and parts[2] == "profiles":
         profiles = ((data.get("invoke") or {}).get(parts[1]) or {}).get("profiles")
         if not isinstance(profiles, dict) or parts[3] not in profiles:
@@ -560,8 +660,8 @@ def _unset_dotted(data: dict, key: str) -> str:
             del routine[field]
             return f"Removed {key}"
     raise ValueError(
-        f"unsupported key {key!r} for unset. Use routines.<name>, "
-        "routines.<name>.<optional field>, routines.<name>.outputs.<key> or "
+        f"unsupported key {key!r} for unset. Use {_SCHEDULE_KEY_HINT}, {_DEEP_KEY_HINT}, "
+        "routines.<name>, routines.<name>.<optional field>, routines.<name>.outputs.<key> or "
         "invoke.<claude|codex>.profiles.<name>"
     )
 
@@ -804,55 +904,49 @@ def _without_cairn_lines(lines: list[str]) -> list[str]:
 
 
 def _cron_install() -> int:
-    from .runtime import background_environment
+    from . import schedule
 
-    config = get_config()
-    environment = background_environment(config)
-    argv = [
-        "/usr/bin/env",
-        *[f"{k}={v}" for k, v in environment.items()],
-        *_cairn_invocation(),
-        "sync",
-        "--cron",
-    ]
-    logfile = _log_file()
-    logfile.parent.mkdir(parents=True, exist_ok=True)
-    command = f"{shlex.join(argv)} >> {shlex.quote(str(logfile))} 2>&1"
-    # Cron interprets percent signs even inside shell quotes. A stable comment
-    # identifies our entry even when the executable itself needs shell quoting.
-    command = command.replace("%", r"\%")
-    line = f"{config.cron_schedule} {command} # cairn sync"
-    lines = _without_cairn_lines(_current_crontab())
-    lines.append(line)
-    _write_crontab(lines)
-    print(f"Installed crontab entry:\n  {line}")
-    return 0
+    return schedule.install(get_config())
 
 
 def _cron_uninstall() -> int:
-    current = _current_crontab()
-    remaining = _without_cairn_lines(current)
-    if len(remaining) == len(current):
-        print("No cairn cron entry found; nothing to remove.")
-        return 0
-    _write_crontab(remaining)
-    print("Removed the cairn cron entry.")
-    return 0
+    from . import schedule
+
+    return schedule.uninstall()
 
 
 def build_cron_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="cairn cron", description="Manage the hourly sync crontab entry"
+        prog="cairn cron",
+        description=(
+            "Manage the scheduled sync: an hourly light sync and a nightly embed "
+            "(LaunchAgents on macOS, crontab lines elsewhere; see cron.* in the config)"
+        ),
     )
     sub = parser.add_subparsers(dest="action", metavar="ACTION", required=True)
-    sub.add_parser("install", help="add/refresh the hourly 'cairn sync --cron' entry")
-    sub.add_parser("uninstall", help="remove the cairn cron entry")
+    sub.add_parser(
+        "install", help="install the configured sync jobs; replaces the pre-2.21 hourly entry"
+    )
+    sub.add_parser("uninstall", help="remove the cairn sync jobs (crontab and LaunchAgents)")
+    status = sub.add_parser(
+        "status", help="the installed sync jobs, the last embed and any owed embed"
+    )
+    status.add_argument("--json", action="store_true")
     return parser
 
 
 def cron_main(argv: list[str] | None = None) -> int:
+    from . import schedule
+
     args = build_cron_parser().parse_args(argv)
-    return _cron_install() if args.action == "install" else _cron_uninstall()
+    try:
+        if args.action == "install":
+            return _cron_install()
+        if args.action == "uninstall":
+            return _cron_uninstall()
+        return schedule.status(get_config(), args.json)
+    except ConfigError as e:
+        return errors.fail(e.code, str(e), exit=2, prefix="Error: ")
 
 
 # ---------------------------------------------------------------------------
@@ -967,14 +1061,31 @@ def _check_qmd_runtime(qmd_binary: str) -> tuple[int, IndexStatus | None, str | 
 _INDEX = "QMD_INDEX_INCOMPLETE"
 
 
+NIGHTLY_COVERS_H = 30  # pending documents are expected while the last embed is this recent
+EMBED_OVERDUE_H = 48
+
+
+def _hours_since(stamp: object) -> float | None:
+    moment = parse_iso(stamp)
+    if moment is None:
+        return None
+    return (datetime.now(UTC) - moment).total_seconds() / 3600
+
+
 def _check_embeddings(
-    status: IndexStatus | None, reason: str | None, strict: bool
+    status: IndexStatus | None,
+    reason: str | None,
+    strict: bool,
+    schedule: SyncSchedule | None = None,
 ) -> tuple[int, str | None]:
     """Report index/embedding state; return ``(critical_failures, caveat)``.
 
     Default mode only warns about incomplete or unverified indexing, and returns a
     caveat for the summary line. ``--strict-index`` turns those into failures,
-    except an empty index, which cannot be verified either way.
+    except an empty index, which cannot be verified either way. With a nightly
+    embed configured, pending documents are the design while the last embed is
+    recent: an ok line in default mode (``--strict-index`` still fails: setup needs
+    a fully embedded index).
     """
     if status is None:
         caveat = f"could not read 'qmd status': {reason}"
@@ -983,23 +1094,110 @@ def _check_embeddings(
     counts = status.describe()
     if status.state == "empty":
         caveat = "the index is empty, so no search can be verified yet"
-        _warn("embeddings", f"{caveat}; run 'cairn sync --cron'", _INDEX)
+        _warn("embeddings", f"{caveat}; run 'cairn embed'", _INDEX)
         return 0, caveat
     if status.state == "no-vectors":
         caveat = f"{counts}: keyword search can work, semantic search is not ready"
-        (_fail if strict else _warn)("embeddings", f"{caveat}; run 'cairn sync --cron'", _INDEX)
+        (_fail if strict else _warn)("embeddings", f"{caveat}; run 'cairn embed'", _INDEX)
         return int(strict), caveat
     if status.state == "pending":
+        if not strict and schedule is not None and schedule.embed == "nightly":
+            stamp = read_embed_stamp() or {}
+            age = _hours_since(stamp.get("last_embed_at"))
+            if age is not None and age <= NIGHTLY_COVERS_H:
+                _ok("embeddings", f"{counts}; the nightly embed at {schedule.embed_at} covers them")
+                return 0, None
         caveat = f"{counts}: semantic search misses the pending documents"
         (_fail if strict else _warn)(
             "embeddings",
-            f"{caveat}; the next 'cairn sync --cron' continues. If this count does not fall "
+            f"{caveat}; run 'cairn embed'. If this count does not fall "
             "across runs, investigate instead of retrying",
             _INDEX,
         )
         return int(strict), caveat
     _ok("embeddings", counts)
     return 0, None
+
+
+def _check_schedule(config: CairnConfig) -> None:
+    """The ``sync schedule`` group: the installed jobs against ``cron.*``."""
+    from . import schedule
+
+    try:
+        report = schedule.inspect(config)
+    except ConfigError as e:
+        _warn("sync schedule", f"{e} [{e.code}]")
+        return
+    policy = config.schedule
+    wanted = schedule.jobs(config)
+    crontab_legacy = [e for e in report["legacy_entries"] if e["kind"] == "crontab"]
+    launchd_present = report["backend"] == "launchd" and any(j["installed"] for j in report["jobs"])
+    launchd_present = launchd_present or any(
+        e["kind"] == "launchd" for e in report["legacy_entries"]
+    )
+    cron_present = bool(crontab_legacy) or (
+        report["backend"] == "cron" and any(j["installed"] for j in report["jobs"])
+    )
+    if report["ok"]:
+        parts = []
+        for job in wanted:
+            when = schedule.describe_schedule(job.schedule)
+            if job.name == "light":
+                when = when.replace("hourly at minute ", "hourly at :")
+            else:
+                when = when.replace("daily at ", "").replace(" local", "")
+            parts.append(f"{job.name} {when}")
+        _ok("sync schedule", f"{report['backend']}: {', '.join(parts)} ({policy.priority})")
+    for entry in report["jobs"]:
+        if not entry["installed"]:
+            _warn("sync schedule", f"no {entry['name']} job; run 'cairn cron install'")
+        elif entry["loaded"] is False:
+            _warn(
+                "sync schedule",
+                f"the {entry['name']} job is installed but not loaded; run 'cairn cron install'",
+            )
+        elif not entry["matches_config"]:
+            if (
+                report["backend"] == "cron"
+                and policy.priority == "background"
+                and entry["priority"] == "normal"
+            ):
+                _warn(
+                    "sync schedule",
+                    "the cron line runs at normal priority; run 'cairn cron install'",
+                )
+            else:
+                _warn(
+                    "sync schedule",
+                    f"installed {entry['name']} job differs from the config; "
+                    "run 'cairn cron install'",
+                )
+    if policy.embed != "hourly" and any(e["mode"] == "cron" for e in crontab_legacy):
+        _warn(
+            "sync schedule",
+            "the old hourly 'cairn sync --cron' entry still embeds every hour; "
+            "run 'cairn cron install'",
+            "SYNC_SCHEDULE_LEGACY",
+        )
+    if launchd_present and cron_present:
+        _warn("sync schedule", "two schedulers run cairn sync; run 'cairn cron install'")
+    if policy.embed == "nightly":
+        stamp = report["embed_stamp"] or {}
+        age = _hours_since(stamp.get("last_embed_at"))
+        if age is None or age > EMBED_OVERDUE_H:
+            since = stamp.get("last_embed_at") or "the install"
+            _warn(
+                "sync schedule",
+                f"no embed finished since {since}; check 'cairn cron status' and run 'cairn embed'",
+                "EMBED_OVERDUE",
+            )
+    owed = report["owed"]
+    if owed is not None:
+        _ok(
+            "sync schedule",
+            f"embed owed since {owed['since']} ({owed['reason']}); "
+            "the next light sync on AC power runs it",
+        )
 
 
 def _parse_semver(value: str) -> tuple[int, int, int] | None:
@@ -1402,7 +1600,9 @@ def doctor_main(argv: list[str] | None = None) -> int:
     # embeddings: index-wide counts from the single 'qmd status' probe above.
     # Zero vectors leaves keyword (BM25) search working; only semantic search waits.
     if config is not None:
-        failures, index_caveat = _check_embeddings(qmd_status, status_reason, args.strict_index)
+        failures, index_caveat = _check_embeddings(
+            qmd_status, status_reason, args.strict_index, config.schedule
+        )
         critical_failures += failures
 
     if config is not None:
@@ -1467,11 +1667,9 @@ def doctor_main(argv: list[str] | None = None) -> int:
     # recall-first block in the user instruction file (runs without a config)
     _check_recall_first(args.harness)
 
-    # cron
-    if any(_CRON_TAG in ln for ln in _current_crontab()):
-        _ok("cron", "hourly 'cairn sync --cron' entry present")
-    else:
-        _warn("cron", "no entry; run 'cairn cron install'")
+    # sync schedule: the installed jobs against cron.* (needs the config)
+    if config is not None:
+        _check_schedule(config)
 
     print()
     if critical_failures:

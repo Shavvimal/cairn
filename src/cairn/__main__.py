@@ -26,6 +26,7 @@ _ADMIN: dict[str, str] = {
     "instructions": "cairn.instructions:main",
     "resume": "cairn.resume:main",
     "sync": "cairn.sync:main",
+    "embed": "cairn.sync:embed_main",
     "recall": "cairn.recall:main",
     "doctor": "cairn.admin:doctor_main",
     "config": "cairn.admin:config_main",
@@ -59,7 +60,7 @@ shared per-source commands: export, list, context, note, close, log, decide, sup
   cairn codex forget 3 --reason hallucination
   cairn cursor log --status done --tags "x,y" --rating 8
 
-recall (temporal view over shared exported sessions; topic search is qmd's job):
+recall (temporal view over shared exported sessions; topic search runs BM25, hybrid on demand):
   cairn recall list yesterday                sessions from a date window
   cairn recall list "last week" --json       machine-readable session list
   cairn recall expand <source:session-id>           condensed transcript for one session
@@ -68,6 +69,7 @@ recall (temporal view over shared exported sessions; topic search is qmd's job):
   cairn recall gaps --json                   what recall cannot see right now
   cairn recall verify FILE --digest DIR [--fix]   check a journal's [SOURCE:ID fN] citations and quotes
   cairn recall decisions [DATE] [--overdue] [--json]   ## Decisions rows across sessions
+  cairn recall search "QUERY" -q "VARIANT" --json   one BM25 search per phrasing; hybrid on --deep or too few hits
 
 peer agents (one foreground round per call; run it in the background):
   cairn invoke codex --prompt TEXT [--effort E] [--profile review|edit|full] [--json]
@@ -87,7 +89,8 @@ agents (peer runs and subagents of a session):
   cairn agents wait [--session SOURCE:ID | ID...] [--timeout-s N] [--stall-after-s N]
 
 orchestration / admin:
-  cairn sync [--hook | --cron | --all]       sync every source, then refresh QMD
+  cairn sync [--hook | --light | --nightly | --cron | --all]   sync every source, then refresh QMD
+  cairn embed [--sessions N | --until-complete]   run QMD embed sessions now (drains a backlog)
   cairn hook install [--harness H]           register a host hook / record the launcher
   cairn hook status                          inspect hook runs and the queue
   cairn hook worker                          drain / retry queued sync work
@@ -96,15 +99,16 @@ orchestration / admin:
   cairn instructions show --harness claude|codex      print the block for a paste by hand
   cairn instructions status [--json]         the block state per harness
   cairn resume <source:session-id>            print the correct native resume command
-  cairn doctor [--strict-index]              check install, config, qmd + index, rg, cron, PATH
+  cairn doctor [--strict-index]              check install, config, qmd + index, rg, sync schedule, PATH
   cairn config init                          create the per-user config
   cairn config path                          print the resolved config path
   cairn config show [--json]                 print the resolved config + integrations
   cairn config set KEY VALUE                 set one config value (e.g. claude.store …)
   cairn config unset KEY                     remove a routine, routine field or invoke profile
   cairn config add-service-doc NAME PATH     mirror a docs folder into service-docs
-  cairn cron install                         add / refresh the hourly sync crontab entry
-  cairn cron uninstall                       remove the cairn cron entry
+  cairn cron install                         install the hourly light sync and the nightly embed jobs
+  cairn cron uninstall                       remove the cairn sync jobs (crontab and LaunchAgents)
+  cairn cron status [--json]                 the installed sync jobs, the last embed and any owed embed
   cairn routine install NAME                 add the launchd job (macOS)
   cairn routine uninstall NAME               remove the launchd job; stamps are kept
   cairn routine run NAME [--day D] [--force] [--dry-run] [--json]   run due days now

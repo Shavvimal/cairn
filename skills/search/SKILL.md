@@ -1,8 +1,8 @@
 ---
 name: search
-description: Search previously exported Cairn sessions, notes, meetings and indexed docs using QMD BM25 or exact ripgrep. Use when the user says "cairn search", "search my sessions", "search past sessions", "search my meetings", "grep my sessions", or "exact search", or otherwise asks to locate material in personal session history. Do not activate for ordinary web searches, repository code searches, or unrelated uses of find/look up. Requires qmd; rg is optional.
-argument-hint: QUERY [-n NUM] [-c COLLECTION] [--full] [--exact]
-allowed-tools: Bash(qmd:*), Bash(rg:*), Bash(head:*), Bash(cairn recall gaps:*), Bash(cairn errors:*)
+description: Search previously exported Cairn sessions, notes, meetings and indexed docs using QMD BM25 or exact ripgrep, or one deep search with --deep. Use when the user says "cairn search", "search my sessions", "search past sessions", "search my meetings", "grep my sessions", or "exact search", or otherwise asks to locate material in personal session history. Do not activate for ordinary web searches, repository code searches, or unrelated uses of find/look up. Requires qmd; rg is optional.
+argument-hint: "QUERY [-n NUM] [-c COLLECTION] [--full] [--exact] [--deep]"
+allowed-tools: Bash(qmd:*), Bash(rg:*), Bash(head:*), Bash(cairn recall gaps:*), Bash(cairn recall search:*), Bash(cairn errors:*)
 ---
 
 Read [the harness contract](../../references/harnesses/contract.md) and its relevant
@@ -22,7 +22,7 @@ Two engines:
 - **`rg`** (ripgrep, exact) - literal strings and regex ("ECONNRESET", `parse_frontmatter`,
   a file path, a session ID). rg reads the markdown files directly, so it also finds
   sessions that QMD has not indexed yet. It has no ranking, so it needs the output limits
-  in step 4.
+  in step 5.
 
 ## Usage
 
@@ -33,6 +33,7 @@ Two engines:
 /search policy management --full    # show full document content
 /search ECONNRESET --exact          # exact match with rg
 /search "def \w+_frontmatter" --exact   # regex with rg
+/search the thing about vendor terms --deep   # one deep search (BM25 + vectors), slower
 ```
 
 In Codex, type `$search` in place of `/search`; `/recall` below is `$recall` there.
@@ -44,13 +45,16 @@ In Codex, type `$search` in place of `/search`; `/recall` below is `$recall` the
    - `-c COLLECTION` - restrict to one collection (see step 2 for valid names)
    - `--full` - show full document content instead of snippets
    - `--exact` (alias `--rg`) - use rg instead of BM25
+   - `--deep` - one deep search (BM25 + vectors) through `cairn recall search`; only
+     when the user passes it
    - Everything else is the search query.
 
    **Choose the engine.** Use rg if `--exact` is given, or if the query is clearly a
    literal: an identifier, error string, file path, URL, session ID, or regex. Use rg
    also when the user asks about something from the last hour, which QMD might not have
    indexed yet. Otherwise use `qmd search`. If rg is not installed (`command not found`),
-   fall back to `qmd search` and say so in one line.
+   fall back to `qmd search` and say so in one line. Use the deep path only when
+   `--deep` is given; never choose it yourself. `--exact` wins over `--deep`.
 
 2. **Resolve the collection (only if `-c` is given).** Do **not** hardcode or guess
    collection names - they vary per machine and change as integrations are added. Get the
@@ -69,9 +73,21 @@ In Codex, type `$search` in place of `/search`; `/recall` below is `$recall` the
    ```
 
    Use `qmd search` (BM25), not `qmd query` (hybrid) - BM25 is much faster, and speed is
-   the point for inline lookups. Go to step 5.
+   the point for inline lookups. Go to step 6.
 
-4. **rg path - resolve paths, then search in two passes.**
+4. **Deep path (`--deep` only):**
+
+   ```bash
+   cairn recall search "QUERY" --deep -n NUM [-c COLLECTION] --json
+   ```
+
+   Tell the user in one line that this takes up to about 30 seconds. Present `results`
+   as in step 6, with each hit's `label` (`bm25`, `hybrid` or `bm25+hybrid`) in
+   brackets. If `hybrid.note` is not null, print it as one line under the results. If the
+   command exits non-zero or says `invalid choice`, run the BM25 path of step 3 and say
+   in one line that deep search is not available. Run it at most once per search.
+
+5. **rg path - resolve paths, then search in two passes.**
 
    a. **Resolve each collection's directory.** Do **not** hardcode or guess paths.
       Collections can live outside cairn's `data_root` (for example a user's own notes
@@ -113,7 +129,7 @@ In Codex, type `$search` in place of `/search`; `/recall` below is `$recall` the
    print matched lines without both `-M` and `-m`. An unbounded rg over a real corpus can
    return tens of thousands of lines and fill the context window.
 
-5. **Present results** as a compact, scannable list/table. For BM25 hits: title,
+6. **Present results** as a compact, scannable list/table. For BM25 hits: title,
    collection, score, and snippet. For rg hits: file path, collection, date (session files
    are named `YYYY-MM-DD-<id>.md`), and the matched line. The user wants a quick answer,
    not a wall of text.
@@ -137,7 +153,7 @@ In Codex, type `$search` in place of `/search`; `/recall` below is `$recall` the
    and run `cairn errors CODE`; report its next step and stop. A failing `qmd` command
    has no cairn code: report qmd's own message and suggest `cairn doctor`.
 
-6. **If `--full`** (or the user asks to expand a hit):
+7. **If `--full`** (or the user asks to expand a hit):
 
    ```bash
    qmd get "document-path" -l 100
@@ -147,4 +163,5 @@ In Codex, type `$search` in place of `/search`; `/recall` below is `$recall` the
    or read the file directly.
 
 Do NOT: expand the query into variants, fetch full documents unless asked, synthesise a
-"One Thing", or run parallel searches across variants - that's `/recall`'s job.
+"One Thing", run parallel searches across variants, or add `--deep` unless the user
+passed it - that's `/recall`'s job.

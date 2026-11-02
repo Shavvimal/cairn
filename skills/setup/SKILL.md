@@ -236,16 +236,16 @@ embed step logs `exited 0` on a clean exit; the `[qmd-verify]` line gives the ve
 the index-wide documents, vectors and pending documents, and `INCOMPLETE` (pending > 0)
 also fails the sync. A first embed of a large history can pass QMD's 30-minute session
 limit (1.1.5 and 2.5.3). Completed documents keep their vectors, but QMD 2.5.3 removes the
-vectors of a partly embedded document, so it restarts on the next run. Rerun
-`cairn sync --cron` while the pending count in `cairn doctor` falls; if it stops falling,
-stop and report it (a document may never fit in one session).
+vectors of a partly embedded document, so it restarts on the next run. Run
+`cairn embed --until-complete`: it runs embed sessions while the pending count falls and
+stops when it stops falling (a document may never fit in one session); report that case.
 
 ## 6. Configure automatic sync and periodic maintenance
 
 ```bash
 cairn hook install --harness HOST  # HOST is claude or codex from the adapter
 cairn hook install --harness antigravity  # when antigravity is enabled: agy's Stop hook in ~/.gemini/config/hooks.json
-cairn cron install     # absolute-path 'cairn sync --cron' entry, safe under cron's PATH
+cairn cron install     # hourly light sync + nightly embed; LaunchAgents on macOS, crontab elsewhere
 ```
 
 Then the recall-first note from step 2. Show the diff first:
@@ -277,8 +277,8 @@ in layers; declare success only when a **real query returns hits**.
 **7a. Plumbing + the strict index check.**
 
 ```bash
-cairn doctor --strict-index   # install, config, qmd version + runtime, collections, index, cron
-crontab -l                    # the hourly 'cairn sync --cron' line is present
+cairn doctor --strict-index   # install, config, qmd version + runtime, collections, index, sync schedule
+cairn cron status             # the light and nightly jobs are installed and loaded
 ```
 
 `--strict-index` fails unless QMD runs, its status is readable, and a nonempty index has
@@ -313,10 +313,11 @@ semantic search as not ready with the `qmd status` output and the queries you tr
 
 Only when 7a-7c and the live lifecycle check all pass: tell the user setup is complete. Summarize what's enabled
 (`cairn config show`), how many chunks/documents were embedded (from step 5), and that `/recall`
-and `/search` now work. Mention the hourly cron and the SessionEnd hook keep it fresh: a
-finished session is exported and keyword-indexed at once, and its embeddings follow on the
-next full sync. Incremental embeds are usually short but can take a long time after a large
-backfill.
+and `/search` now work. Mention that the SessionEnd hook exports and keyword-indexes a
+finished session at once, the hourly light sync keeps every source keyword-indexed, and a
+nightly embed (03:00 by default, on mains power) refreshes vectors. `/recall` uses vectors
+only for a deep search (`/recall --deep TOPIC`, or when keyword search finds too little).
+Incremental embeds are usually short but can take a long time after a large backfill.
 
 ## Troubleshooting
 

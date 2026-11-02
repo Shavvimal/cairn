@@ -5,6 +5,48 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.21.0]
+
+### Added
+- `cairn sync --light` (all exports and `qmd update`, no embed) and `cairn sync --nightly`
+  (the same, then up to `cron.embed_max_sessions` QMD embed sessions while the pending
+  count falls, under `cron.embed_on_battery`).
+- `cairn cron install` installs an hourly light job and a nightly embed job (03:00 local by
+  default). On macOS they are LaunchAgents (`dev.cairn.sync.light`,
+  `dev.cairn.sync.nightly`) with `ProcessType Background` and `LowPriorityIO`; elsewhere
+  they are crontab lines under `nice` and `ionice`. A night deferred on battery runs at the
+  next light sync on AC power, at most once a day.
+- `cairn cron status [--json]` and `cairn embed [--sessions N | --until-complete]
+  [--respect-power]`.
+- `cairn recall search QUERY [-q VARIANT]... [-c COLLECTION]... [--deep | --no-deep]
+  [--json]`: BM25 for each phrasing, then one hybrid `qmd query` on `--deep` or when BM25
+  finds fewer than `recall.deep.min_hits` distinct documents. Results are merged by
+  document and labelled `bm25`, `hybrid` or `bm25+hybrid`. The hybrid query has a time
+  budget and is skipped, with a one-line note, when the index has no vectors or the last
+  embed is older than `recall.deep.max_vector_age_h`.
+- Config keys `cron.backend`, `cron.priority`, `cron.embed`, `cron.embed_at`,
+  `cron.embed_deadline`, `cron.embed_max_sessions`, `cron.embed_on_battery`,
+  `cron.embed_catchup` and `recall.deep.*`; `cairn config set` and `unset` accept them.
+- The embed stamp `$XDG_STATE_HOME/cairn/qmd-embed.json` and the owed marker
+  `embed-owed.json`.
+- Error codes `SYNC_SCHEDULE_LEGACY` and `EMBED_OVERDUE`.
+
+### Changed
+- The scheduled sync no longer embeds every hour. Run `cairn cron install` once after the
+  upgrade: it removes the old hourly `cairn sync --cron` entry. Until then that entry keeps
+  embedding every hour and `cairn doctor` warns. Set `cron.embed` to `hourly` to keep the
+  old behaviour. If you downgrade later, run `cairn cron uninstall` first.
+- `cairn sync` mode flags are mutually exclusive. Unknown keys under `cron` are now
+  `CONFIG_UNKNOWN_KEY` errors (they were ignored).
+- `cairn doctor`: pending documents are an ok line, not a warning, within 30 hours of a
+  nightly embed (`--strict-index` still fails). The next step for an incomplete index is
+  `cairn embed`. The `cron` line became a `sync schedule` group.
+- Skills: `/recall` runs topic search through `cairn recall search`, runs one deep
+  (hybrid) search on "deep recall", "search harder" or `--deep`, or when no BM25 hit is
+  about the topic, and labels each hit `bm25`, `hybrid`, `bm25+hybrid` or `rg`. `/search`
+  accepts `--deep`. The setup skill drains a first-embed backlog with
+  `cairn embed --until-complete`.
+
 ## [2.20.1]
 
 ### Changed

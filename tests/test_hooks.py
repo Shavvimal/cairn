@@ -233,7 +233,10 @@ class TestHooks(StoreFixture):
         self.fake_qmd()
         self.native("codex", "cron-recovery")
         self.native("claude", "cron-claude")
+        # The cron backend on a non-macOS platform: the line runs under `nice`, whose
+        # absolute path shutil.which found, so it works under cron's minimal PATH.
         with (
+            patch("cairn.routine.is_macos", return_value=False),
             patch("cairn.admin._current_crontab", return_value=["# unrelated"]),
             patch("cairn.admin._cairn_invocation", return_value=[sys.executable, "-m", "cairn"]),
             patch("cairn.admin._write_crontab") as write,
@@ -241,6 +244,10 @@ class TestHooks(StoreFixture):
             self.assertEqual(admin._cron_install(), 0)
         lines = write.call_args.args[0]
         self.assertEqual(lines[0], "# unrelated")
+        self.assertTrue(lines[1].endswith("# cairn sync light"), lines[1])
+        self.assertIn("sync --light", lines[1])
+        self.assertTrue(lines[2].startswith("0 3 * * * "), lines[2])
+        self.assertIn("sync --nightly", lines[2])
         command = lines[1].split(" ", 5)[5]
         result = subprocess.run(
             ["/bin/sh", "-c", command],

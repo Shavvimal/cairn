@@ -138,8 +138,8 @@ _ENTRIES = (
         ("cairn", "doctor"),
         1,
         False,
-        ("src/cairn/admin.py:doctor_main",),
-        "doctor [CODE] suffix",
+        ("src/cairn/admin.py:doctor_main", "src/cairn/recall_search.py:run"),
+        "doctor [CODE] suffix; stderr code line; --json failure object",
     ),
     ErrorCode(
         "QMD_RUNTIME_FAILED",
@@ -157,13 +157,35 @@ _ENTRIES = (
         "The QMD index is empty, has no vectors, has pending documents, or its status "
         "could not be read.",
         "Keyword search can still work, but semantic search misses what is not embedded.",
-        "Run 'cairn sync --cron'; investigate if the pending count does not fall across runs.",
+        "Run 'cairn embed'; investigate if the pending count does not fall across runs.",
         ("cairn", "doctor", "--strict-index"),
         0,
         True,
         ("src/cairn/admin.py:_check_embeddings",),
         "doctor [CODE] suffix",
         exit_note="0 as a warning; 1 with --strict-index (an empty index stays a warning)",
+    ),
+    ErrorCode(
+        "SYNC_SCHEDULE_LEGACY",
+        "The scheduled sync is the pre-2.21 hourly entry that embeds every hour.",
+        "It uses the GPU every hour at normal priority.",
+        "Run 'cairn cron install'.",
+        ("cairn", "cron", "status"),
+        0,
+        False,
+        ("src/cairn/admin.py:_check_schedule",),
+        "doctor [CODE] suffix",
+    ),
+    ErrorCode(
+        "EMBED_OVERDUE",
+        "No QMD embed has finished in the last 48 hours while the nightly embed is configured.",
+        "Semantic and deep recall miss every document exported since then.",
+        "Run 'cairn cron status', then 'cairn embed'.",
+        ("cairn", "cron", "status"),
+        0,
+        True,
+        ("src/cairn/admin.py:_check_schedule",),
+        "doctor [CODE] suffix",
     ),
     ErrorCode(
         "HOOK_NOT_TRUSTED",
@@ -231,14 +253,15 @@ _ENTRIES = (
     ),
     ErrorCode(
         "RECALL_FAILED",
-        "recall could not answer: a bad argument, an unreadable file, a config error, or "
-        "a --refresh export that failed or timed out.",
+        "recall could not answer: a bad argument, an unreadable file, a config error, "
+        "a --refresh export that failed or timed out, or every BM25 search of "
+        "'recall search' failed.",
         "recall reads the exported store and never guesses a date or a session.",
         "Act on the argument or file the message names.",
         ("cairn", "recall", "list", "today"),
         1,
         False,
-        ("src/cairn/recall.py:main",),
+        ("src/cairn/recall.py:main", "src/cairn/recall_search.py:run"),
         "stderr code line; --json failure object",
     ),
     ErrorCode(
