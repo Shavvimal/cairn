@@ -382,6 +382,20 @@ class TestGranolaExport(_AdapterFixture):
         lines = path.read_text(encoding="utf-8").split("\n")
         self.assertEqual(lines[lines.index("status: raw") - 1], "provenance: imported")
 
+    def test_token_unavailable_reason_names_the_keychain_migration(self):
+        """Granola 7.726+ drops ``storage.dek`` and keeps the key in an app-only Keychain
+        item; with an ``.enc`` store on disk the reason says so and how to disable the
+        source. Without one, the old token advice stands."""
+        mod = self._activate({"granola-sessions": str(self.root / "granola")})
+        store = self.root / "granola"
+        store.mkdir(parents=True, exist_ok=True)
+        self.assertIn("sign out/in to the Granola app", mod.token_unavailable_reason())
+        (store / "stored-accounts.json.enc").write_bytes(b"\x00" * 40)
+        reason = mod.token_unavailable_reason()
+        self.assertIn("com.granola.app.dek", reason)
+        self.assertIn("cairn config set granola-sessions.enabled false", reason)
+        self.assertNotIn("sign out/in", reason)
+
     def test_source_headings_do_not_erase_handwritten_notes_on_reexport(self):
         mod = self._activate({"granola-sessions": str(self.root / "granola")})
         for field in ("notes_markdown", "summary_markdown"):

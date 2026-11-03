@@ -435,6 +435,21 @@ class TestGather(GapsFixture):
         stamp = time.time() - seconds_ago
         os.utime(path, (stamp, stamp))
 
+    def test_orphaned_rename_is_not_an_unexported_session(self):
+        """Claude Code sets a stale transcript aside as ``<id>.orphaned-<ms>-<hash>.jsonl``.
+        The export skips it, so the gap scan must not report it as a lag that no sync
+        can clear."""
+        first = self.native("claude", "orph-0001")
+        self.export()
+        orphan = first.with_name("orph-0001.orphaned-1793616442164-a5548821.jsonl")
+        orphan.write_text('{"type": "ai-title", "sessionId": "orph-0001"}\n', encoding="utf-8")
+        os.utime(orphan, None)  # newer than every export
+        claude = self.by_name(self.gather(index=False), "claude-code-sessions")
+        self.assertEqual(claude.unexported, ())
+        self.assertEqual(
+            [g.kind for g in classify(self.gather(index=False), datetime.now(UTC))], []
+        )
+
     def test_other_writes_do_not_hide_a_session_export_lag(self):
         first = self.native("claude", "pf-0001")
         self.native("claude", "pf-0002")

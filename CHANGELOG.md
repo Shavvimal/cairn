@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.21.1]
+
+### Fixed
+- Claude session discovery skips a transcript Claude Code renamed to
+  `<id>.orphaned-<ms>-<hash>.jsonl`. Its stem is not the session id, so the export
+  raised "transcript session ID does not match requested session", failed the
+  `claude-code-sessions` sync step and stopped the daily journal at the refresh. The
+  recall gap scan skips the same file, so it no longer reports an export lag that no
+  sync can clear.
+- The Claude spec target (2026-11-03, Claude Code 2.1.317) ignores the new
+  `session-owner` record, so a session with no turns is `empty` info, not
+  `zero-messages` drift.
+- Granola export names the real cause when Granola 7.726+ keeps its data key in an
+  app-only Keychain item and no longer writes `storage.dek`, and says how to disable
+  the source.
+
 ## [2.21.0]
 
 ### Added

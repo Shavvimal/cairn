@@ -140,11 +140,19 @@ class TestClassification(GuardFixture):
         assert finding is not None
         self.assertEqual((finding.kind, finding.severity), ("zero-messages", "error"))
         self.assertIn("rendered 0 messages from 5 records (100 bytes)", finding.message)
-        self.assertIn("spec target 2026-10-30 (Claude Code", finding.message)
+        self.assertIn("spec target 2026-11-03 (Claude Code", finding.message)
         self.assertTrue(finding.line.startswith("Error: parser drift: claude:demo-0001 "))
         # Known conversational records that render nothing are drift too.
         finding = _check("claude", _stats(user=2, assistant=2), {"messages_ordered": []})
         self.assertEqual(finding.kind if finding else None, "zero-messages")
+
+    def test_session_owner_is_a_known_control_record(self):
+        """Claude Code 2.1.317 writes a ``session-owner`` record before the first turn;
+        a session abandoned there is ``empty`` info, not ``zero-messages`` drift."""
+        stats = _stats(session_owner=1, mode=1, permission_mode=1, attachment=2, last_prompt=2)
+        finding = _check("claude", stats, {"messages_ordered": []})
+        assert finding is not None
+        self.assertEqual((finding.kind, finding.severity), ("empty", "info"))
 
     def test_control_only_file_is_empty_info(self):
         finding = _check("claude", _stats(attachment=3, last_prompt=1), {"messages_ordered": []})
