@@ -36,9 +36,9 @@ class SpecTarget:
 
 SPEC_TARGETS: dict[str, SpecTarget] = {
     "claude": SpecTarget(
-        checked="2026-10-30",
+        checked="2026-11-03",
         harness="Claude Code",
-        harness_version="2.1.314",
+        harness_version="2.1.317",
         store="JSONL, one file per session; subagents under <session>/subagents/",
         adapter_version="2.0.0",
         conversational=frozenset({"user", "assistant"}),
@@ -63,6 +63,7 @@ SPEC_TARGETS: dict[str, SpecTarget] = {
                 "permission-mode",
                 "pr-link",
                 "queue-operation",
+                "session-owner",
                 "summary",
                 "system",
                 "tools-used",

@@ -16,6 +16,8 @@ Auth chain (do not regress - see session 41b8c5c7 for the full investigation):
     -> first account's access_token (WorkOS).
   Fallbacks: supabase.json.enc, then legacy plaintext supabase.json.
   Locked Keychain / missing files / expired token all degrade gracefully (no hard fail).
+  Granola 7.726+ keeps the DEK in an app-only Keychain item instead of storage.dek;
+  :func:`token_unavailable_reason` names that state so the operator disables the source.
 
 Usage:
     granola-sessions export (--today | --all | --since DATE) [-q]
@@ -193,6 +195,29 @@ def get_auth_token() -> str | None:
         except (json.JSONDecodeError, ValueError, OSError):
             return None
     return None
+
+
+def token_unavailable_reason() -> str:
+    """Why :func:`get_auth_token` found nothing, as one actionable sentence.
+
+    Granola 7.726 moved the data-encryption key out of ``storage.dek`` into a
+    Keychain item (service ``com.granola.app.dek``) that only the signed app can read,
+    so the ``.enc`` stores stay sealed to every other process. That state is
+    recognisable from disk alone and is not a locked Keychain or a stale token.
+    """
+    if not DEK_PATH.exists() and (ENC_ACCOUNTS_PATH.exists() or ENC_SUPABASE_PATH.exists()):
+        return (
+            "this Granola build keeps its data key in an app-only Keychain item "
+            "(com.granola.app.dek) and no longer writes storage.dek, so cairn cannot "
+            "decrypt the token store. Disable the source with "
+            "'cairn config set granola-sessions.enabled false'; the exported meetings "
+            "stay searchable."
+        )
+    return (
+        "no usable auth token. Decryption needs the 'cryptography' extra "
+        "(uv sync --extra granola) and an unlocked Keychain; if both are in place, "
+        "sign out/in to the Granola app to refresh the token."
+    )
 
 
 class GranolaAuthError(RuntimeError):
@@ -807,12 +832,7 @@ class GranolaSource(ConversationSource):
         # cannot do its job. A non-zero exit lets `cairn sync` log this source as
         # FAILED (per-source, without blocking the others) instead of a false success.
         if not token and not cache_docs:
-            print(
-                "Granola export failed: no usable auth token. Decryption needs the "
-                "'cryptography' extra (uv sync --extra granola) and an unlocked Keychain; "
-                "if both are in place, sign out/in to the Granola app to refresh the token.",
-                file=sys.stderr,
-            )
+            print(f"Granola export failed: {token_unavailable_reason()}", file=sys.stderr)
             return 1
 
         # export_meetings filters on a YYYY-MM-DD string; derive it from the shared

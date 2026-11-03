@@ -37,6 +37,19 @@ class TestDiscovery(unittest.TestCase):
             names = sorted(p.name for p in jsonl.iter_session_files(base))
             self.assertEqual(names, ["aaaa1111.jsonl", "bbbb2222.jsonl"])
 
+    def test_iter_session_files_skips_orphaned_renames(self):
+        """Claude Code sets a stale transcript aside as ``<id>.orphaned-<ms>-<hash>``;
+        its stem is not the session id, so discovery must not offer it for export."""
+        with TemporaryDirectory() as d:
+            base = Path(d)
+            self._tree(base)
+            orphan = base / "-proj-one" / "aaaa1111.orphaned-1793616442164-a5548821.jsonl"
+            orphan.write_text('{"type": "ai-title", "sessionId": "aaaa1111"}\n', encoding="utf-8")
+            names = sorted(p.name for p in jsonl.iter_session_files(base))
+            self.assertEqual(names, ["aaaa1111.jsonl", "bbbb2222.jsonl"])
+            self.assertTrue(jsonl.is_orphaned_transcript(orphan))
+            self.assertFalse(jsonl.is_orphaned_transcript(base / "-proj-one" / "aaaa1111.jsonl"))
+
     def test_iter_missing_base_is_empty(self):
         self.assertEqual(jsonl.iter_session_files(Path("/no/such/base")), [])
 

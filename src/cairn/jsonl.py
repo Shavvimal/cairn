@@ -107,8 +107,23 @@ def parse_jsonl(file_path: Path) -> list[dict]:
     return [record for _, record in iter_jsonl(file_path)]
 
 
+ORPHANED_MARKER = ".orphaned-"
+"""Claude Code renames a stale transcript to ``<id>.orphaned-<ms>-<hash>.jsonl`` when
+it starts the same session id afresh. The stem is no longer the session id, and the
+file holds only the control records (title, agent name) of the abandoned start."""
+
+
+def is_orphaned_transcript(path: Path) -> bool:
+    """True for a transcript Claude Code set aside under an ``.orphaned-`` suffix."""
+    return ORPHANED_MARKER in path.stem
+
+
 def iter_session_files(base: Path) -> list[Path]:
-    """All non-empty ``*.jsonl`` session files one level under ``base``."""
+    """All non-empty ``*.jsonl`` session files one level under ``base``.
+
+    A renamed ``*.orphaned-*`` transcript is not a session: its stem does not match the
+    session id inside, so exporting it by stem can only fail.
+    """
     files: list[Path] = []
     if not base.is_dir():
         return files
@@ -116,6 +131,8 @@ def iter_session_files(base: Path) -> list[Path]:
         if not project_dir.is_dir():
             continue
         for jsonl in project_dir.glob("*.jsonl"):
+            if is_orphaned_transcript(jsonl):
+                continue
             if jsonl.stat().st_size > 0:
                 files.append(jsonl)
     return files
@@ -227,6 +244,7 @@ __all__ = [
     "JsonlStats",
     "find_session_jsonl",
     "find_subagent_jsonl",
+    "is_orphaned_transcript",
     "iter_jsonl",
     "iter_session_files",
     "iter_subagent_files",
