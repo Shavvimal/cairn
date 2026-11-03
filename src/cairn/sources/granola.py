@@ -202,8 +202,9 @@ def token_unavailable_reason() -> str:
 
     Granola 7.726 moved the data-encryption key out of ``storage.dek`` into a
     Keychain item (service ``com.granola.app.dek``) that only the signed app can read,
-    so the ``.enc`` stores stay sealed to every other process. That state is
-    recognisable from disk alone and is not a locked Keychain or a stale token.
+    so the ``.enc`` stores stay sealed to every other process. Disk alone shows the
+    missing key file, not the installed version, so the reason names the migration as
+    the likely cause and leaves the older-build case open.
     """
     if not DEK_PATH.exists() and (ENC_ACCOUNTS_PATH.exists() or ENC_SUPABASE_PATH.exists()):
         return (
