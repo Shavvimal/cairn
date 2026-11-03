@@ -207,11 +207,12 @@ def token_unavailable_reason() -> str:
     """
     if not DEK_PATH.exists() and (ENC_ACCOUNTS_PATH.exists() or ENC_SUPABASE_PATH.exists()):
         return (
-            "this Granola build keeps its data key in an app-only Keychain item "
-            "(com.granola.app.dek) and no longer writes storage.dek, so cairn cannot "
-            "decrypt the token store. Disable the source with "
-            "'cairn config set granola-sessions.enabled false'; the exported meetings "
-            "stay searchable."
+            f"an encrypted token store exists but {DEK_PATH.name} does not, so cairn "
+            "cannot decrypt it. Granola 7.726 and later keep that key in an app-only "
+            "Keychain item (com.granola.app.dek) that no other process can read; if the "
+            "installed Granola is that new, disable the source with "
+            "'cairn config set granola-sessions.enabled false' (the exported meetings "
+            "stay searchable). An older Granola restores the key on its next launch."
         )
     return (
         "no usable auth token. Decryption needs the 'cryptography' extra "

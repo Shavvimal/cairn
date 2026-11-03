@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude session discovery skips a transcript Claude Code renamed to
   `<id>.orphaned-<ms>-<hash>.jsonl`. Its stem is not the session id, so the export
   raised "transcript session ID does not match requested session", failed the
-  `claude-code-sessions` sync step and stopped the daily journal at the refresh.
+  `claude-code-sessions` sync step and stopped the daily journal at the refresh. The
+  recall gap scan skips the same file, so it no longer reports an export lag that no
+  sync can clear.
 - The Claude spec target (2026-11-03, Claude Code 2.1.317) ignores the new
   `session-owner` record, so a session with no turns is `empty` info, not
   `zero-messages` drift.

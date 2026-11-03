@@ -27,7 +27,7 @@ from pathlib import Path
 from .catalog import load_catalog, scan
 from .config import CairnConfig, Collection
 from .harnesses.antigravity import conversation_transcript, transcript_conversation_id
-from .jsonl import iter_subagent_files, subagent_meta_path
+from .jsonl import is_orphaned_transcript, iter_subagent_files, subagent_meta_path
 from .qmd import CollectionInfo, collection_details, read_stamp
 from .registry import SOURCES, Source
 from .runtime import qmd_resources
@@ -234,9 +234,15 @@ def _claude_files(store: Path, scan: _Scan) -> Iterable[Path]:
     for project in scan.scandir(store):
         if project.is_dir(follow_symlinks=False):
             for entry in scan.scandir(Path(project.path)):
-                # A top-level agent-*.jsonl is a legacy side thread the exporter skips.
-                if entry.name.endswith(".jsonl") and not entry.name.startswith("agent-"):
-                    yield Path(entry.path)
+                # A top-level agent-*.jsonl is a legacy side thread the exporter skips,
+                # and a *.orphaned-* rename is a transcript it never exports: counting
+                # either here would report a lag no sync can clear.
+                if not entry.name.endswith(".jsonl") or entry.name.startswith("agent-"):
+                    continue
+                path = Path(entry.path)
+                if is_orphaned_transcript(path):
+                    continue
+                yield path
 
 
 def _claude_mtime_ns(path: Path, mtime_ns: int, scan: _Scan) -> int:
