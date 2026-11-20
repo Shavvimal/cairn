@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.21.2]
+
+### Changed
+- The Antigravity spec target is 2026-11-20, agy 1.5.13 (it was 2026-10-30, agy 1.4.10).
+  The record types (`USER_INPUT`, `PLANNER_RESPONSE`, `GENERIC`), their fields and the
+  `conversation_summaries` columns the adapter reads are the same on a live 1.5.13 store,
+  so the parser did not change. `cairn doctor` and the `exporter_spec_target` stamp of
+  each Antigravity document show the new date.
+
 ## [2.21.1]
 
 ### Fixed

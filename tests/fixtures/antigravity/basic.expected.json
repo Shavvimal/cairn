@@ -1,7 +1,7 @@
 {
   "fixture_id": "antigravity/basic",
   "source": "antigravity",
-  "spec_target": "2026-10-30",
+  "spec_target": "2026-11-20",
   "expected_roles": [
     "user",
     "assistant",
