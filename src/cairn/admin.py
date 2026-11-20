@@ -35,6 +35,7 @@ from .config import (
     Collection,
     ConfigError,
     DeepRecall,
+    IndexPolicy,
     PeerPolicy,
     RoutineSpec,
     SyncSchedule,
@@ -234,6 +235,7 @@ def _config_show(as_json: bool) -> int:
                     "cron_schedule": cfg.cron_schedule,
                     "cron": asdict(cfg.schedule),
                     "recall": {"deep": asdict(cfg.recall.deep)},
+                    "index": asdict(cfg.index),
                     "collections": collections,
                     "invoke": _invoke_view(cfg),
                     "routines": {
@@ -254,6 +256,9 @@ def _config_show(as_json: bool) -> int:
     print("recall      :")
     for key, value in asdict(cfg.recall.deep).items():
         print(f"  deep.{key:17} {value}")
+    print("index       :")
+    for key, value in asdict(cfg.index).items():
+        print(f"  {key:22} {value}")
     print("collections :")
     for c in collections:
         state = "enabled " if c["enabled"] else "disabled"
@@ -470,8 +475,10 @@ def _set_profile(data: dict, key: str, parts: list[str], value: str) -> None:
 
 _SCHEDULE_FIELDS = tuple(f.name for f in fields(SyncSchedule))
 _DEEP_FIELDS = tuple(f.name for f in fields(DeepRecall))
+_INDEX_FIELDS = tuple(f.name for f in fields(IndexPolicy))
 _SCHEDULE_KEY_HINT = "cron.<" + "|".join(_SCHEDULE_FIELDS) + ">"
 _DEEP_KEY_HINT = "recall.deep.<" + "|".join(_DEEP_FIELDS) + ">"
+_INDEX_KEY_HINT = "index.<" + "|".join(_INDEX_FIELDS) + ">"
 _SCHEDULE_CHOICES = {
     "backend": SCHEDULE_BACKENDS,
     "priority": SCHEDULE_PRIORITIES,
@@ -495,6 +502,15 @@ def _coerce_schedule(field: str, value: str) -> object:
     if field == "embed_catchup":
         return _coerce_bool(f"cron.{field}", value)
     return value  # schedule, embed_at, embed_deadline: validated on reload
+
+
+def _coerce_index(field: str, value: str) -> object:
+    """An ``index.<field>`` value from the command line, typed for the config file."""
+    if field not in _INDEX_FIELDS:
+        raise ValueError(f"unknown index field {field!r}; use {_INDEX_KEY_HINT}")
+    if field == "analyze":
+        return _coerce_bool(f"index.{field}", value)
+    return _coerce_int(f"index.{field}", value)
 
 
 def _coerce_deep(field: str, value: str) -> object:
@@ -548,8 +564,16 @@ def _set_dotted(data: dict, key: str, value: str) -> list[str]:
             data["recall"]["deep"] = {}
         data["recall"]["deep"][parts[2]] = _coerce_deep(parts[2], value)
         return []
-    if parts[0] in ("recall", "cron"):
-        raise ValueError(f"unsupported key {key!r}; use {_SCHEDULE_KEY_HINT} or {_DEEP_KEY_HINT}")
+    if parts[0] == "index" and len(parts) == 2:
+        if not isinstance(data.get("index"), dict):
+            data["index"] = {}
+        data["index"][parts[1]] = _coerce_index(parts[1], value)
+        return []
+    if parts[0] in ("recall", "cron", "index"):
+        raise ValueError(
+            f"unsupported key {key!r}; use {_SCHEDULE_KEY_HINT}, {_DEEP_KEY_HINT} "
+            f"or {_INDEX_KEY_HINT}"
+        )
     if key in _TOP_LEVEL_KEYS:
         data[key] = value
         return []
@@ -608,7 +632,7 @@ def _set_dotted(data: dict, key: str, value: str) -> list[str]:
 
     raise ValueError(
         f"unsupported key {key!r}. Use data_root, qmd_binary, {_SCHEDULE_KEY_HINT}, "
-        f"{_DEEP_KEY_HINT}, "
+        f"{_DEEP_KEY_HINT}, {_INDEX_KEY_HINT}, "
         "<collection>.store|enabled|since|on_hook, invoke.<codex|claude|antigravity>."
         "model|effort|profile|timeout_s|idle_timeout_s|quiet_after_s|stall_after_s, "
         f"{_BILLING_KEY_HINT}, {_PROFILE_KEY_HINT}, or {_ROUTINE_KEY_HINT}"
@@ -629,6 +653,12 @@ def _unset_dotted(data: dict, key: str) -> str:
         if not isinstance(deep, dict) or parts[2] not in deep:
             raise ValueError(f"{key} is not set")
         del deep[parts[2]]
+        return f"Removed {key}; the default applies"
+    if parts[0] == "index" and len(parts) == 2 and parts[1] in _INDEX_FIELDS:
+        index = data.get("index")
+        if not isinstance(index, dict) or parts[1] not in index:
+            raise ValueError(f"{key} is not set")
+        del index[parts[1]]
         return f"Removed {key}; the default applies"
     if parts[0] == "invoke" and len(parts) == 4 and parts[2] == "profiles":
         profiles = ((data.get("invoke") or {}).get(parts[1]) or {}).get("profiles")
@@ -661,6 +691,7 @@ def _unset_dotted(data: dict, key: str) -> str:
             return f"Removed {key}"
     raise ValueError(
         f"unsupported key {key!r} for unset. Use {_SCHEDULE_KEY_HINT}, {_DEEP_KEY_HINT}, "
+        f"{_INDEX_KEY_HINT}, "
         "routines.<name>, routines.<name>.<optional field>, routines.<name>.outputs.<key> or "
         "invoke.<claude|codex>.profiles.<name>"
     )

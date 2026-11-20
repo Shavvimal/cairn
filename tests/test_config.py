@@ -137,6 +137,23 @@ class TestScheduleAndRecallBlocks(unittest.TestCase):
         self.assertEqual(config.SyncSchedule().schedule, config.DEFAULT_CRON_SCHEDULE)
         self.assertEqual(config.DeepRecall().max_vector_age_h, 72)
 
+    def test_index_block_defaults_and_invalid_values(self):
+        self.assertEqual(config.parse_index(None), config.IndexPolicy())
+        self.assertEqual(config.parse_index({}), config.IndexPolicy())
+        policy = config.parse_index(
+            {"update_timeout_s": 600, "collection_timeout_s": 45, "analyze": False}
+        )
+        self.assertEqual(policy, config.IndexPolicy(600, 45, False))
+        for spec, needle in (
+            ({"update_timeout_s": 0}, "index.update_timeout_s must be an integer from 1 to 3600"),
+            ({"collection_timeout_s": 3601}, "index.collection_timeout_s must be an integer"),
+            ({"update_timeout_s": True}, "index.update_timeout_s must be an integer"),
+            ({"analyze": "yes"}, "index.analyze must be true or false"),
+            ({"vacuum": True}, "index has unknown keys: vacuum"),
+        ):
+            with self.subTest(spec=spec), self.assertRaisesRegex(config.ConfigError, needle):
+                config.parse_index(spec)
+
     def test_invalid_schedule_values_name_the_key(self):
         bad = {
             "schedule": "hourly",

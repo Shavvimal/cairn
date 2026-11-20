@@ -100,6 +100,7 @@ class TestConfigShow(_ConfigFixture):
                 "data_root",
                 "qmd_binary",
                 "cron_schedule",
+                "index",
                 "cron",
                 "recall",
                 "collections",
@@ -165,6 +166,34 @@ class TestConfigSet(_ConfigFixture):
         code, _out, err = _quiet(admin._config_unset, "cron.embed_at")
         self.assertEqual(code, 1)
         self.assertIn("is not set", err)
+
+    def test_set_and_unset_index_keys(self):
+        self.assertEqual(admin._config_set("index.update_timeout_s", "600"), 0)
+        self.assertEqual(admin._config_set("index.analyze", "false"), 0)
+        config.get_config.cache_clear()
+        shown = self._show_json()["index"]
+        self.assertEqual(shown["update_timeout_s"], 600)
+        self.assertIs(shown["analyze"], False)
+        self.assertEqual(shown["collection_timeout_s"], 300)
+        raw = json.loads(self.cfg_path.read_text())
+        self.assertEqual(raw["index"]["update_timeout_s"], 600)  # typed, not "600"
+        code, out, _err = _quiet(admin._config_unset, "index.update_timeout_s")
+        self.assertEqual(code, 0, out)
+        config.get_config.cache_clear()
+        self.assertEqual(self._show_json()["index"]["update_timeout_s"], 120)
+        code, _out, err = _quiet(admin._config_unset, "index.update_timeout_s")
+        self.assertEqual(code, 1)
+        self.assertIn("is not set", err)
+        for key, value, expected in (
+            ("index.update_timeout_s", "soon", "index.update_timeout_s expects an integer"),
+            ("index.update_timeout_s", "0", "index.update_timeout_s must be an integer from 1"),
+            ("index.zz", "1", "unknown index field 'zz'"),
+            ("index.a.b", "1", "unsupported key 'index.a.b'"),
+        ):
+            with self.subTest(key=key, value=value):
+                code, _out, err = _quiet(admin._config_set, key, value)
+                self.assertEqual(code, 1, err)
+                self.assertIn(expected, err)
 
     def test_set_into_a_null_block(self):
         data = json.loads(self.cfg_path.read_text())

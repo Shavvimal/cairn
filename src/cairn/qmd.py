@@ -3,13 +3,16 @@
 Identical across sources except for the collection name; the project and repo
 descriptions come from the shared catalog in :mod:`cairn.config`. Every QMD
 mutation goes through the ``qmd`` CLI (never by editing its index file directly),
-so QMD owns its own state.
+so QMD owns its own state. The one exception is :func:`analyze_if_stale`, which runs
+SQLite's ``ANALYZE`` on the index: it writes planner statistics only, names no QMD
+table and changes no QMD row.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Iterable, Iterator
@@ -18,12 +21,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .config import get_config, state_home
+from .config import IndexPolicy, get_config, state_home
 from .procs import run_capped
 from .runtime import qmd_resources
 from .storage import atomic_write, lock_path, locked
 
-COLLECTION_TIMEOUT = 30  # discovery/registration must not hold sync locks indefinitely
+COLLECTION_TIMEOUT = 30  # discovery must not hold sync locks indefinitely
 
 
 @contextmanager
@@ -450,6 +453,8 @@ def ensure_collection(
     path: Path,
     qmd_binary: str | None = None,
     known: set[str] | None = None,
+    *,
+    timeout: int | None = None,
 ) -> str:
     """Idempotently register ``path`` as the qmd collection ``name``.
 
@@ -464,7 +469,13 @@ def ensure_collection(
 
     Pass ``known`` (a pre-fetched :func:`list_collections` set) to avoid one
     ``collection list`` call per collection when registering several at once.
+
+    ``timeout`` is ``index.collection_timeout_s``; ``None`` takes its default. QMD
+    scans the whole directory during the add, so a first registration of a large
+    store needs minutes, not the seconds a listing needs.
     """
+    if timeout is None:
+        timeout = IndexPolicy().collection_timeout_s
     qmd_binary = qmd_binary or get_config().qmd_binary
     path = Path(path)
     if not _has_markdown(path):
@@ -476,15 +487,107 @@ def ensure_collection(
     try:
         result = run_capped(
             [qmd_binary, "collection", "add", str(path), "--name", name],
-            timeout=COLLECTION_TIMEOUT,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"qmd collection add timed out after {COLLECTION_TIMEOUT}s") from exc
+        raise RuntimeError(
+            f"qmd collection add timed out after {timeout}s; QMD keeps the files it "
+            "scanned, so the next sync continues. Raise index.collection_timeout_s if "
+            "it repeats"
+        ) from exc
     if result.returncode != 0:
         if result.stderr.strip():
             print(f"      {result.stderr.strip()}", file=sys.stderr)
         return "FAILED"
     return "added"
+
+
+# ---------------------------------------------------------------------------
+# Planner statistics: keep ``qmd update`` fast on a large index
+# ---------------------------------------------------------------------------
+#
+# QMD 2.9.0 removes orphaned vectors at the end of every ``qmd update`` with a query
+# that joins its vector rows to its documents. QMD never runs ``ANALYZE``, and
+# without statistics SQLite picks a plan that scans one collection's documents for
+# every vector row: 183 s on an index with 1.46 million vectors and 17,000 documents,
+# 1.9 s on the same index after ``ANALYZE`` (measured 2026-11-20, QMD 2.9.0, macOS
+# arm64). cairn therefore refreshes the statistics itself, before ``qmd update``.
+#
+# The statement is schema-neutral on purpose: ``ANALYZE`` with no table name, so
+# cairn still knows nothing about QMD's tables. ``analysis_limit`` bounds the work
+# to a sample of each index, which is what keeps it at seconds on a 10 GB file.
+
+ANALYZE_BUSY_S = 5.0  # another writer (an MCP server, a manual qmd) gets this long
+ANALYZE_SAMPLE_ROWS = 1000
+# Row-count ratios drive the plan, so the statistics go stale only when the index
+# changes size by a real fraction. One fifth re-analyses a growing index a few times
+# during a first embed and about never after it.
+ANALYZE_SIZE_DRIFT = 0.2
+
+
+def analyze_stamp_path() -> Path:
+    """``$XDG_STATE_HOME/cairn/qmd-analyze.json``."""
+    return state_home() / "cairn" / "qmd-analyze.json"
+
+
+def _analyzed_size(database: Path) -> int | None:
+    """The index size at the last analyse of ``database``, else ``None``."""
+    try:
+        data = json.loads(analyze_stamp_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(data, dict)
+        or data.get("version") != STAMP_VERSION
+        or data.get("database") != str(database)
+        or type(data.get("size")) is not int
+        or data["size"] <= 0
+    ):
+        return None
+    return data["size"]
+
+
+def analyze_if_stale(database: Path | None = None) -> str:
+    """Refresh the index's planner statistics when its size moved since the last time.
+
+    Returns ``"no-index"`` (QMD has not created the file yet), ``"current"`` (the size
+    is within ``ANALYZE_SIZE_DRIFT`` of the last analysed size) or ``"analyzed"``.
+    Raises ``sqlite3.Error`` when SQLite cannot analyse the file, for example while
+    another process holds the write lock past ``ANALYZE_BUSY_S``. Call it under
+    :func:`locked_index`. A stamp that cannot be written warns on stderr: the next
+    sync then analyses again, which costs seconds and breaks nothing.
+    """
+    database = database or qmd_resources()[1]
+    try:
+        size = database.stat().st_size
+    except OSError:
+        return "no-index"
+    if size == 0:
+        return "no-index"
+    previous = _analyzed_size(database)
+    if previous is not None and abs(size - previous) <= previous * ANALYZE_SIZE_DRIFT:
+        return "current"
+    # mode=rw: never create a database where QMD has none.
+    connection = sqlite3.connect(
+        f"{database.as_uri()}?mode=rw", uri=True, timeout=ANALYZE_BUSY_S, isolation_level=None
+    )
+    try:
+        connection.execute(f"PRAGMA analysis_limit={ANALYZE_SAMPLE_ROWS}")
+        connection.execute("ANALYZE")
+    finally:
+        connection.close()
+    payload = {
+        "version": STAMP_VERSION,
+        "database": str(database),
+        # Read again: the statistics tables themselves grow a small file.
+        "size": database.stat().st_size,
+        "analyzed_at": _now_iso(),
+    }
+    try:
+        atomic_write(analyze_stamp_path(), json.dumps(payload) + "\n")
+    except OSError as exc:
+        print(f"Warning: could not record the qmd analyse: {exc}", file=sys.stderr)
+    return "analyzed"
 
 
 # ---------------------------------------------------------------------------

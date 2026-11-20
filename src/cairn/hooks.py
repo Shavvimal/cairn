@@ -189,12 +189,18 @@ def _update_index(config: CairnConfig, collection: str, lock_timeout_s: float) -
             with locked_index(blocking=False):
                 known = list_collections(config.qmd_binary)
                 status = ensure_collection(
-                    collection, config.output_dir(collection), config.qmd_binary, known
+                    collection,
+                    config.output_dir(collection),
+                    config.qmd_binary,
+                    known,
+                    timeout=config.index.collection_timeout_s,
                 )
                 if status not in ("added", "exists"):
                     raise RuntimeError(f"collection registration {status}: {collection}")
                 started_ns = time.time_ns()
-                result = run_capped([config.qmd_binary, "update"], timeout=EXPORT_TIMEOUT_S)
+                result = run_capped(
+                    [config.qmd_binary, "update"], timeout=config.index.update_timeout_s
+                )
                 if result.returncode:
                     raise RuntimeError(
                         f"qmd update failed: {(result.stderr or result.stdout)[-2000:]}"

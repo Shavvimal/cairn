@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.22.0]
+
+### Added
+- The `index` config block: `index.update_timeout_s` (default 120) bounds one
+  `qmd update` in a sync, the hook worker and an invoke publish;
+  `index.collection_timeout_s` (default 300) bounds one `qmd collection add`;
+  `index.analyze` (default true). `cairn config set`, `unset` and `show` know the keys.
+- `cairn sync` runs SQLite `ANALYZE` on the QMD index before `qmd update`, on the first
+  sync and again when the index file changed size by more than a fifth. QMD 2.9.0
+  removes orphaned vectors at the end of every update and never analyses its index:
+  on an index with 1.46 million vectors that step took 183 s without planner
+  statistics and 1.9 s with them, so every sync failed at the fixed 120 s limit. The
+  statement names no QMD table and writes statistics only. A refusal logs
+  `[qmd-analyze] skipped - REASON` and the update still runs.
+- Error code `QMD_UPDATE_SLOW`: a failed `qmd-update` step logs the active
+  `index.update_timeout_s` and the code.
+
+### Changed
+- `qmd collection add` gets 300 s instead of 30 s. A first registration scans the whole
+  directory: a store of 14,000 exported sessions passed 30 s on a new index, and the
+  first sync failed at `qmd-collections`. The timeout message now says that QMD keeps
+  the scanned files and names the key.
+
 ## [2.21.2]
 
 ### Changed

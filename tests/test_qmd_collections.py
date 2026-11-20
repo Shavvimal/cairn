@@ -161,7 +161,7 @@ class TestEnsureCollectionsWiring(_SyncConfigFixture):
     def test_only_enabled_collections_considered(self):
         seen: list[str] = []
 
-        def fake_ensure(name, path, qmd_binary, known):
+        def fake_ensure(name, path, qmd_binary, known, **_options):
             seen.append(name)
             return "skipped"
 
@@ -180,7 +180,7 @@ class TestEnsureCollectionsWiring(_SyncConfigFixture):
     def test_summary_counts_added_and_skipped(self):
         self._seed_markdown("claude-code-sessions")
 
-        def fake_ensure(name, path, qmd_binary, known):
+        def fake_ensure(name, path, qmd_binary, known, **_options):
             return "added" if name == "claude-code-sessions" else "skipped"
 
         with (

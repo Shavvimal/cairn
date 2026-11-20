@@ -8,7 +8,7 @@ CLI. Each source under :mod:`cairn.sources` subclasses
 
 from __future__ import annotations
 
-__version__ = "2.21.2"
+__version__ = "2.22.0"
 
 from . import (
     cli,

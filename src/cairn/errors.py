@@ -166,6 +166,19 @@ _ENTRIES = (
         exit_note="0 as a warning; 1 with --strict-index (an empty index stays a warning)",
     ),
     ErrorCode(
+        "QMD_UPDATE_SLOW",
+        "'qmd update' failed or passed index.update_timeout_s during a sync.",
+        "Exports still reach disk, but nothing new enters the index until an update finishes.",
+        "Read the '[qmd-update]' lines in the sync log. On a timeout, check that "
+        "index.analyze is true and that no '[qmd-analyze] skipped' line precedes it, then "
+        "raise index.update_timeout_s ('cairn config set index.update_timeout_s 600').",
+        ("cairn", "config", "show"),
+        1,
+        True,
+        ("src/cairn/sync.py:_index_stages",),
+        "the 'cairn sync' log line after a failed qmd-update step",
+    ),
+    ErrorCode(
         "SYNC_SCHEDULE_LEGACY",
         "The scheduled sync is the pre-2.21 hourly entry that embeds every hour.",
         "It uses the GPU every hour at normal priority.",
