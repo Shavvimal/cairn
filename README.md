@@ -531,6 +531,29 @@ the pending count in `cairn doctor`: if it does not fall across runs, a document
 fit in one session, so investigate instead of retrying. BM25 keyword search works as soon as a session is exported and `qmd update`
 runs (the SessionEnd hook and the hourly light sync do both); semantic and deep search see it after the next nightly embed.
 
+### Large indexes
+
+Three `index.*` keys bound QMD's index commands (`cairn config set index.KEY VALUE`):
+
+| Key | Default | What it bounds |
+|---|---|---|
+| `index.update_timeout_s` | 120 | one `qmd update` in a sync, the hook worker and an invoke publish |
+| `index.collection_timeout_s` | 300 | one `qmd collection add`, which scans the whole directory the first time |
+| `index.analyze` | `true` | `cairn sync` runs SQLite `ANALYZE` on the QMD index before `qmd update` |
+
+QMD 2.9.0 removes orphaned vectors at the end of every `qmd update`, and it never runs
+`ANALYZE`. Without planner statistics that step took 183 s on an index with 1.46 million
+vectors and 17,000 documents, and 1.9 s on the same index with them (one machine, QMD
+2.9.0, macOS arm64). So `cairn sync` refreshes the statistics itself: on the first sync, and
+again when the index file changed size by more than a fifth. It logs `[qmd-analyze] ok`
+when it ran and `[qmd-analyze] skipped - REASON` when SQLite refused (the update still
+runs). `ANALYZE` writes statistics only; cairn names no QMD table and changes no QMD row.
+Set `index.analyze` to `false` to turn it off. A failed `qmd-update` step logs the active
+limit and points to `cairn errors QMD_UPDATE_SLOW`.
+
+A first `qmd collection add` that still passes its limit is not lost: QMD keeps the files
+it scanned, and the next sync continues.
+
 ### Deep recall
 
 `cairn recall search QUERY -q VARIANT... [-c COLLECTION]... [--deep | --no-deep] [--json]`

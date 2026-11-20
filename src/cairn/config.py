@@ -325,6 +325,21 @@ class RecallPolicy:
 
 
 @dataclass(frozen=True)
+class IndexPolicy:
+    """The ``index`` block: how long cairn waits for QMD's index commands.
+
+    ``update_timeout_s`` bounds one ``qmd update`` (sync, hook worker and invoke
+    publish). ``collection_timeout_s`` bounds one ``qmd collection add``, which scans
+    the whole directory on a first registration. ``analyze`` lets ``cairn sync``
+    refresh SQLite's planner statistics in the index before ``qmd update``.
+    """
+
+    update_timeout_s: int = 120
+    collection_timeout_s: int = 300
+    analyze: bool = True
+
+
+@dataclass(frozen=True)
 class CairnConfig:
     """Read-only, validated view of ``cairn.config.json``."""
 
@@ -345,6 +360,7 @@ class CairnConfig:
     routines: dict[str, RoutineSpec] = field(default_factory=dict)
     schedule: SyncSchedule = SyncSchedule()
     recall: RecallPolicy = RecallPolicy()
+    index: IndexPolicy = IndexPolicy()
 
     def output_dir(self, collection: str) -> Path:
         """Where a collection's exported markdown lives: ``data_root / <collection>``."""
@@ -813,6 +829,9 @@ _DEEP_FIELDS = tuple(f.name for f in fields(DeepRecall))
 _DEEP_NULLABLE_INT = {"max_vector_age_h": (1, 8760)}
 _DEEP_INT = {"min_hits": (0, 50), "timeout_s": (1, 600), "n": (1, 50)}
 _DEEP_BOOL = ("auto", "rerank")
+_INDEX_FIELDS = tuple(f.name for f in fields(IndexPolicy))
+# One hour is the embed step's own limit; an index command that needs longer is stuck.
+INDEX_TIMEOUT_RANGE = (1, 3600)
 
 
 def _plain_values(where: str, spec: object, allowed: tuple[str, ...]) -> dict:
@@ -887,6 +906,20 @@ def parse_schedule(spec: object) -> SyncSchedule:
     if "embed_catchup" in values:
         out["embed_catchup"] = _bool("cron.embed_catchup", values["embed_catchup"])
     return SyncSchedule(**out)
+
+
+def parse_index(spec: object) -> IndexPolicy:
+    """Validate the ``index`` block."""
+    if spec is None:
+        return IndexPolicy()
+    values = _plain_values("index", spec, _INDEX_FIELDS)
+    out: dict = {}
+    for key in ("update_timeout_s", "collection_timeout_s"):
+        if key in values:
+            out[key] = _int_in(f"index.{key}", values[key], *INDEX_TIMEOUT_RANGE)
+    if "analyze" in values:
+        out["analyze"] = _bool("index.analyze", values["analyze"])
+    return IndexPolicy(**out)
 
 
 def parse_recall(spec: object) -> RecallPolicy:
@@ -1075,6 +1108,7 @@ def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig
 
     schedule = parse_schedule(data.get("cron"))
     recall = parse_recall(data.get("recall"))
+    index = parse_index(data.get("index"))
     raw_invoke = data.get("invoke")
     if raw_invoke is None:
         raw_invoke = {}
@@ -1105,6 +1139,7 @@ def _build(data: dict, config_path: Path, repo_root: Path | None) -> CairnConfig
         routines=routines,
         schedule=schedule,
         recall=recall,
+        index=index,
     )
 
 
@@ -1150,6 +1185,7 @@ __all__ = [
     "Collection",
     "ConfigError",
     "DeepRecall",
+    "IndexPolicy",
     "InvokePolicy",
     "PeerPolicy",
     "ProfileSpec",
@@ -1167,6 +1203,7 @@ __all__ = [
     "find_repo_root",
     "get_config",
     "load_config_from",
+    "parse_index",
     "parse_recall",
     "parse_schedule",
     "profile_names",

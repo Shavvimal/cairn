@@ -55,6 +55,7 @@ exit; the command decides it.
 | `QMD_INDEX_INCOMPLETE` | 0 as a warning; 1 with --strict-index (an empty index stays a warning) | yes | The QMD index is empty, has no vectors, has pending documents, or its status could not be read. |
 | `QMD_MISSING` | 1 | no | The configured qmd_binary is not on PATH and is not a file. |
 | `QMD_RUNTIME_FAILED` | 1 | no | 'qmd status' failed, so QMD cannot open its index. |
+| `QMD_UPDATE_SLOW` | 1 | yes | 'qmd update' failed or passed index.update_timeout_s during a sync. |
 | `RECALL_DEGRADED` | 0: the status is data ('status: degraded', verdict 'degraded-miss') | yes | Coverage is degraded: export lag, index lag, unindexed files, a disabled source, a missing store or a missing rg. |
 | `RECALL_FAILED` | 1 | no | recall could not answer: a bad argument, an unreadable file, a config error, a --refresh export that failed or timed out, or every BM25 search of 'recall search' failed. |
 | `RECALL_VERIFY_FAILED` | 4 | no | A journal citation does not resolve to an unchanged digest frame, or a quote is not in a cited frame. |
@@ -387,6 +388,17 @@ exit; the command decides it.
 - Retryable: no
 - Shown in: doctor [CODE] suffix
 - Raised at: `src/cairn/admin.py:_check_qmd_runtime`
+
+## QMD_UPDATE_SLOW
+
+- Meaning: 'qmd update' failed or passed index.update_timeout_s during a sync.
+- Why: Exports still reach disk, but nothing new enters the index until an update finishes.
+- Next step: Read the '[qmd-update]' lines in the sync log. On a timeout, check that index.analyze is true and that no '[qmd-analyze] skipped' line precedes it, then raise index.update_timeout_s ('cairn config set index.update_timeout_s 600').
+- Verify: `cairn config show`
+- Exit: 1
+- Retryable: yes
+- Shown in: the 'cairn sync' log line after a failed qmd-update step
+- Raised at: `src/cairn/sync.py:_index_stages`
 
 ## RECALL_DEGRADED
 

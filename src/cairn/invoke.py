@@ -134,7 +134,6 @@ PUMP_POLL_S = 0.1
 KILL_GRACE_S = 10.0
 INDEX_LOCK_TIMEOUT_S = 60.0
 INDEX_RETRY_INTERVAL_S = 1.0
-QMD_UPDATE_TIMEOUT_S = 120
 STDERR_TAIL = 2000
 
 # Environment a peer must not inherit: the caller's identity hints and plugin roots
@@ -503,14 +502,20 @@ def update_index(config: CairnConfig, collections: list[str], timeout_s: float) 
                 registered = set(known)
                 for name in collections:
                     status = ensure_collection(
-                        name, config.output_dir(name), config.qmd_binary, known
+                        name,
+                        config.output_dir(name),
+                        config.qmd_binary,
+                        known,
+                        timeout=config.index.collection_timeout_s,
                     )
                     if status == "FAILED":
                         raise RuntimeError(f"qmd collection add failed for {name}")
                     if status in ("added", "exists"):
                         registered.add(name)
                 started_ns = time.time_ns()
-                result = run_capped([config.qmd_binary, "update"], timeout=QMD_UPDATE_TIMEOUT_S)
+                result = run_capped(
+                    [config.qmd_binary, "update"], timeout=config.index.update_timeout_s
+                )
                 if result.returncode:
                     raise RuntimeError(
                         f"qmd update failed: {(result.stderr or result.stdout)[-STDERR_TAIL:]}"

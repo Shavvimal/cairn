@@ -26,6 +26,7 @@ the durable hook worker, wait on by design.
 """
 
 import argparse
+import sqlite3
 import subprocess
 import sys
 import time
@@ -39,6 +40,7 @@ from .procs import run_capped
 from .qmd import (
     IndexStatus,
     _has_markdown,
+    analyze_if_stale,
     clear_owed,
     embed_failures,
     ensure_collection,
@@ -420,7 +422,13 @@ def _ensure_collections(config: CairnConfig) -> str:
     for name, coll in sorted(config.collections.items()):
         if not coll.sync.enabled:
             continue
-        status = ensure_collection(name, config.output_dir(name), config.qmd_binary, known)
+        status = ensure_collection(
+            name,
+            config.output_dir(name),
+            config.qmd_binary,
+            known,
+            timeout=config.index.collection_timeout_s,
+        )
         if status == "added":
             added.append(name)
         elif status == "exists":
@@ -534,17 +542,43 @@ def _registered(config: CairnConfig) -> list[str]:
     ]
 
 
+def _analyze_stage(config: CairnConfig) -> None:
+    """Refresh the index's planner statistics before ``qmd update`` (``index.analyze``).
+
+    An optimisation, so it never fails the run: a refusal (the file is busy, SQLite
+    cannot open it) is logged as ``skipped`` and ``qmd update`` still runs, under its
+    own limit. Call it with the index lock held.
+    """
+    if not config.index.analyze:
+        return
+    start = time.time()
+    try:
+        outcome = analyze_if_stale()
+    except (sqlite3.Error, OSError) as exc:
+        log(f"  [qmd-analyze] skipped - {exc}")
+        return
+    if outcome == "analyzed":
+        log(f"  [qmd-analyze] ok ({time.time() - start:.1f}s)")
+
+
 def _index_stages(config: CairnConfig, record) -> bool:
     """Collections and ``qmd update`` under the index lock; return whether the update ran."""
     qmd = config.qmd_binary
+    timeout = config.index.update_timeout_s
     with locked_index():
         record(
             "qmd-collections",
             run_inproc("qmd-collections", lambda: _ensure_collections(config)),
         )
+        _analyze_stage(config)
         registered = _registered(config)  # before the update: what it can have scanned
         started_ns = time.time_ns()
-        updated = run_step("qmd-update", [qmd, "update"])
+        updated = run_step("qmd-update", [qmd, "update"], timeout=timeout)
+        if not updated:
+            log(
+                f"      index.update_timeout_s is {timeout}; "
+                "'cairn errors QMD_UPDATE_SLOW' names the causes"
+            )
         record("qmd-update", updated)
         if updated:
             record_update(started_ns, registered)

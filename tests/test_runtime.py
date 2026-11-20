@@ -243,6 +243,8 @@ class TestCollectionTimeouts(StoreFixture):
         probe = self.root / "qmd"
         data = json.loads(self.config.read_text())
         data["qmd_binary"] = str(probe)
+        # The add limit is index.collection_timeout_s; the listing keeps its constant.
+        data["index"] = {"collection_timeout_s": 1}
         self.config.write_text(json.dumps(data))
         config.get_config.cache_clear()
         cfg = config.get_config()
