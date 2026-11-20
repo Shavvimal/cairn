@@ -128,9 +128,9 @@ SPEC_TARGETS: dict[str, SpecTarget] = {
         ),
     ),
     "antigravity": SpecTarget(
-        checked="2026-10-30",
+        checked="2026-11-20",
         harness="agy",
-        harness_version="1.4.10",
+        harness_version="1.5.13",
         store="JSONL transcript per conversation under brain/<id>/",
         adapter_version="2.0.0",
         conversational=frozenset({"USER_INPUT", "PLANNER_RESPONSE"}),
