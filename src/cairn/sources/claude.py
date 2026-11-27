@@ -39,6 +39,7 @@ from ..frontmatter import (
     resolve_title,
     title_line,
 )
+from ..images import ImageSet, images_dir_of
 from ..jsonl import (
     JsonlStats,
     find_session_jsonl,
@@ -70,6 +71,8 @@ COLLECTION = "claude-code-sessions"
 _config = get_config()
 OUTPUT_DIR = _config.output_dir(COLLECTION)
 PROJECTS_BASE = _config.collection(COLLECTION).require_store()
+# Which images the export saves beside each document: off, pasted or all.
+IMAGE_MODE = _config.collection(COLLECTION).images
 
 
 # =============================================================================
@@ -166,6 +169,44 @@ def _content_text(content: object) -> str:
     return ""
 
 
+def _saved_images(
+    record: dict, blocks: list[dict], images: ImageSet | None
+) -> list[tuple[str | None, str]]:
+    """``(placeholder, markdown)`` for each image of a user prompt that was saved.
+
+    Claude Code writes ``[Image #N]`` into the prompt text where the user pasted, and
+    lists the numbers in ``imagePasteIds``, one per image block, in block order. A
+    record whose list does not match its blocks gives no placeholder: the picture is
+    still saved and its link goes after the text.
+    """
+    if images is None or not blocks:
+        return []
+    ids = record.get("imagePasteIds")
+    if not (
+        isinstance(ids, list)
+        and len(ids) == len(blocks)
+        and all(isinstance(n, int) and not isinstance(n, bool) for n in ids)
+    ):
+        ids = [None] * len(blocks)
+    saved: list[tuple[str | None, str]] = []
+    for paste_id, block in zip(ids, blocks, strict=True):
+        markdown = images.pasted(block, paste_id)
+        if markdown is not None:
+            saved.append((f"[Image #{paste_id}]" if paste_id is not None else None, markdown))
+    return saved
+
+
+def _with_images(text: str, saved: list[tuple[str | None, str]]) -> str:
+    """``text`` with each placeholder replaced by its image, the rest appended."""
+    loose: list[str] = []
+    for placeholder, markdown in saved:
+        if placeholder is not None and placeholder in text:
+            text = text.replace(placeholder, markdown, 1)
+        else:
+            loose.append(markdown)
+    return "\n\n".join(part for part in (text, *loose) if part)
+
+
 def _peer_message(record: dict, timestamp: str | None) -> Message | None:
     """An ``### Agent`` turn for a message another Claude session sent, else ``None``."""
     origin = record.get("origin")
@@ -182,7 +223,9 @@ def _peer_message(record: dict, timestamp: str | None) -> Message | None:
     return {"role": "agent", "timestamp": timestamp, "text": f"{label}:\n\n{body}"}
 
 
-def extract_session_data(records: Iterable[dict], *, sidechain: bool = False) -> dict:
+def extract_session_data(
+    records: Iterable[dict], *, sidechain: bool = False, images: ImageSet | None = None
+) -> dict:
     """Extract session metadata + ordered messages from JSONL records in one pass.
 
     ``records`` can be a generator (the largest subagent transcript is 68 MB), so
@@ -191,7 +234,13 @@ def extract_session_data(records: Iterable[dict], *, sidechain: bool = False) ->
     kept, ``sessionId`` becomes ``parent_session_id`` and ``session_id`` becomes
     ``agent-<agentId>``. ``finished`` is True when the last assistant record ended
     its turn (``stop_reason == "end_turn"``).
+
+    ``images`` collects the pictures of the conversation for the caller to write: a
+    pasted one replaces its ``[Image #N]`` placeholder in the rendered turn with a
+    markdown image, and (in mode ``all``) one inside a tool result replaces
+    ``[image]``. ``user_messages`` and the title keep the text as the user typed it.
     """
+    tool_image = images.tool if images is not None else None
     data: dict[str, Any] = {
         "session_id": None,
         "date": None,
@@ -277,6 +326,7 @@ def extract_session_data(records: Iterable[dict], *, sidechain: bool = False) ->
             elif isinstance(content, list):
                 user_texts = []
                 tool_turns = []
+                pasted: list[dict] = []
                 for item in content:
                     if not isinstance(item, dict):
                         continue
@@ -286,15 +336,19 @@ def extract_session_data(records: Iterable[dict], *, sidechain: bool = False) ->
                         if text and not is_meta:
                             data["user_messages"].append(text)
                             user_texts.append(text)
+                    elif itype == "image" and not is_meta:
+                        pasted.append(item)
                     elif itype == "tool_result":
                         tool_turns.append(
                             {
                                 "role": "tool",
                                 "timestamp": timestamp,
-                                "text": _tool_result_text(item.get("content")),
+                                "text": _tool_result_text(item.get("content"), tool_image),
                             }
                         )
-                joined = "\n".join(user_texts).strip()
+                joined = _with_images(
+                    "\n".join(user_texts).strip(), _saved_images(record, pasted, images)
+                )
                 if joined:
                     data["messages_ordered"].append(
                         {
@@ -487,6 +541,19 @@ def _link_index(refs: list[SubagentRef], parent_doc: Path) -> None:
         ref["path"] = f"./{parent_doc.stem}/agent-{ref['agent_id']}.md"
 
 
+def _image_revision() -> str:
+    """The image mode as a part of a revision, so a changed mode re-renders a document.
+
+    Empty for ``off``: with images off, a revision is the one cairn wrote before it
+    saved images, and no document re-renders.
+    """
+    return "" if IMAGE_MODE == "off" else f"images={IMAGE_MODE}"
+
+
+def _new_image_set() -> ImageSet | None:
+    return None if IMAGE_MODE == "off" else ImageSet(IMAGE_MODE)
+
+
 def parent_revision(jsonl: Path, index: list[SubagentRef]) -> str:
     """The parent's native revision: its transcript plus the index it renders.
 
@@ -498,7 +565,7 @@ def parent_revision(jsonl: Path, index: list[SubagentRef]) -> str:
     rows = sorted(
         (json.dumps(dict(ref), sort_keys=True) for ref in index),
     )
-    payload = file_revision(jsonl) + json.dumps(rows)
+    payload = file_revision(jsonl) + json.dumps(rows) + _image_revision()
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -508,6 +575,7 @@ def child_revision(agent_jsonl: Path) -> str:
     meta = subagent_meta_path(agent_jsonl)
     if meta.exists():
         payload += file_revision(meta)
+    payload += _image_revision()
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -729,7 +797,8 @@ class ClaudeSource(ConversationSource):
         repo_subdir = repo_subdir_from_name(project, repo) if project and repo else None
 
         stats = JsonlStats()
-        data = extract_session_data(_records(jsonl_path, stats=stats))
+        images = _new_image_set()
+        data = extract_session_data(_records(jsonl_path, stats=stats), images=images)
         if not self.guard_parse(session_id, jsonl_path, stats, data):
             raise self.refusal(session_id)
         if not data["messages_ordered"] and not data.get("session_id"):
@@ -748,6 +817,11 @@ class ClaudeSource(ConversationSource):
         # included), or the next run would see a different revision and re-render.
         _link_index(index, planned)
         data["source_revision"] = parent_revision(jsonl_path, index)
+        # Images first: a document must never link a file that is not there. A
+        # collision moves the document to another name in the same folder, so the
+        # links hold.
+        if images is not None:
+            images.write(images_dir_of(planned))
         output_file = self.export_one(session_id, cast(SessionData, data), existing_file)
         if output_file is not None and index and output_file != planned:
             # export_one moved the document off a colliding path: relink the index
@@ -811,7 +885,10 @@ class ClaudeSource(ConversationSource):
 
         meta = read_subagent_meta(child)
         stats = JsonlStats()
-        data = extract_session_data(_records(child, _CHILD_SKIP_PREFIXES, stats), sidechain=True)
+        images = _new_image_set()
+        data = extract_session_data(
+            _records(child, _CHILD_SKIP_PREFIXES, stats), sidechain=True, images=images
+        )
         if not self.guard_parse(child_id, child, stats, data, top_level=False):
             raise self.refusal(child_id)
         if data.get("parent_session_id") != parent_id:
@@ -847,6 +924,8 @@ class ClaudeSource(ConversationSource):
         data["source_revision"] = revision
         data["parent_document"] = parent_doc.name
 
+        if images is not None:
+            images.write(images_dir_of(planned))
         output_file = self.export_one(child_id, cast(SessionData, data), planned)
         if output_file is None:
             raise ValueError(f"cannot round-trip existing document {planned}")

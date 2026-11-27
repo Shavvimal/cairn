@@ -219,8 +219,13 @@ def newest_mtime(session_jsonl: Path) -> float:
     return newest
 
 
-def tool_result_text(content: object) -> str:
-    """Stringify tool_result content (a string, or a list of text/image parts)."""
+def tool_result_text(content: object, image: Callable[[dict], str | None] | None = None) -> str:
+    """Stringify tool_result content (a string, or a list of text/image parts).
+
+    ``image`` turns one image part into its markdown (an exporter that saves the
+    picture passes it); without it, or when it returns ``None``, the part reads
+    ``[image]``.
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -231,7 +236,7 @@ def tool_result_text(content: object) -> str:
                 if itype == "text":
                     parts.append(item.get("text", ""))
                 elif itype == "image":
-                    parts.append("[image]")
+                    parts.append((image(item) if image else None) or "[image]")
                 else:
                     parts.append(str(item))
             elif isinstance(item, str):

@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.23.0]
+
+### Added
+- The Claude export saves the images of a session as files. An image the user pasted
+  into a prompt goes to an `images/` folder beside the session document, under a name
+  that is the first 16 hex characters of its SHA-256, and the `[Image #N]` placeholder
+  in the exported turn becomes `![Image #N](./images/<hash>.png)`. Until now the export
+  kept the placeholder only, so the picture was lost when Claude Code deleted the
+  transcript. QMD indexes `**/*.md`, so it does not index the image files; an agent
+  that reads a session opens the file through the link. See
+  `docs/pasted-images-spec.md`.
+- `collections.claude-code-sessions.images`: `off`, `pasted` (the default) or `all`.
+  `all` also saves the images inside tool results (screenshots, image files read) and
+  replaces their `[image]` placeholder. `cairn config set claude.images all` sets it and
+  `cairn config show` prints it. The key is refused on a collection whose source saves
+  no images.
+- The recall and search skills say how to open an image that a session document links.
+
+### Changed
+- A Claude document's `source_revision` includes the image mode unless the mode is
+  `off`. The first sync after the upgrade therefore renders the Claude sessions of its
+  window once more, and so does a sync after the mode changes.
+  `cairn claude export --all` adds the images of every session whose transcript still
+  exists.
+
 ## [2.22.0]
 
 ### Added

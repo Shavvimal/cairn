@@ -162,6 +162,13 @@ In Codex, type `$search` in place of `/search`; `/recall` below is `$recall` the
    For an rg hit, use its `qmd://COLLECTION/<path relative to the collection Path>` form,
    or read the file directly.
 
+   In a Claude session document, an image the user pasted is a markdown image: the
+   label `Image #N` and the target `./images/HASH.png`. The image files are not indexed,
+   so a search matches only the text around one. If the user asks to see an image, the
+   target is relative to the document's folder: for `qmd://COLLECTION/DIR/FILE.md` it is
+   `PATH/DIR/images/HASH.png`, where `PATH` is the `Path:` line of
+   `qmd collection show COLLECTION`. Read that file with the host's file tool.
+
 Do NOT: expand the query into variants, fetch full documents unless asked, synthesise a
 "One Thing", run parallel searches across variants, or add `--deep` unless the user
 passed it - that's `/recall`'s job.

@@ -244,6 +244,22 @@ the counts and every failure with its reason.
    Organise by type: sessions (what was worked on, decisions, status), notes (research,
    plans), meetings (discussions, attendees), docs (architecture, APIs).
 
+7. **Open an image only when the answer needs it.** In a Claude session document, an
+   image the user pasted is a markdown image: the label `Image #N` and the target
+   `./images/HASH.png` (or `.jpg`, `.gif`, `.webp`). QMD does not index the image file,
+   so a search matches only the text around it. The target is relative to the
+   document's folder. For `qmd://COLLECTION/DIR/FILE.md`, get the collection directory
+   from the `Path:` line of:
+
+   ```bash
+   qmd collection show COLLECTION
+   ```
+
+   The image is `PATH/DIR/images/HASH.png`. Read that file with the host's file tool.
+   Do not open images to summarise a session. Open one when the user asks what an
+   image showed, or when the turn cannot be understood without it. A turn that reads
+   `[Image #N]` with no target has no saved image: say so.
+
 → Go to Step 4 (Gaps).
 
 ## Step 4: Gaps

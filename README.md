@@ -407,6 +407,13 @@ Each collection carries a `sync` block — its on/off switch and policy:
 - `since` — export window (`today` | `yesterday` | `Nd` | `Nw` | `YYYY-MM-DD`, default `1d`).
 - `on_hook` — explicit false opts a source out of its host's SessionEnd hook. Each host defaults to exporting its own session. Legacy `sync --hook` retains the Claude-default policy.
 
+**Images.** The Claude export saves the images you paste into a prompt. Each one becomes a file in an `images/` folder beside the session document, named by its content hash, and the `[Image #N]` placeholder in the exported turn becomes a markdown image link to it. `"images"` on the `claude-code-sessions` collection sets the scope: `off`, `pasted` (the default) or `all`, which also saves the images inside tool results such as screenshots. QMD indexes markdown only, so the files are not searched; an agent that reads a session opens them through the link.
+
+```bash
+cairn config set claude.images all
+cairn claude export --all    # add the images of older sessions whose transcripts still exist
+```
+
 To change later, edit `sync.enabled` per collection and re-run `cairn doctor` — no reinstall.
 
 **Config profiles.** Besides the built-in `review`, `edit` and `full`, Claude and Codex take
