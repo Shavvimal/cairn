@@ -25,6 +25,7 @@ from .config import (
     BILLING_PEERS,
     EMBED_MODES,
     EMBED_ON_BATTERY,
+    IMAGE_COLLECTIONS,
     INVOKE_PEERS,
     PROFILE_PEERS,
     ROUTINE_REQUIRED,
@@ -46,6 +47,7 @@ from .config import (
     routine_paths,
     user_config_path,
 )
+from .images import IMAGE_MODES
 from .qmd import (
     TESTED_QMD_VERSION,
     IndexStatus,
@@ -163,6 +165,7 @@ def _collection_view(name: str, coll: Collection) -> dict:
         "since": coll.sync.since,
         "on_hook": coll.sync.on_hook,
         "store": str(coll.store) if coll.store else None,
+        "images": coll.images,
         # Sessions all have a store; a store-less collection is service-docs or plain
         # notes (for example the journal a routine writes).
         "type": (
@@ -264,7 +267,8 @@ def _config_show(as_json: bool) -> int:
         state = "enabled " if c["enabled"] else "disabled"
         hook = "" if c["on_hook"] is None else f" on_hook={c['on_hook']}"
         store = f" store={c['store']}" if c["store"] else ""
-        print(f"  {c['name']:22} [{state}] since={c['since']}{hook}{store}")
+        images = f" images={c['images']}" if c["name"] in IMAGE_COLLECTIONS else ""
+        print(f"  {c['name']:22} [{state}] since={c['since']}{hook}{images}{store}")
         for src_name, src_path in (c.get("service_sources") or {}).items():
             print(f"      docs[{src_name}] = {src_path}")
     print("invoke      :")
@@ -621,6 +625,16 @@ def _set_dotted(data: dict, key: str, value: str) -> list[str]:
         if field == "store":
             spec["store"] = value
             return []
+        if field == "images":
+            if collection not in IMAGE_COLLECTIONS:
+                raise ValueError(
+                    f"{collection} cannot save images; images is a key of "
+                    f"{', '.join(IMAGE_COLLECTIONS)} only"
+                )
+            if value not in IMAGE_MODES:
+                raise ValueError(f"images expects {'|'.join(IMAGE_MODES)}, got {value!r}")
+            spec["images"] = value
+            return []
         if field in _COLLECTION_SYNC_FIELDS:
             coerced = _coerce(field, value)
             spec.setdefault("sync", {})[field] = coerced
@@ -633,7 +647,7 @@ def _set_dotted(data: dict, key: str, value: str) -> list[str]:
     raise ValueError(
         f"unsupported key {key!r}. Use data_root, qmd_binary, {_SCHEDULE_KEY_HINT}, "
         f"{_DEEP_KEY_HINT}, {_INDEX_KEY_HINT}, "
-        "<collection>.store|enabled|since|on_hook, invoke.<codex|claude|antigravity>."
+        "<collection>.store|enabled|since|on_hook, claude.images, invoke.<codex|claude|antigravity>."
         "model|effort|profile|timeout_s|idle_timeout_s|quiet_after_s|stall_after_s, "
         f"{_BILLING_KEY_HINT}, {_PROFILE_KEY_HINT}, or {_ROUTINE_KEY_HINT}"
     )

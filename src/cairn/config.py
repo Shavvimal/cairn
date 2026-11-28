@@ -29,6 +29,8 @@ from functools import lru_cache
 from importlib import resources
 from pathlib import Path
 
+from .images import DEFAULT_IMAGE_MODE, IMAGE_MODES
+
 CONFIG_FILENAME = "cairn.config.json"
 EXAMPLE_FILENAME = "cairn.config.example.json"
 ENV_OVERRIDE = "CAIRN_CONFIG"
@@ -150,6 +152,9 @@ class Collection:
     data (e.g. ``~/.claude/projects``). ``service_sources`` is populated only for
     ``service-docs``. ``extra`` holds source-specific scalars (e.g. an API base URL).
     ``sync`` is the data-driven enable/window/hook policy (see :class:`SyncPolicy`).
+    ``images`` says which images of a session the exporter saves beside its document
+    (:data:`cairn.images.IMAGE_MODES`); it is ``off`` for every collection whose source
+    cannot save them (see :data:`IMAGE_COLLECTIONS`).
     """
 
     name: str
@@ -157,6 +162,7 @@ class Collection:
     service_sources: tuple[ServiceSource, ...] = ()
     extra: dict[str, str] = field(default_factory=dict)
     sync: SyncPolicy = field(default_factory=SyncPolicy)
+    images: str = "off"
 
     def require_store(self) -> Path:
         """The native source store, failing loudly if this collection has none.
@@ -443,7 +449,24 @@ def _config_path() -> Path:
     )
 
 
-_COLLECTION_KEYS = frozenset({"store", "sync", "extra", "service_sources"})
+_COLLECTION_KEYS = frozenset({"store", "sync", "extra", "service_sources", "images"})
+# The collections whose source saves images. The key is refused on any other, so the
+# config cannot claim a setting that the exporter never reads.
+IMAGE_COLLECTIONS = ("claude-code-sessions",)
+
+
+def _image_mode(name: str, spec: dict) -> str:
+    if name not in IMAGE_COLLECTIONS:
+        if "images" in spec:
+            raise ConfigError(
+                f"Collection {name!r} cannot save images: 'images' is a key of "
+                f"{', '.join(IMAGE_COLLECTIONS)} only.",
+                code="CONFIG_UNKNOWN_KEY",
+            )
+        return "off"
+    if "images" not in spec:
+        return DEFAULT_IMAGE_MODE
+    return _choice(f"collections.{name}.images", spec["images"], IMAGE_MODES)
 
 
 def _parse_collection(name: str, spec: dict) -> Collection:
@@ -474,6 +497,7 @@ def _parse_collection(name: str, spec: dict) -> Collection:
         service_sources=sources,
         extra=dict(spec.get("extra") or {}),
         sync=sync,
+        images=_image_mode(name, spec),
     )
 
 

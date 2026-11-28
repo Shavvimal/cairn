@@ -9,6 +9,7 @@ as documented in `../SKILL.md`. Claude additionally has `resume`.
 - Data source
 - Frontmatter schema
 - Subagent documents
+- Images
 - Resume (Claude-only)
 - Memory import (Claude-only)
 - Internal sync hook
@@ -106,6 +107,45 @@ parent when the parent or any child changed in the window, because background ag
 finish after the parent goes quiet. A malformed `meta.json` does not block the family:
 its index row reads `agent <id> (meta unreadable)`, the parent and the other subagents
 export, and the run then fails (exit 1, or a failed hook job that retries).
+
+## Images
+
+The export saves the images of a session as files and links them from the turn that
+carried them.
+
+```text
+claude-code-sessions/<project>/YYYY-MM-DD-{short}.md             the session document
+claude-code-sessions/<project>/images/<hash>.png                 its images
+claude-code-sessions/<project>/YYYY-MM-DD-{short}/agent-<id>.md  a subagent document
+claude-code-sessions/<project>/YYYY-MM-DD-{short}/images/<hash>.png   a subagent's images
+```
+
+`<hash>` is the first 16 hex characters of the file's SHA-256, so one image pasted
+into two sessions of a project is one file and a re-export writes nothing. The
+extension is `png`, `jpg`, `gif` or `webp`.
+
+In the turn, the `[Image #N]` placeholder that Claude Code wrote becomes
+`![Image #N](./images/<hash>.png)`. The link is relative to the document's own folder.
+An image with no placeholder in the text gets its link after the text. The title keeps
+the placeholder.
+
+`images` on the `claude-code-sessions` collection sets what is saved:
+
+| Value | Saved |
+|---|---|
+| `off` | nothing; the export keeps `[Image #N]` and `[image]` |
+| `pasted` (default) | the images in the user's prompts |
+| `all` | also the images inside tool results, whose `[image]` becomes `![image](./images/<hash>.jpg)` |
+
+```bash
+cairn config set claude.images all
+cairn claude export --all      # add the images of older sessions
+```
+
+A changed value re-renders each session at its next export. Files already saved stay
+when the value goes back to `off`. An image whose media type is not one of the four,
+or whose data does not decode, keeps its placeholder. A prompt sent while Claude was
+working is not exported, so its images are not saved.
 
 ## Resume (Claude-only)
 
