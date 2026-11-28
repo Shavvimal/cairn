@@ -52,7 +52,6 @@ files = [
     "src",
     "tests",
     "scripts/check-test-discriminates.py",
-    ".agents/skills/skill-review/scripts/measure.py",
 ]
 check_untyped_defs = true
 warn_unused_ignores = true

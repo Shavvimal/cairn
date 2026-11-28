@@ -161,9 +161,15 @@ quoted phrases after "Use when the user says" are the trigger list.
 The test checks the trigger text, not the harness router. A pass means the description
 still names each request; it does not prove the harness picks that skill.
 
-Before you open a PR that touches `skills/` or `.agents/skills/`, review each changed
-skill with the repo-local `skill-review` skill (`/skill-review skills/NAME` in Claude
-Code, `$skill-review skills/NAME` in Codex) and paste its VERDICT lines in the PR body.
+Before you open a PR that touches `skills/`, have each changed skill reviewed in a fresh
+context (a person, or an agent that did not write the change) against the authoring
+rules of its hosts: the Agent Skills specification, and the skill pages of Claude Code,
+Codex and Antigravity. Paste the verdict in the PR body. cairn carried a repo-local
+`skill-review` skill for this until 2.23.0; it now lives in the maintainer's personal
+plugin set, so that one copy serves every repository. The limits that cairn enforces
+stay as tests: `tests/test_skill_frontmatter.py` (description length and the YAML
+subset), `tests/test_skill_routing.py`, `tests/test_docs_cli.py`,
+`tests/test_plugin_manifest.py` and `tests/test_public_hygiene.py`.
 Write skill text plainly: imperative steps, British spelling, no marketing adjectives.
 
 ## Pull request process

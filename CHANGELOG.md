@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+- The repo-local `skill-review` skill (`.agents/skills/skill-review` and its
+  `.claude/skills` link), with its rubric, references and `measure.py`. The review
+  skill now lives in the maintainer's personal plugin set, so one copy serves every
+  repository. Not shipped in the plugin, so no version changes.
+
+### Changed
+- `tests/test_skill_review.py` is now `tests/test_skill_frontmatter.py`. It keeps the
+  two checks on shipped skills (description length, and frontmatter inside the YAML
+  subset that Codex and Antigravity parse) with the subset check moved in from
+  `measure.py`.
+
 ## [2.23.0]
 
 ### Added
